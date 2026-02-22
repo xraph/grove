@@ -1,0 +1,126 @@
+---
+title: Migrating from Bun
+description: How to migrate existing bun ORM projects to Grove with zero downtime.
+---
+
+Grove is designed for seamless migration from [bun](https://bun.uptrace.dev/). Existing bun models work with Grove unchanged thanks to the dual tag system.
+
+## Step 1: Add Grove Dependency
+
+```bash
+go get github.com/xraph/grove
+```
+
+## Step 2: Swap the Import
+
+Replace `bun.BaseModel` with `grove.BaseModel`:
+
+```go
+// Before
+import "github.com/uptrace/bun"
+
+type User struct {
+    bun.BaseModel `bun:"table:users,alias:u"`
+    ID   int64  `bun:"id,pk,autoincrement"`
+    Name string `bun:"name,notnull"`
+}
+
+// After — bun tags still work!
+import "github.com/xraph/grove"
+
+type User struct {
+    grove.BaseModel `bun:"table:users,alias:u"`
+    ID   int64  `bun:"id,pk,autoincrement"`
+    Name string `bun:"name,notnull"`
+}
+```
+
+## Step 3: Replace the DB Connection
+
+```go
+// Before (bun)
+sqldb, _ := sql.Open("pgx", dsn)
+db := bun.NewDB(sqldb, pgdialect.New())
+
+// After (grove)
+pgdb := pgdriver.New()
+pgdb.Open(ctx, dsn, driver.WithPoolSize(20))
+db, _ := grove.Open(pgdb)
+```
+
+## Step 4: Update Query Syntax
+
+Most bun query patterns have direct Grove equivalents:
+
+| Bun | Grove |
+|-----|-------|
+| `db.NewSelect(&users).Where("? = ?", bun.Ident("active"), true)` | `db.NewSelect(&users).Where("active = $1", true)` |
+| `db.NewInsert(&user).Exec(ctx)` | `db.NewInsert(&user).Exec(ctx)` |
+| `db.NewUpdate(&user).WherePK().Exec(ctx)` | `db.NewUpdate(&user).WherePK().Exec(ctx)` |
+| `db.NewDelete(&user).WherePK().Exec(ctx)` | `db.NewDelete(&user).WherePK().Exec(ctx)` |
+
+Key difference: Grove uses native PostgreSQL `$1` placeholders instead of bun's `?` with `bun.Ident()`.
+
+## Step 5: Incrementally Adopt Grove Tags
+
+Once your project works with Grove, you can gradually migrate tags to access extended features:
+
+```go
+type User struct {
+    grove.BaseModel `grove:"table:users,alias:u"`          // Migrated
+
+    ID    int64  `grove:"id,pk,autoincrement"`              // Migrated
+    Name  string `bun:"name,notnull"`                       // Still bun — works fine
+    Email string `grove:"email,notnull,unique"`              // Migrated
+    SSN   string `grove:"ssn,privacy:pii"`                   // New: privacy tag
+}
+```
+
+## Step 6: Add Grove Features
+
+After migration, take advantage of Grove-specific features:
+
+### Privacy Hooks
+
+```go
+db.Hooks().AddHook(&hook.TenantIsolation{Column: "tenant_id"})
+```
+
+### Modular Migrations
+
+```go
+var Migrations = migrate.NewGroup("myapp")
+// Register Go-code migrations with dependency ordering
+```
+
+### Multi-Driver Support
+
+```go
+// Same models work across databases
+pgdb := pgdriver.New()
+pgdb.Open(ctx, pgDSN, driver.WithPoolSize(20))
+pgDB, _ := grove.Open(pgdb)
+
+mydb := mysqldriver.New()
+mydb.Open(ctx, myDSN, driver.WithPoolSize(20))
+myDB, _ := grove.Open(mydb)
+```
+
+## What Changes
+
+| Feature | Bun | Grove |
+|---------|-----|-------|
+| Placeholders | `?` | Native per driver (`$1`, `?`) |
+| Tag namespace | `bun:"..."` | `grove:"..."` (bun fallback) |
+| Privacy tags | Not available | `privacy:pii`, `privacy:sensitive` |
+| Multi-driver | PostgreSQL-focused | PG, MySQL, SQLite, MongoDB |
+| Migrations | SQL files | Go code with dependency ordering |
+| Hooks | Query hooks | Privacy hooks with deny/modify/filter |
+
+## What Stays the Same
+
+- Model structure and field definitions
+- Relation tags (`has-one`, `has-many`, `belongs-to`, `many-to-many`)
+- Query builder patterns (NewSelect, NewInsert, NewUpdate, NewDelete)
+- Soft delete behavior
+- Transaction API

@@ -1,0 +1,109 @@
+---
+title: Native Query Syntax
+description: Each Grove driver exposes its database's native query idioms.
+---
+
+Grove does not abstract databases behind a unified DSL. Instead, each driver exposes the native syntax of its target database. This means maximum performance and syntax fidelity — you write the same queries you would write by hand.
+
+## Why Native Syntax?
+
+Unified query DSLs inevitably hit limitations:
+
+- They can't express database-specific features (PostgreSQL's `DISTINCT ON`, MySQL's `USE INDEX`, MongoDB's `$lookup`)
+- They add translation overhead between DSL and native SQL/BSON
+- Developers still need to know the target database's syntax for complex queries
+
+Grove takes a different approach: each driver is a first-class query builder for its database.
+
+## PostgreSQL
+
+```go
+// $1 placeholders, ILIKE, DISTINCT ON, jsonb operators
+db.NewSelect(&users).
+    Where("email ILIKE $1", "%@example.com").
+    Where("metadata->>'tier' = $2", "premium").
+    DistinctOn("email").
+    Limit(50).
+    Scan(ctx)
+```
+
+## MySQL
+
+```go
+// ? placeholders, backtick quoting, USE INDEX, ON DUPLICATE KEY
+db.NewSelect(&users).
+    Where("email LIKE ?", "%@example.com").
+    UseIndex("idx_email").
+    Limit(50).
+    Scan(ctx)
+
+db.NewInsert(&user).
+    OnDuplicateKeyUpdate().
+    Set("name = VALUES(name)").
+    Exec(ctx)
+```
+
+## SQLite
+
+```go
+// ? placeholders, SQLite-specific pragmas
+db.NewSelect(&users).
+    Where("email LIKE ?", "%@example.com").
+    Limit(50).
+    Scan(ctx)
+```
+
+## MongoDB
+
+```go
+// Native BSON syntax, aggregation pipelines
+db.NewFind(&users).
+    Filter(bson.M{"email": bson.M{"$regex": "@example.com"}}).
+    Sort(bson.D{{Key: "created_at", Value: -1}}).
+    Limit(50).
+    Scan(ctx)
+
+db.NewAggregate(&results).
+    Match(bson.M{"status": "active"}).
+    Group(bson.M{"_id": "$department", "count": bson.M{"$sum": 1}}).
+    Sort(bson.D{{Key: "count", Value: -1}}).
+    Scan(ctx)
+```
+
+## Shared Model, Different Syntax
+
+The same model definition works across all drivers. Only the query syntax changes:
+
+```go
+type User struct {
+    grove.BaseModel `grove:"table:users,alias:u"`
+
+    ID    int64  `grove:"id,pk,autoincrement"`
+    Name  string `grove:"name,notnull"`
+    Email string `grove:"email,notnull,unique"`
+}
+
+// PostgreSQL
+pgDB.NewSelect(&users).Where("email ILIKE $1", pattern).Scan(ctx)
+
+// MySQL
+myDB.NewSelect(&users).Where("email LIKE ?", pattern).Scan(ctx)
+
+// MongoDB
+mgDB.NewFind(&users).Filter(bson.M{"email": bson.M{"$regex": pattern}}).Scan(ctx)
+```
+
+## Raw Queries
+
+Every driver supports raw queries for maximum control:
+
+```go
+// PostgreSQL
+var users []User
+db.NewRaw("SELECT * FROM users WHERE email ILIKE $1 LIMIT $2", pattern, 50).
+    Scan(ctx, &users)
+
+// MySQL
+db.NewRaw("SELECT * FROM users WHERE email LIKE ? LIMIT ?", pattern, 50).
+    Scan(ctx, &users)
+```

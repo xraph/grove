@@ -1,0 +1,138 @@
+---
+title: Architecture
+description: How Grove's packages, drivers, and query pipeline work together.
+---
+
+## Package Overview
+
+```
+grove/
+├── grove.go                    # Top-level DB handle, Open(), convenience methods
+├── model.go                    # Model registration, struct reflection, field cache
+├── schema/                     # Schema introspection & struct tag parsing
+│   ├── table.go                # Table metadata derived from struct tags
+│   ├── field.go                # Field metadata, column mapping
+│   ├── relation.go             # HasOne, HasMany, BelongsTo, ManyToMany
+│   └── tag.go                  # Dual tag parser: grove:"..." + bun:"..." fallback
+├── driver/                     # Driver interface definitions
+│   ├── driver.go               # Core Driver interface
+│   ├── dialect.go              # Dialect interface (quoting, placeholders, types)
+│   ├── result.go               # Unified result/rows interfaces
+│   └── tx.go                   # Transaction interface
+├── pgdriver/                   # PostgreSQL driver (pgx-based)
+├── mysqldriver/                # MySQL driver
+├── sqlitedriver/               # SQLite driver
+├── mongodriver/                # MongoDB driver (native BSON)
+├── hook/                       # Privacy & lifecycle hook system
+├── stream/                     # Streaming iterator & pipeline transforms
+│   ├── stream.go               # Stream[T], New, NewWithHooks, Next, Value, All, Collect
+│   ├── cursor.go               # Cursor interface, DecodeFunc[T]
+│   ├── pipeline.go             # Map, Filter, Reduce, Chunk, Take, ForEach
+│   ├── batch.go                # BatchCursor for paginated sources
+│   └── changefeed.go           # ChangeStream[T], ChangeEvent[T], ChangeSource[T]
+├── migrate/                    # Migration orchestrator (database-agnostic)
+├── scan/                       # High-performance result scanning
+├── internal/                   # Buffer pools, tag parser
+└── grovetest/                  # Testing utilities
+```
+
+## Query Pipeline
+
+When a query is executed, Grove follows this pipeline. The path branches after execution depending on whether results are collected eagerly (`.Scan`) or streamed lazily (`.Stream`):
+
+```
+                    ┌──────────────┐
+                    │  User Code   │
+                    │  db.NewSelect│
+                    └──────┬───────┘
+                           │
+                    ┌──────▼───────┐
+                    │   Model      │
+                    │   Registry   │  Cached metadata (reflect-once)
+                    └──────┬───────┘
+                           │
+                    ┌──────▼───────┐
+                    │  Pre-Query   │
+                    │   Hooks      │  Inject filters, deny, modify
+                    └──────┬───────┘
+                           │
+                    ┌──────▼───────┐
+                    │   Query      │
+                    │   Builder    │  Driver-specific native syntax
+                    └──────┬───────┘
+                           │
+                    ┌──────▼───────┐
+                    │   Execute    │
+                    │   (Driver)   │  Raw query to database
+                    └──────┬───────┘
+                           │
+              ┌────────────┴────────────┐
+              │                         │
+       ┌──────▼───────┐         ┌──────▼───────┐
+       │   Scan       │         │  Stream[T]   │
+       │   Results    │         │  (Cursor)    │  Lazy, one row at a time
+       └──────┬───────┘         └──────┬───────┘
+              │                        │
+       ┌──────▼───────┐         ┌──────▼───────┐
+       │  Post-Query  │         │  Per-Row     │
+       │   Hooks      │         │  StreamRow   │  Skip, deny, allow per row
+       └──────────────┘         │  Hooks       │
+                                └──────┬───────┘
+                                       │
+                                ┌──────▼───────┐
+                                │  Transforms  │
+                                │  Map/Filter/ │  Composable pipeline ops
+                                │  Reduce/etc  │
+                                └──────────────┘
+```
+
+The **eager path** (left) loads all results into memory via the `scan` package and runs `PostQueryHook` hooks on the complete result set. The **streaming path** (right) opens a server-side cursor via `Stream[T]`, decodes one row at a time, runs `StreamRowHook` hooks per row, and optionally pipes results through pipeline transforms (`Map`, `Filter`, `Reduce`, `Chunk`, `Take`, `ForEach`).
+
+### Typed Access via `Unwrap`
+
+The top-level `grove.DB` returns `any` from query builder methods to avoid import cycles. For typed access to driver-specific builders and streaming, use the driver's `Unwrap` function:
+
+```go
+pgdb := pgdriver.Unwrap(db) // returns *pgdriver.PgDB
+s, err := pgdb.NewSelect(&User{}).Where("active = $1", true).Stream(ctx)
+```
+
+## Key Design Decisions
+
+### 1. Native Syntax Per Driver
+
+Each driver has its own query builder. There is no shared query builder interface. PostgreSQL queries generate `$1` placeholders, MySQL generates `?`, and MongoDB generates native BSON documents.
+
+### 2. Reflect-Once Architecture
+
+Struct reflection happens once at model registration time. The hot query path uses cached field offsets and pooled byte buffers for zero-allocation query building.
+
+### 3. Dual Tag Resolution
+
+When resolving struct tags:
+1. `grove:"..."` tag present — use it (primary)
+2. `bun:"..."` tag present — use it (fallback)
+3. No tag — convert field name to snake_case
+
+### 4. Privacy Hooks, Not Authorization
+
+The hook system provides integration points for authorization libraries but does not implement authorization logic itself. Hooks can inject WHERE clauses, redact fields, or deny queries.
+
+## Module Dependency Graph
+
+```
+grove (core)
+├── grove/schema          (zero deps)
+├── grove/driver          (depends on schema)
+├── grove/scan            (depends on schema)
+├── grove/stream          (zero deps — defines Cursor, Stream[T], pipeline transforms)
+├── grove/hook            (depends on driver)
+├── grove/migrate         (depends on driver)
+├── grove/pgdriver        (depends on driver, schema, scan, stream, hook)
+├── grove/mysqldriver     (depends on driver, schema, scan)
+├── grove/sqlitedriver    (depends on driver, schema, scan)
+├── grove/mongodriver     (depends on driver, schema, scan, stream)
+└── grove/grovetest       (depends on driver)
+```
+
+The `stream` package has no dependencies on other Grove packages. It defines the `Cursor` interface and generic `Stream[T]` type. Drivers depend on `stream` to implement the `Cursor` interface (e.g., `pgdriver.pgCursor`) and to construct `Stream[T]` instances. The `stream.HookRunner` interface avoids a direct dependency on the `hook` package, using an adapter pattern instead.

@@ -1,0 +1,77 @@
+---
+title: Multi-Module Migrations
+description: How Forge extensions and Go modules compose migrations with dependency ordering.
+---
+
+Grove's migration system is designed for multi-module composition. Each Go module (including Forge extensions) can register its own migration group with declared dependencies.
+
+## Module-Owned Migration Groups
+
+Each module owns a named migration group:
+
+```go
+// In package: github.com/xraph/forge-billing/migrations
+var Migrations = migrate.NewGroup("forge.billing",
+    migrate.DependsOn("core"),
+)
+
+func init() {
+    Migrations.MustRegister(&migrate.Migration{
+        Name:    "create_invoices",
+        Version: "20240201000000",
+        Up:      createInvoicesUp,
+        Down:    createInvoicesDown,
+    })
+}
+```
+
+## Dependency-Aware Ordering
+
+Migration groups declare dependencies that form a directed acyclic graph (DAG):
+
+```
+core                    (no dependencies)
+├── forge.billing       (depends on: core)
+├── forge.notifications (depends on: core)
+└── forge.analytics     (depends on: core, forge.billing)
+```
+
+The migrator performs a topological sort to determine execution order:
+
+1. `core` migrations run first
+2. `forge.billing` and `forge.notifications` can run in any order
+3. `forge.analytics` runs after both `core` and `forge.billing`
+
+## Automatic Discovery
+
+When using Forge, migration groups are discovered automatically from registered extensions:
+
+```go
+app := forge.New()
+app.Use(billingExt.New())        // Registers forge.billing migrations
+app.Use(notificationsExt.New())  // Registers forge.notifications migrations
+
+// All migrations compose automatically at startup
+app.Start(ctx)
+```
+
+## Cycle Detection
+
+The migrator detects circular dependencies at startup:
+
+```go
+// This would panic with ErrCyclicDependency
+var A = migrate.NewGroup("a", migrate.DependsOn("b"))
+var B = migrate.NewGroup("b", migrate.DependsOn("a"))
+```
+
+## Advisory Locking
+
+To prevent concurrent migration runs (e.g., in a multi-replica deployment), the migrator acquires a database-level advisory lock:
+
+- **PostgreSQL**: `pg_advisory_lock()`
+- **MySQL**: `GET_LOCK()`
+- **SQLite**: File-based lock
+
+If the lock cannot be acquired, the migrator returns `ErrMigrationLocked`.
+

@@ -1,0 +1,52 @@
+---
+title: "Grove: A Polyglot Go ORM"
+description: "Grove is a high-performance Go ORM with native query syntax per database, dual tag system, modular migrations, and privacy hooks."
+---
+
+import { Cards, Card } from "fumadocs-ui/components/card";
+
+Grove is a polyglot Go ORM that generates native query syntax for each database driver. It answers the fundamental question: **"How do I access my data with near-raw performance and maximum flexibility?"**
+
+Grove supports multiple database backends through dedicated drivers:
+
+- **PostgreSQL** — Native `$1` placeholders, `DISTINCT ON`, `FOR UPDATE`, JSONB operators
+- **MySQL** — Backtick quoting, `ON DUPLICATE KEY UPDATE`, `USE INDEX` hints
+- **SQLite** — Lightweight embedded database with `INSERT OR REPLACE`
+- **MongoDB** — Native BSON filter documents, aggregation pipelines
+
+## Key Features
+
+- **Native Query Syntax** — Each driver generates queries in its database's native idiom
+- **Dual Tag System** — `grove:"..."` tags with `bun:"..."` fallback for zero-cost migration
+- **Near-Raw Performance** — Zero reflection at query time, pooled buffers, cached metadata
+- **Modular Migrations** — Go-code migrations with multi-module dependency ordering
+- **Privacy Hooks** — Pre/post query hooks for tenant isolation, PII redaction, and audit logging
+- **Forge Integration** — First-class Forge extension with DI, migrations, and hook wiring
+
+## Quick Example
+
+```go
+// Create and open the driver, then pass it to Grove
+pgdb := pgdriver.New()
+pgdb.Open(ctx, "postgres://user:pass@localhost/mydb", driver.WithPoolSize(20))
+db, _ := grove.Open(pgdb)
+
+// Access the typed PG query builder via Unwrap
+pg := pgdriver.Unwrap(db)
+var users []User
+err := pg.NewSelect(&users).
+    Where("email ILIKE $1", "%@example.com").
+    Where("role = $2", "admin").
+    OrderExpr("created_at DESC").
+    Limit(50).
+    Scan(ctx)
+```
+
+## Next Steps
+
+<Cards>
+  <Card title="Getting Started" href="/docs/getting-started" description="Install Grove and run your first query in under 5 minutes." />
+  <Card title="Architecture" href="/docs/architecture" description="Understand the package structure, driver interface, and query pipeline." />
+  <Card title="Dual Tag System" href="/docs/concepts/dual-tags" description="Learn how grove and bun tags work together for zero-cost migration." />
+  <Card title="PostgreSQL Driver" href="/docs/drivers/postgres" description="Get started with the PostgreSQL driver and native PG syntax." />
+</Cards>

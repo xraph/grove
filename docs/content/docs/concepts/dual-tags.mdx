@@ -1,0 +1,112 @@
+---
+title: Dual Tag System
+description: Define models with grove tags or use existing bun tags as fallback.
+---
+
+Grove supports a dual struct tag system: `grove:"..."` (primary) and `bun:"..."` (fallback). This enables zero-cost migration from [bun](https://bun.uptrace.dev/) while giving Grove models a dedicated namespace for extended features.
+
+## Tag Resolution Order
+
+When Grove inspects a struct field, it resolves the tag in this order:
+
+1. **`grove:"..."`** — If present, this tag is used exclusively
+2. **`bun:"..."`** — If no `grove` tag exists, the `bun` tag is used as fallback
+3. **Snake case** — If neither tag exists, the field name is converted to `snake_case`
+
+```go
+type User struct {
+    grove.BaseModel `grove:"table:users,alias:u"`
+
+    ID    int64  `grove:"id,pk,autoincrement"`     // grove tag wins
+    Name  string `bun:"name,notnull"`               // bun fallback
+    Email string                                     // snake_case: "email"
+}
+```
+
+## Table-Level Tags
+
+Table options are set on the `BaseModel` field:
+
+```go
+grove.BaseModel `grove:"table:users,alias:u"`
+```
+
+| Option | Description |
+|--------|-------------|
+| `table:name` | Table name |
+| `alias:a` | Table alias for queries |
+
+## Column-Level Tags
+
+| Tag | Description | Example |
+|-----|-------------|---------|
+| `pk` | Primary key | `grove:"id,pk"` |
+| `autoincrement` | Auto-incrementing column | `grove:"id,pk,autoincrement"` |
+| `notnull` | NOT NULL constraint | `grove:"name,notnull"` |
+| `unique` | UNIQUE constraint | `grove:"email,unique"` |
+| `default:value` | DEFAULT value | `grove:"status,default:'active'"` |
+| `type:sqltype` | Override SQL type | `grove:"data,type:jsonb"` |
+| `soft_delete` | Soft delete timestamp | `grove:"deleted_at,soft_delete"` |
+| `privacy:level` | Privacy classification | `grove:"ssn,privacy:pii"` |
+| `-` | Skip field | `grove:"-"` |
+| `scanonly` | Read-only field | `grove:"computed_field,scanonly"` |
+
+## Relation Tags
+
+```go
+type User struct {
+    grove.BaseModel `grove:"table:users"`
+
+    ID      int64    `grove:"id,pk"`
+    Profile *Profile `grove:"rel:has-one,join:id=user_id"`
+    Posts   []*Post  `grove:"rel:has-many,join:id=author_id"`
+    Roles   []*Role  `grove:"rel:many-to-many,join:user_roles"`
+}
+```
+
+| Relation | Tag | Description |
+|----------|-----|-------------|
+| Has One | `rel:has-one,join:pk=fk` | One-to-one |
+| Has Many | `rel:has-many,join:pk=fk` | One-to-many |
+| Belongs To | `rel:belongs-to,join:fk=pk` | Inverse of has-one |
+| Many-to-Many | `rel:many-to-many,join:join_table` | Through a join table |
+
+## Privacy Tags
+
+The `privacy` tag option classifies fields for the hook system:
+
+```go
+type Customer struct {
+    grove.BaseModel `grove:"table:customers"`
+
+    ID    int64  `grove:"id,pk"`
+    Name  string `grove:"name,notnull"`
+    Email string `grove:"email,privacy:pii"`
+    SSN   string `grove:"ssn,privacy:pii"`
+    Notes string `grove:"notes,privacy:sensitive"`
+}
+```
+
+Privacy hooks can use these classifications to redact, mask, or audit access to sensitive fields.
+
+## Migrating from Bun
+
+Existing bun models work with Grove unchanged. Just swap the import:
+
+```go
+// Before (bun)
+type User struct {
+    bun.BaseModel `bun:"table:users,alias:u"`
+    ID   int64  `bun:"id,pk,autoincrement"`
+    Name string `bun:"name,notnull"`
+}
+
+// After (grove) — bun tags still work
+type User struct {
+    grove.BaseModel `bun:"table:users,alias:u"`
+    ID   int64  `bun:"id,pk,autoincrement"`
+    Name string `bun:"name,notnull"`
+}
+```
+
+You can then incrementally migrate tags to `grove:"..."` to access extended features like privacy annotations.

@@ -1,0 +1,284 @@
+---
+title: Go Packages
+description: Reference for all Grove Go packages.
+---
+
+## Package Index
+
+| Package | Import Path | Description |
+|---------|-------------|-------------|
+| `grove` | `github.com/xraph/grove` | Core types: DB, BaseModel, Open(), RegisterModel() |
+| `schema` | `github.com/xraph/grove/schema` | Schema reflection: Table, Field, Relation, Registry |
+| `driver` | `github.com/xraph/grove/driver` | Driver and Dialect interfaces |
+| `scan` | `github.com/xraph/grove/scan` | Result scanning with cached field maps |
+| `hook` | `github.com/xraph/grove/hook` | Privacy hooks: PreQuery, PostQuery, PreMutation, PostMutation, StreamRowHook |
+| `stream` | `github.com/xraph/grove/stream` | Streaming iterator: Stream[T], pipeline transforms, ChangeStream[T] |
+| `migrate` | `github.com/xraph/grove/migrate` | Migration system: Group, Migration, Orchestrator |
+| `pgdriver` | `github.com/xraph/grove/pgdriver` | PostgreSQL driver (pgx-based) |
+| `mysqldriver` | `github.com/xraph/grove/mysqldriver` | MySQL driver |
+| `sqlitedriver` | `github.com/xraph/grove/sqlitedriver` | SQLite driver (pure Go) |
+| `mongodriver` | `github.com/xraph/grove/mongodriver` | MongoDB driver |
+| `plugin` | `github.com/xraph/grove/plugin` | Plugin interfaces and registry |
+| `grovetest` | `github.com/xraph/grove/grovetest` | Testing utilities: mock driver, fixtures, assertions |
+| `extension` | `github.com/xraph/grove/extension` | Forge extension entry point |
+| `audit` | `github.com/xraph/grove/audit` | Chronicle audit plugin |
+| `observability` | `github.com/xraph/grove/observability` | Prometheus metrics plugin |
+| `internal/tagparser` | `github.com/xraph/grove/internal/tagparser` | High-performance struct tag parser |
+| `internal/pool` | `github.com/xraph/grove/internal/pool` | sync.Pool-based byte buffer pool |
+| `internal/safe` | `github.com/xraph/grove/internal/safe` | Safe identifier quoting |
+
+## Core Types
+
+### grove.DB
+
+```go
+type DB struct {
+    // contains filtered or unexported fields
+}
+
+// Open creates a new DB with an already-connected driver.
+// The driver must be connected before calling Open (call driver.Open first).
+//
+//   pgdb := pgdriver.New()
+//   pgdb.Open(ctx, "postgres://localhost:5432/mydb")
+//   db, err := grove.Open(pgdb)
+func Open(drv GroveDriver, opts ...Option) (*DB, error)
+
+func (db *DB) Close() error
+func (db *DB) Ping(ctx context.Context) error
+func (db *DB) RegisterModel(models ...any)
+
+// Driver returns the underlying GroveDriver.
+// Use with pgdriver.Unwrap(db) for typed access.
+func (db *DB) Driver() GroveDriver
+
+// Hooks returns the hook engine for registering lifecycle hooks.
+//   db.Hooks().AddHook(&TenantIsolation{}, hook.Scope{Tables: []string{"users"}})
+func (db *DB) Hooks() *hook.Engine
+
+// Query builders return any; use pgdriver.Unwrap(db) for typed builders.
+func (db *DB) NewSelect(model ...any) any
+func (db *DB) NewInsert(model any) any
+func (db *DB) NewUpdate(model any) any
+func (db *DB) NewDelete(model any) any
+
+func (db *DB) BeginTx(ctx context.Context, opts *TxOptions) (*Tx, error)
+```
+
+### grove.BaseModel
+
+```go
+type BaseModel struct{}
+```
+
+Embed in your model structs to declare them as Grove models. Tag with `grove:"table:name,alias:a"`.
+
+### grove.Option
+
+```go
+func WithPoolSize(n int) Option
+func WithQueryTimeout(d time.Duration) Option
+func WithLogger(l *slog.Logger) Option
+func WithPlugin(p plugin.Plugin) Option
+```
+
+## Driver Interfaces
+
+### driver.Driver
+
+```go
+type Driver interface {
+    Name() string
+    Open(ctx context.Context, dsn string, opts ...Option) error
+    Close() error
+    Dialect() Dialect
+    Ping(ctx context.Context) error
+    BeginTx(ctx context.Context, opts *TxOptions) (Tx, error)
+    Exec(ctx context.Context, query string, args ...any) (Result, error)
+    Query(ctx context.Context, query string, args ...any) (Rows, error)
+    QueryRow(ctx context.Context, query string, args ...any) Row
+    SupportsReturning() bool
+}
+```
+
+### driver.StreamCapable
+
+Optional interface for drivers that support streaming and CDC:
+
+```go
+type StreamCapable interface {
+    SupportsStreaming() bool
+    SupportsCDC() bool
+}
+```
+
+### driver.Dialect
+
+```go
+type Dialect interface {
+    Name() string
+    Quote(ident string) string
+    Placeholder(index int) string
+    GoToDBType(goType reflect.Type) string
+    AppendBytes(b []byte, data []byte) []byte
+    AppendTime(b []byte, t time.Time) []byte
+}
+```
+
+## Hook Types
+
+### hook.Scope
+
+```go
+type Scope struct {
+    Tables     []string    // restrict to these tables (empty = all)
+    Operations []Operation // restrict to these operations (empty = all)
+    Priority   int         // execution order, lower = earlier (default: 100)
+}
+```
+
+### Hook Interfaces
+
+```go
+type PreQueryHook interface {
+    BeforeQuery(ctx context.Context, qc *QueryContext) (*HookResult, error)
+}
+
+type PostQueryHook interface {
+    AfterQuery(ctx context.Context, qc *QueryContext, result any) error
+}
+
+type PreMutationHook interface {
+    BeforeMutation(ctx context.Context, qc *QueryContext, data any) (*HookResult, error)
+}
+
+type PostMutationHook interface {
+    AfterMutation(ctx context.Context, qc *QueryContext, data any, result any) error
+}
+
+type StreamRowHook interface {
+    OnStreamRow(ctx context.Context, qc *QueryContext, row any) (Decision, error)
+}
+```
+
+### hook.Decision
+
+```go
+type Decision int
+
+const (
+    Allow  Decision = iota // proceed with the query
+    Deny                    // block the query, return error
+    Modify                  // hook modified query context
+    Skip                    // exclude this row (post-query / stream)
+)
+```
+
+## Stream Types
+
+### stream.Stream[T]
+
+```go
+func New[T any](cursor Cursor, decode DecodeFunc[T]) *Stream[T]
+func NewWithHooks[T any](cursor Cursor, decode DecodeFunc[T], hooks HookRunner, qc any) *Stream[T]
+
+func (s *Stream[T]) WithHooks(runner HookRunner, qc any) *Stream[T]
+func (s *Stream[T]) Next(ctx context.Context) bool
+func (s *Stream[T]) Value() T
+func (s *Stream[T]) Err() error
+func (s *Stream[T]) Close() error
+func (s *Stream[T]) All(yield func(T, error) bool)           // Go 1.23+ range-over-func
+func (s *Stream[T]) Collect(ctx context.Context) ([]T, error)
+func (s *Stream[T]) Count(ctx context.Context) (int64, error)
+```
+
+### Pipeline Transforms
+
+```go
+func Map[T, U any](s *Stream[T], fn func(T) (U, error)) *Stream[U]
+func Filter[T any](s *Stream[T], fn func(T) bool) *Stream[T]
+func Take[T any](s *Stream[T], n int) *Stream[T]
+func Chunk[T any](s *Stream[T], size int) *Stream[[]T]
+func Reduce[T, A any](s *Stream[T], initial A, fn func(A, T) A) (A, error)
+func ForEach[T any](s *Stream[T], fn func(T) error) error
+```
+
+### stream.ChangeStream[T]
+
+```go
+func NewChangeStream[T any](source ChangeSource[T]) *ChangeStream[T]
+
+func (cs *ChangeStream[T]) Next(ctx context.Context) bool
+func (cs *ChangeStream[T]) Event() ChangeEvent[T]
+func (cs *ChangeStream[T]) Err() error
+func (cs *ChangeStream[T]) Close() error
+func (cs *ChangeStream[T]) ResumeToken() any
+func (cs *ChangeStream[T]) All(yield func(ChangeEvent[T], error) bool)
+```
+
+### stream.ChangeEvent[T]
+
+```go
+type ChangeEvent[T any] struct {
+    Operation   ChangeOp
+    Before      *T          // previous state (nil for inserts)
+    After       *T          // new state (nil for deletes)
+    Timestamp   time.Time
+    ResumeToken any
+}
+```
+
+## pgdriver Types
+
+### pgdriver.Unwrap
+
+```go
+// Unwrap extracts the underlying *PgDB from a *grove.DB handle.
+// Panics if the driver is not a *PgDB.
+func Unwrap(db *grove.DB) *PgDB
+```
+
+Usage:
+
+```go
+pgdb := pgdriver.Unwrap(db)
+pgdb.NewSelect(&User{}).Where("active = $1", true).Scan(ctx, &users)
+```
+
+### pgdriver.PgDB streaming methods
+
+```go
+// Stream opens a server-side cursor with default fetch size (100 rows/batch).
+func (q *SelectQuery) Stream(ctx context.Context) (*stream.Stream[any], error)
+
+// StreamBatch opens a server-side cursor with custom fetch size.
+func (q *SelectQuery) StreamBatch(ctx context.Context, fetchSize int) (*stream.Stream[any], error)
+```
+
+### pgdriver.Listener
+
+```go
+func (db *PgDB) NewListener() *Listener
+func (db *PgDB) Listen(ctx context.Context, channel string, handler func(*Notification)) (*Listener, error)
+
+func (l *Listener) Start(ctx context.Context) error
+func (l *Listener) Listen(ctx context.Context, channel string) error
+func (l *Listener) Unlisten(ctx context.Context, channel string) error
+func (l *Listener) OnNotification(channel string, handler func(*Notification))
+func (l *Listener) Notify(ctx context.Context, channel, payload string) error
+func (l *Listener) Close() error
+```
+
+## Sentinel Errors
+
+```go
+var (
+    ErrNoRows             = errors.New("grove: no rows in result set")
+    ErrModelNotRegistered = errors.New("grove: model not registered")
+    ErrNotSupported       = errors.New("grove: operation not supported by driver")
+    ErrHookDenied         = errors.New("grove: hook denied the operation")
+    ErrMigrationFailed    = errors.New("grove: migration failed")
+    ErrMigrationLocked    = errors.New("grove: migration lock held by another process")
+    ErrCyclicDependency   = errors.New("grove: cyclic dependency in migration groups")
+)
+```

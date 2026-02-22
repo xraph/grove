@@ -1,0 +1,133 @@
+---
+title: Forge Extension
+description: Use Grove as a Forge extension with DI, migrations, and lifecycle management.
+---
+
+Grove provides a first-class Forge extension that handles lifecycle, dependency injection, and automatic migration execution.
+
+## Registration
+
+```go
+import (
+    "github.com/xraph/forge"
+    groveext "github.com/xraph/grove/extension"
+)
+
+app := forge.New()
+app.Use(groveext.New(
+    groveext.WithDSN("postgres://user:pass@localhost:5432/mydb"),
+    groveext.WithConfig(groveext.Config{
+        DisableMigrate: false,  // Set true to skip auto-migration
+    }),
+))
+app.Start(context.Background())
+```
+
+## What the Extension Does
+
+### Register Phase
+
+1. Creates the driver and calls `driver.Open()` with the DSN
+2. Creates a `grove.DB` via `grove.Open(driver)`
+3. Registers the DB in the Forge DI container via `vessel.Provide()`
+4. Collects migration groups from all registered extensions
+
+### Start Phase
+
+1. Pings the database to verify connectivity
+2. Runs pending migrations (unless `DisableMigrate` is true)
+3. Registers any configured hooks via `db.Hooks().AddHook()`
+
+### Stop Phase
+
+1. Gracefully closes all database connections
+2. Fires shutdown hooks
+
+## Options
+
+```go
+groveext.New(
+    groveext.WithDSN(dsn),                     // Database connection string
+    groveext.WithDriver(pgdriver.New()),        // Driver instance
+    groveext.WithConfig(config),                // Extension config
+    groveext.WithLogger(logger),                // Custom logger
+    groveext.WithPoolSize(20),                  // Connection pool size
+    groveext.WithMigrations(billing.Migrations),// Register migration groups
+    groveext.WithHook(&tenantHook),             // Register hooks
+)
+```
+
+## Accessing the DB
+
+After registration, resolve the DB from any Forge handler:
+
+```go
+func myHandler(ctx forge.Context) error {
+    db := forge.Inject[*grove.DB](ctx)
+
+    var users []User
+    err := db.NewSelect(&users).
+        Where("active = $1", true).
+        Scan(ctx.Context())
+    if err != nil {
+        return err
+    }
+
+    return ctx.JSON(200, users)
+}
+```
+
+## Accessing Hooks
+
+Once you have the DB from the DI container, register hooks via `db.Hooks()`:
+
+```go
+func setupHooks(ctx forge.Context) error {
+    db := forge.Inject[*grove.DB](ctx)
+
+    db.Hooks().AddHook(&TenantIsolation{}, hook.Scope{
+        Priority: 1,
+    })
+    db.Hooks().AddHook(&AuditLogger{}, hook.Scope{
+        Priority: 100,
+    })
+
+    return nil
+}
+```
+
+Alternatively, pass hooks during extension registration using `groveext.WithHook()`.
+
+## Multi-Database Support
+
+Register multiple Grove extensions for different databases:
+
+```go
+app.Use(groveext.New(
+    groveext.WithName("primary"),
+    groveext.WithDSN(pgDSN),
+    groveext.WithDriver(pgdriver.New()),
+))
+
+app.Use(groveext.New(
+    groveext.WithName("analytics"),
+    groveext.WithDSN(analyticsDSN),
+    groveext.WithDriver(pgdriver.New()),
+))
+
+// Resolve by name
+primaryDB := forge.InjectNamed[*grove.DB](ctx, "primary")
+analyticsDB := forge.InjectNamed[*grove.DB](ctx, "analytics")
+```
+
+## Migration Composition
+
+When multiple Forge extensions register migration groups, they compose automatically:
+
+```go
+app.Use(groveext.New(groveext.WithDSN(dsn)))     // core migrations
+app.Use(billingExt.New())                          // forge.billing migrations
+app.Use(notificationsExt.New())                    // forge.notifications migrations
+
+// At startup: core -> forge.billing -> forge.notifications (topological order)
+```

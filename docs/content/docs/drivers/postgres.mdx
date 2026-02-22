@@ -1,0 +1,134 @@
+---
+title: PostgreSQL
+description: PostgreSQL driver with native syntax, $1 placeholders, and pgx pool.
+---
+
+The PostgreSQL driver is Grove's primary driver, built on [pgx](https://github.com/jackc/pgx) for high-performance connection pooling and native protocol support.
+
+## Installation
+
+```bash
+go get github.com/xraph/grove
+go get github.com/jackc/pgx/v5
+```
+
+## Connection
+
+```go
+import (
+    "github.com/xraph/grove"
+    "github.com/xraph/grove/driver"
+    "github.com/xraph/grove/pgdriver"
+)
+
+// 1. Create and open the driver
+pgdb := pgdriver.New()
+pgdb.Open(ctx, "postgres://user:pass@localhost:5432/mydb?sslmode=disable", driver.WithPoolSize(20))
+
+// 2. Pass the connected driver to Grove
+db, err := grove.Open(pgdb)
+if err != nil {
+    log.Fatal(err)
+}
+defer db.Close()
+```
+
+## Native Syntax
+
+The PostgreSQL driver supports the full range of PostgreSQL-specific syntax:
+
+### Placeholders
+
+PostgreSQL uses `$1`, `$2`, etc. for parameterized queries:
+
+```go
+db.NewSelect(&users).
+    Where("email ILIKE $1", "%@example.com").
+    Where("created_at > $2", time.Now().AddDate(0, -1, 0)).
+    Scan(ctx)
+```
+
+### DISTINCT ON
+
+```go
+db.NewSelect(&users).
+    DistinctOn("department").
+    OrderExpr("department, created_at DESC").
+    Scan(ctx)
+```
+
+### JSONB Operators
+
+```go
+db.NewSelect(&users).
+    Where("metadata->>'role' = $1", "admin").
+    Where("metadata @> $1::jsonb", `{"active": true}`).
+    Scan(ctx)
+```
+
+### FOR UPDATE / FOR SHARE
+
+```go
+db.NewSelect(&account).
+    Where("id = $1", accountID).
+    ForUpdate().
+    Scan(ctx)
+```
+
+### ON CONFLICT (Upsert)
+
+```go
+db.NewInsert(&user).
+    OnConflict("(email) DO UPDATE").
+    Set("name = EXCLUDED.name").
+    Set("updated_at = NOW()").
+    Returning("*").
+    Exec(ctx)
+```
+
+### RETURNING
+
+```go
+var insertedUser User
+db.NewInsert(&user).
+    Returning("*").
+    Scan(ctx, &insertedUser)
+```
+
+### LISTEN / NOTIFY
+
+```go
+pgdb := pgdriver.Unwrap(db)
+
+// Create a listener and register a callback
+listener := pgdb.NewListener()
+listener.OnNotification("events", func(n *pgdriver.Notification) {
+    fmt.Printf("channel=%s payload=%s\n", n.Channel, n.Payload)
+})
+
+// Start listening and subscribe to the channel
+listener.Start(ctx)
+listener.Listen(ctx, "events")
+
+// ... later, when done:
+listener.Close()
+```
+
+## Custom Types
+
+| Type | Go Type | PostgreSQL Type |
+|------|---------|----------------|
+| `pgdriver.JSONMap` | `map[string]any` | `jsonb` |
+| `pgdriver.StringArray` | `[]string` | `text[]` |
+| `pgdriver.Int64Array` | `[]int64` | `bigint[]` |
+
+## Connection Pool Options
+
+```go
+pgdb := pgdriver.New()
+pgdb.Open(ctx, dsn,
+    driver.WithPoolSize(20),
+    driver.WithQueryTimeout(30 * time.Second),
+)
+db, err := grove.Open(pgdb)
+```

@@ -1,0 +1,80 @@
+---
+title: Errors
+description: Sentinel errors returned by Grove operations.
+---
+
+Grove defines sentinel errors for all failure cases. Use `errors.Is()` to check for specific errors.
+
+## Query Errors
+
+| Error | Description |
+|-------|-------------|
+| `ErrNoRows` | Query returned no rows (similar to `sql.ErrNoRows`) |
+| `ErrModelNotRegistered` | Model type was not registered via `RegisterModel()` |
+| `ErrNotSupported` | Operation not supported by the current driver |
+
+## Driver Errors
+
+| Error | Description |
+|-------|-------------|
+| `ErrDriverClosed` | Driver connection pool has been closed |
+| `ErrTxDone` | Transaction has already been committed or rolled back |
+| `ErrInvalidDSN` | Data source name is malformed |
+
+## Migration Errors
+
+| Error | Description |
+|-------|-------------|
+| `ErrMigrationFailed` | A migration function returned an error |
+| `ErrMigrationLocked` | Another process holds the migration lock |
+| `ErrCyclicDependency` | Migration group dependencies form a cycle |
+| `ErrDuplicateVersion` | Two migrations share the same version string |
+
+## Hook Errors
+
+| Error | Description |
+|-------|-------------|
+| `ErrHookDenied` | A privacy hook returned `Decision: Deny` |
+| `ErrHookPanic` | A hook panicked during execution (recovered) |
+
+## Schema Errors
+
+| Error | Description |
+|-------|-------------|
+| `ErrInvalidTag` | Struct tag has invalid syntax |
+| `ErrNoPrimaryKey` | Model has no field marked as `pk` |
+| `ErrInvalidRelation` | Relation definition is incomplete or incorrect |
+
+## Usage
+
+```go
+import "github.com/xraph/grove"
+
+var users []User
+err := db.NewSelect(&users).
+    Where("active = $1", true).
+    Scan(ctx)
+
+if errors.Is(err, grove.ErrNoRows) {
+    // No matching users found
+}
+
+if errors.Is(err, grove.ErrModelNotRegistered) {
+    // Forgot to call db.RegisterModel((*User)(nil))
+}
+```
+
+## Wrapping
+
+All errors returned by Grove wrap the underlying driver error when available:
+
+```go
+err := db.NewSelect(&users).Scan(ctx)
+if err != nil {
+    // Unwrap to get the original pgx/mysql error
+    var pgErr *pgconn.PgError
+    if errors.As(err, &pgErr) {
+        fmt.Println(pgErr.Code) // e.g., "23505" for unique violation
+    }
+}
+```

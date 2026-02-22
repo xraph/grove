@@ -1,0 +1,242 @@
+---
+title: Tenant Isolation Hook
+description: Automatic tenant data isolation via query-level hook injection.
+---
+
+Tenant isolation is one of the most common uses of Grove's hook system. By writing a custom hook that implements `PreQueryHook` and `PreMutationHook`, you can automatically inject tenant filters into every query, ensuring strict data separation between tenants.
+
+Grove does **not** ship a built-in `TenantIsolation` hook or a `grove.WithTenantID()` helper. Instead, you write your own tenant hook using the standard hook interfaces. This gives you full control over tenant resolution, skip logic, and error handling.
+
+## Writing a Tenant Isolation Hook
+
+Here is a complete, realistic example:
+
+```go
+package myhooks
+
+import (
+    "context"
+    "errors"
+    "fmt"
+
+    "github.com/xraph/grove/hook"
+)
+
+// tenantKey is an unexported context key for tenant ID.
+type tenantKey struct{}
+
+// WithTenantID returns a new context carrying the given tenant ID.
+func WithTenantID(ctx context.Context, tenantID string) context.Context {
+    return context.WithValue(ctx, tenantKey{}, tenantID)
+}
+
+// TenantIDFrom extracts the tenant ID from the context, or returns "".
+func TenantIDFrom(ctx context.Context) string {
+    v, _ := ctx.Value(tenantKey{}).(string)
+    return v
+}
+
+// TenantIsolation is a custom hook that injects tenant_id filters
+// into every query and mutation.
+type TenantIsolation struct {
+    Column     string   // Column name, e.g. "tenant_id"
+    SkipTables []string // Tables that don't need tenant scoping
+}
+
+// BeforeQuery implements hook.PreQueryHook.
+func (h *TenantIsolation) BeforeQuery(ctx context.Context, qc *hook.QueryContext) (*hook.HookResult, error) {
+    if h.shouldSkip(qc.Table) {
+        return &hook.HookResult{Decision: hook.Skip}, nil
+    }
+
+    tenantID := h.resolveTenant(ctx, qc)
+    if tenantID == "" {
+        return &hook.HookResult{
+            Decision: hook.Deny,
+            Error:    errors.New("tenant isolation: no tenant ID in context"),
+        }, nil
+    }
+
+    return &hook.HookResult{
+        Decision: hook.Modify,
+        Filters: []hook.ExtraFilter{
+            {
+                Clause: fmt.Sprintf("%s = $1", h.Column),
+                Args:   []any{tenantID},
+            },
+        },
+    }, nil
+}
+
+// BeforeMutation implements hook.PreMutationHook.
+func (h *TenantIsolation) BeforeMutation(ctx context.Context, qc *hook.QueryContext, data any) (*hook.HookResult, error) {
+    if h.shouldSkip(qc.Table) {
+        return &hook.HookResult{Decision: hook.Skip}, nil
+    }
+
+    tenantID := h.resolveTenant(ctx, qc)
+    if tenantID == "" {
+        return &hook.HookResult{
+            Decision: hook.Deny,
+            Error:    errors.New("tenant isolation: no tenant ID in context"),
+        }, nil
+    }
+
+    // For UPDATE and DELETE, inject a tenant filter to prevent cross-tenant writes.
+    if qc.Operation == hook.OpUpdate || qc.Operation == hook.OpDelete ||
+        qc.Operation == hook.OpBulkUpdate || qc.Operation == hook.OpBulkDelete {
+        return &hook.HookResult{
+            Decision: hook.Modify,
+            Filters: []hook.ExtraFilter{
+                {
+                    Clause: fmt.Sprintf("%s = $1", h.Column),
+                    Args:   []any{tenantID},
+                },
+            },
+        }, nil
+    }
+
+    // For INSERT, you may want to validate that the data has the correct tenant ID set.
+    // The hook receives `data` so you can inspect/modify it as needed.
+    return &hook.HookResult{Decision: hook.Allow}, nil
+}
+
+// resolveTenant gets the tenant ID from context or from QueryContext.TenantID.
+func (h *TenantIsolation) resolveTenant(ctx context.Context, qc *hook.QueryContext) string {
+    // Prefer QueryContext.TenantID if already populated
+    if qc.TenantID != "" {
+        return qc.TenantID
+    }
+    // Fall back to context value
+    return TenantIDFrom(ctx)
+}
+
+func (h *TenantIsolation) shouldSkip(table string) bool {
+    for _, t := range h.SkipTables {
+        if t == table {
+            return true
+        }
+    }
+    return false
+}
+```
+
+## Registration
+
+Register the hook on the `db.Hooks()` engine:
+
+```go
+db.Hooks().AddHook(&myhooks.TenantIsolation{
+    Column:     "tenant_id",
+    SkipTables: []string{"grove_migrations", "settings"},
+}, hook.Scope{
+    Priority: 1, // Run before other hooks
+})
+```
+
+## How It Works
+
+### SELECT Queries
+
+Before every SELECT, the hook injects a `tenant_id` filter:
+
+```go
+// Your code
+db.NewSelect(&users).Where("active = $1", true).Scan(ctx)
+
+// What actually executes (after hook injection)
+// SELECT * FROM users WHERE active = $1 AND tenant_id = $2
+```
+
+### INSERT Queries
+
+Before every INSERT, the hook can validate that the tenant ID on the data matches the context tenant:
+
+```go
+// Your code
+db.NewInsert(&user).Exec(ctx)
+
+// The hook receives the user struct as `data` and can inspect/reject it
+```
+
+### UPDATE / DELETE Queries
+
+Before every UPDATE or DELETE, the hook injects a `tenant_id` filter:
+
+```go
+// Your code
+db.NewDelete(&user).WherePK().Exec(ctx)
+
+// What actually executes
+// DELETE FROM users WHERE id = $1 AND tenant_id = $2
+```
+
+## Setting Tenant Context
+
+### With Forge
+
+Forge middleware can set tenant context from JWT/API key. You define how the tenant is placed into context:
+
+```go
+// In your Forge middleware
+ctx = myhooks.WithTenantID(ctx, extractedTenantID)
+```
+
+### Standalone
+
+Set tenant context manually using your own context helper:
+
+```go
+ctx = myhooks.WithTenantID(ctx, "tenant-123")
+```
+
+Alternatively, you can populate `QueryContext.TenantID` through a higher-priority hook or driver-level middleware. The example hook above checks both sources.
+
+## Missing Tenant Behavior
+
+If no tenant ID is found in the context, the hook returns `Deny`:
+
+```go
+// This will be denied by the hook
+db.NewSelect(&users).Scan(context.Background()) // No tenant in context
+```
+
+## Superuser Bypass
+
+For admin operations that need cross-tenant access, add a context flag check at the top of your hook:
+
+```go
+func (h *TenantIsolation) BeforeQuery(ctx context.Context, qc *hook.QueryContext) (*hook.HookResult, error) {
+    if isAdmin(ctx) {
+        return &hook.HookResult{Decision: hook.Skip}, nil
+    }
+    // Normal tenant filtering...
+}
+```
+
+## Example: Full Setup
+
+```go
+func main() {
+    pgdb := pgdriver.New()
+    pgdb.Open(ctx, "postgres://localhost:5432/mydb", driver.WithPoolSize(20))
+    db, err := grove.Open(pgdb)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    db.RegisterModel((*User)(nil), (*Invoice)(nil))
+
+    // Add tenant isolation hook
+    db.Hooks().AddHook(&myhooks.TenantIsolation{
+        Column:     "tenant_id",
+        SkipTables: []string{"grove_migrations"},
+    }, hook.Scope{Priority: 1})
+
+    // All queries are now tenant-scoped
+    ctx := myhooks.WithTenantID(context.Background(), "tenant-abc")
+
+    var users []User
+    db.NewSelect(&users).Scan(ctx) // Only returns tenant-abc users
+}
+```

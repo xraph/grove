@@ -1,0 +1,118 @@
+---
+title: Plugin System
+description: Extend Grove with plugins for audit logging, metrics, and custom behavior.
+---
+
+Grove's plugin system lets you extend the ORM with custom behavior at lifecycle boundaries. Plugins are simpler than hooks — they respond to high-level events rather than intercepting individual queries.
+
+## Base Interface
+
+Every plugin must implement the `Plugin` interface:
+
+```go
+import "github.com/xraph/grove/plugin"
+
+type Plugin interface {
+    Name() string
+}
+```
+
+## Lifecycle Hooks
+
+Plugins opt into events by implementing additional interfaces:
+
+### Model Events
+
+```go
+type AfterRegisterModel interface {
+    OnModelRegistered(ctx context.Context, table *schema.Table)
+}
+```
+
+### Connection Events
+
+```go
+type AfterConnect interface {
+    OnConnected(ctx context.Context, db *grove.DB)
+}
+
+type BeforeClose interface {
+    OnClosing(ctx context.Context, db *grove.DB) error
+}
+```
+
+### Migration Events
+
+```go
+type AfterMigrate interface {
+    OnMigrated(ctx context.Context, migrations []migrate.AppliedMigration)
+}
+```
+
+## Registering Plugins
+
+```go
+// Step 1: Create and connect the driver
+pgdb := pgdriver.New()
+pgdb.Open(ctx, "postgres://localhost:5432/mydb", driver.WithPoolSize(20))
+
+// Step 2: Open grove.DB with plugins
+db, _ := grove.Open(pgdb,
+    grove.WithPlugin(&MyAuditPlugin{}),
+    grove.WithPlugin(&MyMetricsPlugin{}),
+)
+```
+
+## Type-Assertion Discovery
+
+The plugin registry uses type assertions to discover which events each plugin handles. Implement only the interfaces you need:
+
+```go
+type MyPlugin struct{}
+
+func (p *MyPlugin) Name() string { return "my-plugin" }
+
+// Only implement OnConnected — other events are ignored
+func (p *MyPlugin) OnConnected(ctx context.Context, db *grove.DB) {
+    log.Printf("connected to database")
+}
+```
+
+## Built-in Plugins
+
+### Chronicle Audit Plugin
+
+Emits database events to [Chronicle](https://github.com/xraph/chronicle) for audit trails:
+
+```go
+import "github.com/xraph/grove/audit"
+
+auditPlugin := audit.New(chronicleClient)
+db, _ := grove.Open(pgdb,
+    grove.WithPlugin(auditPlugin),
+)
+```
+
+Events emitted:
+- `grove.query.select` / `grove.query.insert` / `grove.query.update` / `grove.query.delete`
+- `grove.migration.applied` / `grove.migration.rolled_back`
+- `grove.connection.opened` / `grove.connection.closed`
+
+### Prometheus Metrics Plugin
+
+Exports query performance metrics:
+
+```go
+import "github.com/xraph/grove/observability"
+
+metricsPlugin := observability.New()
+db, _ := grove.Open(pgdb,
+    grove.WithPlugin(metricsPlugin),
+)
+```
+
+Metrics:
+- `grove_queries_total` — Total queries by operation and table
+- `grove_query_duration_seconds` — Query latency histogram
+- `grove_connections_active` — Active connection count
+- `grove_migrations_total` — Migration execution count

@@ -1,0 +1,233 @@
+---
+title: Hooks Overview
+description: Privacy and query hooks that run before and after every database operation.
+---
+
+Grove's hook system lets you intercept every query and mutation. Hooks run before and after database operations, enabling tenant isolation, PII redaction, audit logging, and custom query modification -- without implementing authorization logic in the ORM.
+
+## Hook Interfaces
+
+Hooks opt into specific lifecycle events by implementing one or more interfaces.
+
+### PreQueryHook
+
+Runs before SELECT queries. Can modify, deny, or add filters.
+
+```go
+type PreQueryHook interface {
+    BeforeQuery(ctx context.Context, qc *QueryContext) (*HookResult, error)
+}
+```
+
+### PostQueryHook
+
+Runs after SELECT queries. Can redact, transform, or log results.
+
+```go
+type PostQueryHook interface {
+    AfterQuery(ctx context.Context, qc *QueryContext, result any) error
+}
+```
+
+### PreMutationHook
+
+Runs before INSERT, UPDATE, DELETE (including bulk variants). Can validate, deny, or modify data. Receives the mutation `data` as a parameter.
+
+```go
+type PreMutationHook interface {
+    BeforeMutation(ctx context.Context, qc *QueryContext, data any) (*HookResult, error)
+}
+```
+
+### PostMutationHook
+
+Runs after INSERT, UPDATE, DELETE. Can trigger side effects or audit logging. Receives both the original mutation `data` and the operation `result`.
+
+```go
+type PostMutationHook interface {
+    AfterMutation(ctx context.Context, qc *QueryContext, data any, result any) error
+}
+```
+
+### StreamRowHook
+
+Runs on every row yielded by a stream. This is critical for long-lived streams where permissions can change between rows. Pre-query hooks run once when the stream is opened (for filter injection or deny decisions). `StreamRowHook` runs per-row as each row is decoded from the cursor.
+
+```go
+type StreamRowHook interface {
+    OnStreamRow(ctx context.Context, qc *QueryContext, row any) (Decision, error)
+}
+```
+
+## Operations
+
+The `Operation` type identifies what kind of database operation is being performed:
+
+| Constant | Description |
+|----------|-------------|
+| `OpSelect` | SELECT / find queries |
+| `OpInsert` | Single INSERT |
+| `OpUpdate` | Single UPDATE |
+| `OpDelete` | Single DELETE |
+| `OpBulkInsert` | Batch INSERT |
+| `OpBulkUpdate` | Batch UPDATE |
+| `OpBulkDelete` | Batch DELETE |
+| `OpAggregate` | NoSQL aggregation pipelines |
+
+## Decisions
+
+Hooks return a `Decision` to control what happens next:
+
+| Decision | Effect |
+|----------|--------|
+| `Allow` | Continue with the original query |
+| `Deny` | Abort with an error (set `HookResult.Error`) |
+| `Modify` | Apply the extra filters/changes from `HookResult.Filters` |
+| `Skip` | This hook has no opinion (post-query: skip this row in streams) |
+
+## HookResult
+
+Pre-query and pre-mutation hooks return a `HookResult`:
+
+```go
+type HookResult struct {
+    Decision Decision       // Allow, Modify, Deny, Skip
+    Error    error          // Set when Decision == Deny
+    Filters  []ExtraFilter  // Additional conditions to inject
+}
+```
+
+## ExtraFilter
+
+An `ExtraFilter` is a condition that a hook wants to inject into the query:
+
+```go
+type ExtraFilter struct {
+    // Clause is a raw WHERE fragment with placeholders.
+    // e.g., "tenant_id = $1"
+    Clause string
+    Args   []any
+
+    // NativeFilter is a driver-specific filter document.
+    // For example, bson.M{"tenant_id": tenantID} for MongoDB.
+    NativeFilter any
+}
+```
+
+For SQL drivers, use `Clause` and `Args`. For NoSQL drivers (e.g., MongoDB), use `NativeFilter` to pass a native query document.
+
+## QueryContext
+
+Hooks receive full context about the pending operation:
+
+```go
+type QueryContext struct {
+    Operation      Operation          // OpSelect, OpInsert, OpUpdate, etc.
+    Table          string             // Table or collection name
+    ModelType      reflect.Type       // Struct type of the model
+    Columns        []string           // Columns being accessed or mutated
+    PrivacyColumns map[string]string  // Column -> privacy classification (e.g., "pii")
+    Conditions     []Condition        // Parsed WHERE conditions (informational)
+    RawQuery       string             // Built query string (before execution)
+    RawArgs        []any              // Query arguments
+    TenantID       string             // Tenant ID from context, if set
+    TagSource      TagSource          // Whether model uses grove:"..." or bun:"..." tags
+    Values         map[string]any     // User-supplied context values
+}
+```
+
+The `Condition` type provides informational access to parsed WHERE clauses:
+
+```go
+type Condition struct {
+    Column   string
+    Operator string
+    Value    any
+}
+```
+
+## Scope
+
+When registering a hook, you can control which tables, operations, and priority it applies to using `Scope`:
+
+```go
+type Scope struct {
+    Tables     []string    // Restrict to these tables. Empty = all tables.
+    Operations []Operation // Restrict to these operations. Empty = all operations.
+    Priority   int         // Execution order (lower = earlier). Default: 100.
+}
+```
+
+## Registering Hooks
+
+Hooks are registered on the `hook.Engine`, which is accessed from `grove.DB` via the `Hooks()` method:
+
+```go
+// Global hook (applies to all tables and operations)
+db.Hooks().AddHook(&AuditLogger{})
+
+// Scoped to specific tables
+db.Hooks().AddHook(&TenantFilter{}, hook.Scope{
+    Tables: []string{"users", "invoices"},
+})
+
+// Scoped to specific operations with priority
+db.Hooks().AddHook(&SecurityHook{}, hook.Scope{
+    Operations: []Operation{hook.OpSelect, hook.OpUpdate, hook.OpDelete},
+    Priority:   1, // Runs first
+})
+
+// Lower priority runs later
+db.Hooks().AddHook(&LoggingHook{}, hook.Scope{
+    Priority: 200,
+})
+```
+
+When no `Scope` is provided, the hook applies to all tables and all operations with a default priority of 100.
+
+## Hook Chain Execution
+
+1. **PreQuery / PreMutation** hooks run in priority order (lowest priority number first)
+2. If any hook returns `Deny`, the chain stops immediately and returns `HookResult.Error`
+3. `Modify` results accumulate -- all extra filters from all hooks are combined
+4. The query executes with accumulated modifications
+5. **PostQuery / PostMutation** hooks run in priority order
+6. For streams, `StreamRowHook` runs per-row after the stream is opened; a `Skip` decision drops the row, a `Deny` decision stops iteration
+
+## Example: Custom Audit Hook
+
+```go
+type AuditHook struct{}
+
+func (h *AuditHook) AfterMutation(ctx context.Context, qc *hook.QueryContext, data any, result any) error {
+    log.Printf("[AUDIT] %s on %s", qc.Operation, qc.Table)
+    return nil
+}
+
+// Register it
+db.Hooks().AddHook(&AuditHook{}, hook.Scope{
+    Operations: []hook.Operation{hook.OpInsert, hook.OpUpdate, hook.OpDelete},
+})
+```
+
+## Example: PII Redaction Hook
+
+```go
+type PIIRedactor struct{}
+
+func (h *PIIRedactor) AfterQuery(ctx context.Context, qc *hook.QueryContext, result any) error {
+    for col, classification := range qc.PrivacyColumns {
+        if classification == "pii" {
+            // Redact PII columns from the result
+            redact(result, col)
+        }
+    }
+    return nil
+}
+
+db.Hooks().AddHook(&PIIRedactor{})
+```
+
+## Performance
+
+Target: **< 1 microsecond per hook** in the chain. Hooks are called via direct interface dispatch (type assertion), not reflection.

@@ -1,0 +1,65 @@
+---
+title: Type-Safe IDs
+description: Grove uses TypeIDs for type-safe, K-sortable entity identifiers across the Forge ecosystem.
+---
+
+Grove uses [TypeID](https://github.com/jetify-com/typeid) for entity identifiers, following the Forge ecosystem convention. TypeIDs are type-safe, K-sortable, and globally unique.
+
+## Format
+
+```
+prefix_suffix
+```
+
+- **prefix** — Identifies the entity type (e.g., `usr` for users)
+- **suffix** — A UUIDv7-based, base32-encoded identifier
+
+Example: `usr_01h455vb4pex5vsknk084sn02q`
+
+## Usage in Models
+
+TypeIDs integrate naturally with Grove's model definitions:
+
+```go
+import (
+    "go.jetify.com/typeid"
+    "github.com/xraph/grove"
+)
+
+type User struct {
+    grove.BaseModel `grove:"table:users,alias:u"`
+
+    ID    typeid.TypeID `grove:"id,pk,type:varchar(36)"`
+    Name  string        `grove:"name,notnull"`
+    Email string        `grove:"email,notnull,unique"`
+}
+```
+
+## Serialization
+
+TypeIDs implement standard Go serialization interfaces:
+
+- `encoding.TextMarshaler` / `encoding.TextUnmarshaler`
+- `encoding/json.Marshaler` / `encoding/json.Unmarshaler`
+- `database/sql.Scanner` / `driver.Valuer`
+
+This means they work transparently with JSON APIs, database queries, and text-based protocols.
+
+## K-Sortability
+
+TypeIDs are based on UUIDv7, which encodes a timestamp:
+
+- IDs sort chronologically by creation time
+- Database indexes on TypeID columns are efficient (no random scatter)
+- No need for separate `created_at` indexes for ordering
+
+## Forge Ecosystem Convention
+
+All Forge extensions use TypeID prefixes to avoid collisions:
+
+| Extension | Prefix Convention |
+|-----------|-------------------|
+| Grove | Application-defined (e.g., `usr`, `org`, `inv`) |
+| Warden | `wrol`, `wprm`, `wasn`, `wpol` |
+| Chronicle | `cevt`, `clog` |
+| Sentinel | `shst`, `shck` |

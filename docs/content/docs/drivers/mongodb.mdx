@@ -1,0 +1,546 @@
+---
+title: MongoDB
+description: MongoDB driver with native BSON syntax and aggregation pipeline support.
+---
+
+The MongoDB driver provides native BSON query syntax and aggregation pipeline support, built on the [official Go driver v2](https://pkg.go.dev/go.mongodb.org/mongo-driver/v2). Unlike the SQL-based drivers (pgdriver, mysqldriver, sqlitedriver), this driver uses MongoDB-native operations (Find, InsertOne, UpdateOne, Aggregate, etc.) and implements `grove.GroveDriver`.
+
+## Installation
+
+```bash
+go get github.com/xraph/grove
+go get go.mongodb.org/mongo-driver/v2
+```
+
+## Connection
+
+```go
+import (
+    "context"
+    "log"
+
+    "github.com/xraph/grove"
+    "github.com/xraph/grove/mongodriver"
+)
+
+ctx := context.Background()
+
+// 1. Create an unconnected driver
+mdb := mongodriver.New()
+
+// 2. Open a connection (database name is extracted from the URI path)
+err := mdb.Open(ctx, "mongodb://localhost:27017/mydb")
+if err != nil {
+    log.Fatal(err)
+}
+
+// 3. Wrap in a grove.DB handle
+db, err := grove.Open(mdb)
+if err != nil {
+    log.Fatal(err)
+}
+defer db.Close()
+```
+
+### Overriding the Database Name
+
+If your URI does not contain a database path, or you want to target a different database, use `WithDatabase`:
+
+```go
+err := mdb.Open(ctx, "mongodb://localhost:27017",
+    mongodriver.WithDatabase("mydb"),
+)
+```
+
+### Unwrap Pattern
+
+Many MongoDB-specific query builders live on `*mongodriver.MongoDB`. Use `Unwrap` to extract the driver from a `*grove.DB` handle:
+
+```go
+mdb := mongodriver.Unwrap(db)
+
+// Now you can use MongoDB-native query builders:
+mdb.NewFind(&users).Filter(bson.M{"role": "admin"}).Scan(ctx)
+```
+
+### Accessing the Underlying Client
+
+```go
+mdb := mongodriver.Unwrap(db)
+
+client := mdb.Client()       // *mongo.Client
+database := mdb.Database()   // *mongo.Database
+coll := mdb.Collection("users") // *mongo.Collection
+```
+
+## BSON Types
+
+The `mongodriver` package re-exports common BSON types so you can avoid importing the `bson` package directly if you prefer:
+
+```go
+import "github.com/xraph/grove/mongodriver"
+
+filter := mongodriver.M{"status": "active"}  // = bson.M
+sort := mongodriver.D{{"name", 1}}           // = bson.D
+arr := mongodriver.A{"a", "b", "c"}          // = bson.A
+```
+
+The package also provides ObjectID helpers:
+
+```go
+id := mongodriver.NewObjectID()
+id, err := mongodriver.ObjectIDFromHex("507f1f77bcf86cd799439011")
+ok := mongodriver.IsValidObjectID("507f1f77bcf86cd799439011")
+```
+
+All code examples below use `bson.M` and `bson.D` directly:
+
+```go
+import "go.mongodb.org/mongo-driver/v2/bson"
+```
+
+## Defining Models
+
+Models are plain Go structs with `grove` struct tags. The collection name is derived from the table name in the schema (typically the pluralized, snake-cased struct name).
+
+```go
+type User struct {
+    ID        mongodriver.ObjectID `grove:"id,pk"`
+    Name      string               `grove:"name"`
+    Email     string               `grove:"email"`
+    Role      string               `grove:"role"`
+    Age       int                  `grove:"age"`
+    CreatedAt time.Time            `grove:"created_at"`
+}
+```
+
+The `id` field is automatically mapped to MongoDB's `_id` field. If the primary key has a zero value on insert, it is omitted so MongoDB generates an `_id` automatically.
+
+## Find Queries
+
+Create find queries with `NewFind`. Pass a pointer to a struct (single result) or a pointer to a slice (multiple results).
+
+### Find Multiple Documents
+
+```go
+var users []User
+
+mdb := mongodriver.Unwrap(db)
+
+err := mdb.NewFind(&users).
+    Filter(bson.M{"role": "admin"}).
+    Sort(bson.D{{"created_at", -1}}).
+    Limit(20).
+    Skip(0).
+    Scan(ctx)
+```
+
+### Find a Single Document
+
+```go
+var user User
+
+err := mdb.NewFind(&user).
+    Filter(bson.M{"email": "alice@example.com"}).
+    Scan(ctx)
+```
+
+### Projection
+
+Use `Project` to include or exclude specific fields:
+
+```go
+var users []User
+
+err := mdb.NewFind(&users).
+    Filter(bson.M{"role": "admin"}).
+    Project(bson.M{"name": 1, "email": 1}).
+    Scan(ctx)
+```
+
+### Count Documents
+
+```go
+count, err := mdb.NewFind(&users).
+    Filter(bson.M{"role": "admin"}).
+    Count(ctx)
+```
+
+### Override Collection Name
+
+```go
+err := mdb.NewFind(&users).
+    Collection("archived_users").
+    Filter(bson.M{"role": "admin"}).
+    Scan(ctx)
+```
+
+## Insert
+
+Create insert queries with `NewInsert`. The driver auto-detects single vs bulk insert based on whether the model is a struct pointer or a slice pointer.
+
+### Insert a Single Document
+
+```go
+user := User{
+    Name:      "Alice",
+    Email:     "alice@example.com",
+    Role:      "admin",
+    CreatedAt: time.Now(),
+}
+
+result, err := mdb.NewInsert(&user).Exec(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Get the generated ObjectID
+insertedID := result.InsertedID()
+```
+
+### Bulk Insert
+
+```go
+users := []User{
+    {Name: "Bob", Email: "bob@example.com", Role: "user"},
+    {Name: "Carol", Email: "carol@example.com", Role: "user"},
+}
+
+result, err := mdb.NewInsert(&users).Exec(ctx)
+```
+
+## Update
+
+Create update queries with `NewUpdate`. Use `Set` to update individual fields, or `SetUpdate` for complex update operations.
+
+### Update with Set
+
+Use `Set(field, value)` to set individual fields via the `$set` operator:
+
+```go
+result, err := mdb.NewUpdate(&User{}).
+    Filter(bson.M{"_id": userID}).
+    Set("name", "New Name").
+    Set("role", "moderator").
+    Exec(ctx)
+
+fmt.Println(result.MatchedCount())  // documents matched
+fmt.Println(result.ModifiedCount()) // documents actually modified
+```
+
+### Complex Updates with SetUpdate
+
+Use `SetUpdate` for MongoDB update operators like `$inc`, `$push`, `$unset`, etc.:
+
+```go
+result, err := mdb.NewUpdate(&User{}).
+    Filter(bson.M{"role": "user"}).
+    SetUpdate(bson.M{
+        "$inc":  bson.M{"login_count": 1},
+        "$set":  bson.M{"last_login": time.Now()},
+    }).
+    Exec(ctx)
+```
+
+### Upsert
+
+Insert the document if no match is found:
+
+```go
+result, err := mdb.NewUpdate(&User{}).
+    Filter(bson.M{"email": "alice@example.com"}).
+    Set("name", "Alice").
+    Set("role", "admin").
+    Upsert().
+    Exec(ctx)
+
+fmt.Println(result.UpsertedCount()) // 1 if a new document was created
+```
+
+### Update Many
+
+Update all matching documents instead of just the first:
+
+```go
+result, err := mdb.NewUpdate(&User{}).
+    Filter(bson.M{"role": "guest"}).
+    Set("role", "user").
+    Many().
+    Exec(ctx)
+```
+
+## Delete
+
+Create delete queries with `NewDelete`.
+
+### Delete a Single Document
+
+```go
+result, err := mdb.NewDelete(&User{}).
+    Filter(bson.M{"_id": userID}).
+    Exec(ctx)
+
+fmt.Println(result.DeletedCount())
+```
+
+### Delete Many
+
+Delete all matching documents:
+
+```go
+result, err := mdb.NewDelete(&User{}).
+    Filter(bson.M{"role": "inactive"}).
+    Many().
+    Exec(ctx)
+```
+
+## Aggregation Pipeline
+
+Create aggregation pipelines with `NewAggregate`. Unlike the other query builders, `NewAggregate` takes a **collection name string** (not a model pointer).
+
+### Basic Aggregation
+
+```go
+type DeptStats struct {
+    Department string  `bson:"_id"`
+    Count      int     `bson:"count"`
+    AvgSalary  float64 `bson:"avg_salary"`
+}
+
+var results []DeptStats
+
+err := mdb.NewAggregate("users").
+    Match(bson.M{"status": "active"}).
+    Group(bson.M{
+        "_id":        "$department",
+        "count":      bson.M{"$sum": 1},
+        "avg_salary": bson.M{"$avg": "$salary"},
+    }).
+    Sort(bson.D{{"count", -1}}).
+    Scan(ctx, &results)
+```
+
+### Projection
+
+```go
+err := mdb.NewAggregate("users").
+    Match(bson.M{"role": "admin"}).
+    Project(bson.M{
+        "name":  1,
+        "email": 1,
+        "year":  bson.M{"$year": "$created_at"},
+    }).
+    Scan(ctx, &results)
+```
+
+### Lookup (Join)
+
+Use `Lookup` with a `bson.M` document matching MongoDB's `$lookup` syntax:
+
+```go
+type UserWithOrders struct {
+    ID     mongodriver.ObjectID `bson:"_id"`
+    Name   string               `bson:"name"`
+    Orders []Order              `bson:"user_orders"`
+}
+
+var results []UserWithOrders
+
+err := mdb.NewAggregate("users").
+    Match(bson.M{"status": "active"}).
+    Lookup(bson.M{
+        "from":         "orders",
+        "localField":   "_id",
+        "foreignField": "user_id",
+        "as":           "user_orders",
+    }).
+    Scan(ctx, &results)
+```
+
+### Unwind
+
+Deconstruct an array field into separate documents:
+
+```go
+err := mdb.NewAggregate("users").
+    Match(bson.M{"status": "active"}).
+    Lookup(bson.M{
+        "from":         "orders",
+        "localField":   "_id",
+        "foreignField": "user_id",
+        "as":           "user_orders",
+    }).
+    Unwind("$user_orders").
+    Scan(ctx, &results)
+```
+
+### Limit and Skip
+
+```go
+err := mdb.NewAggregate("logs").
+    Match(bson.M{"level": "error"}).
+    Sort(bson.D{{"timestamp", -1}}).
+    Skip(100).
+    Limit(50).
+    Scan(ctx, &results)
+```
+
+### Custom Pipeline Stages
+
+Use `Stage` for any pipeline operator not covered by the convenience methods:
+
+```go
+err := mdb.NewAggregate("orders").
+    Match(bson.M{"status": "completed"}).
+    Stage(bson.M{
+        "$addFields": bson.M{
+            "total_with_tax": bson.M{"$multiply": []any{"$total", 1.1}},
+        },
+    }).
+    Scan(ctx, &results)
+```
+
+## Transactions
+
+MongoDB transactions require a replica set or sharded cluster. The driver wraps sessions and transactions into `MongoTx`.
+
+```go
+mdb := mongodriver.Unwrap(db)
+
+tx, err := mdb.GroveTx(ctx, 0, false)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Use the transaction-scoped query builders
+_, err = tx.NewInsert(&User{Name: "Alice", Email: "alice@example.com"}).Exec(ctx)
+if err != nil {
+    tx.Rollback()
+    log.Fatal(err)
+}
+
+_, err = tx.NewUpdate(&User{}).
+    Filter(bson.M{"email": "alice@example.com"}).
+    Set("role", "admin").
+    Exec(ctx)
+if err != nil {
+    tx.Rollback()
+    log.Fatal(err)
+}
+
+err = tx.Commit()
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+### Session Context
+
+If you need to call the underlying MongoDB client directly within a transaction, use `SessionContext` to obtain a context that carries the session:
+
+```go
+sessCtx := tx.SessionContext(ctx)
+
+// Use the session context with raw MongoDB operations
+_, err = mdb.Collection("audit_log").InsertOne(sessCtx, bson.M{
+    "action": "user_created",
+    "timestamp": time.Now(),
+})
+```
+
+### Transaction Query Builders
+
+`MongoTx` provides the same query builders as `*MongoDB`, but all operations execute within the transaction:
+
+- `tx.NewFind(model...)` -- find within transaction
+- `tx.NewInsert(model)` -- insert within transaction
+- `tx.NewUpdate(model)` -- update within transaction
+- `tx.NewDelete(model)` -- delete within transaction
+
+## Migrations
+
+The `mongomigrate` package provides a MongoDB-specific migration executor that integrates with Grove's migration system.
+
+### Setup
+
+```go
+import (
+    "github.com/xraph/grove/migrate"
+    "github.com/xraph/grove/mongodriver"
+    "github.com/xraph/grove/mongodriver/mongomigrate"
+)
+
+mdb := mongodriver.Unwrap(db)
+executor := mongomigrate.New(mdb)
+```
+
+### Migration Tracking
+
+The executor stores migration state in two collections:
+
+- `grove_migrations` -- tracks applied migrations with a unique index on `(version, group)`
+- `grove_migration_locks` -- distributed locking via atomic `findOneAndUpdate`
+
+### Writing Migrations
+
+MongoDB migrations use the driver API directly rather than SQL. The executor's `Exec` and `Query` methods return `ErrNotSupported` -- use the `DB()` method to access the `*mongodriver.MongoDB` instance within migration functions:
+
+```go
+migrations := []*migrate.Migration{
+    {
+        Version: "20240101120000",
+        Name:    "create_users_indexes",
+        Group:   "default",
+        Up: func(ctx context.Context, exec migrate.Executor) error {
+            mdb := exec.(*mongomigrate.Executor).DB()
+
+            // Create indexes using the MongoDB driver directly
+            _, err := mdb.Collection("users").Indexes().CreateOne(ctx,
+                mongo.IndexModel{
+                    Keys:    bson.D{{"email", 1}},
+                    Options: options.Index().SetUnique(true),
+                },
+            )
+            return err
+        },
+        Down: func(ctx context.Context, exec migrate.Executor) error {
+            mdb := exec.(*mongomigrate.Executor).DB()
+            _, err := mdb.Collection("users").Indexes().DropOne(ctx, "email_1")
+            return err
+        },
+    },
+}
+```
+
+### Running Migrations
+
+```go
+var Migrations = migrate.NewGroup("app")
+
+func init() {
+    Migrations.MustRegister(migrations...)
+}
+
+orchestrator := migrate.NewOrchestrator(executor, Migrations)
+
+// Apply all pending migrations
+result, err := orchestrator.Migrate(ctx)
+
+// Rollback the last batch
+result, err = orchestrator.Rollback(ctx)
+```
+
+## Result Type
+
+All write operations (insert, update, delete) return a result object with the following methods:
+
+| Method | Description |
+|---|---|
+| `RowsAffected()` | Number of documents affected (inserted, modified, or deleted) |
+| `InsertedID()` | The `_id` of the inserted document (typically an ObjectID) |
+| `MatchedCount()` | Number of documents matched by the filter |
+| `ModifiedCount()` | Number of documents actually modified |
+| `DeletedCount()` | Number of documents deleted |
+| `UpsertedCount()` | Number of documents upserted |
+
+`LastInsertId()` always returns an error because MongoDB does not use auto-incrementing integer IDs. Use `InsertedID()` instead.

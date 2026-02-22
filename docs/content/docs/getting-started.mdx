@@ -1,0 +1,117 @@
+---
+title: Getting Started
+description: Install Grove and run your first database query.
+---
+
+## Installation
+
+```bash
+go get github.com/xraph/grove
+```
+
+For PostgreSQL support (the most common driver):
+
+```bash
+go get github.com/xraph/grove/pgdriver
+```
+
+## Step 1: Define a Model
+
+Grove uses struct tags to map Go types to database columns. Use `grove:"..."` tags for new models:
+
+```go
+package main
+
+import "github.com/xraph/grove"
+
+type User struct {
+    grove.BaseModel `grove:"table:users,alias:u"`
+
+    ID        int64     `grove:"id,pk,autoincrement"`
+    Name      string    `grove:"name,notnull"`
+    Email     string    `grove:"email,notnull,unique"`
+    Role      string    `grove:"role,notnull,default:'user'"`
+    CreatedAt time.Time `grove:"created_at,nullzero,notnull,default:current_timestamp"`
+    DeletedAt time.Time `grove:"deleted_at,soft_delete,nullzero"`
+}
+```
+
+## Step 2: Connect to the Database
+
+```go
+import (
+    "github.com/xraph/grove"
+    "github.com/xraph/grove/driver"
+    "github.com/xraph/grove/pgdriver"
+)
+
+// 1. Create and open the driver
+pgdb := pgdriver.New()
+pgdb.Open(ctx, "postgres://user:pass@localhost/mydb", driver.WithPoolSize(20))
+
+// 2. Pass the connected driver to Grove
+db, err := grove.Open(pgdb)
+if err != nil {
+    log.Fatal(err)
+}
+defer db.Close()
+```
+
+## Step 3: Register Models
+
+```go
+db.RegisterModel((*User)(nil))
+```
+
+## Step 4: Query Data
+
+Access the PostgreSQL-specific query builder via `Unwrap`:
+
+```go
+pgdb := pgdriver.Unwrap(db)
+
+// SELECT
+var users []User
+err := pgdb.NewSelect(&users).
+    Where("role = $1", "admin").
+    OrderExpr("created_at DESC").
+    Limit(10).
+    Scan(ctx)
+
+// INSERT
+user := &User{Name: "Alice", Email: "alice@example.com"}
+_, err = pgdb.NewInsert(user).Exec(ctx)
+
+// UPDATE
+_, err = pgdb.NewUpdate(&User{}).
+    Set("role = $1", "admin").
+    Where("email = $2", "alice@example.com").
+    Exec(ctx)
+
+// DELETE (soft delete if model has soft_delete tag)
+_, err = pgdb.NewDelete(&User{}).
+    Where("id = $1", userID).
+    Exec(ctx)
+```
+
+## Step 5: Use Existing Bun Models
+
+If you're migrating from bun, your existing models work with zero changes:
+
+```go
+// Existing bun model — works as-is
+type LegacyUser struct {
+    grove.BaseModel `bun:"table:users,alias:u"`
+
+    ID    int64  `bun:"id,pk,autoincrement"`
+    Name  string `bun:"name,notnull"`
+    Email string `bun:"email,notnull,unique"`
+}
+```
+
+## Next Steps
+
+- [Architecture](/docs/architecture) — Understand the package structure and query pipeline
+- [Dual Tag System](/docs/concepts/dual-tags) — Learn how tag resolution works
+- [PostgreSQL Driver](/docs/drivers/postgres) — Full reference for PG-specific features
+- [Basic CRUD](/docs/guides/basic-crud) — Complete CRUD examples with relations

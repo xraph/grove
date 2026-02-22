@@ -1,0 +1,71 @@
+---
+title: Zero-Reflection Hot Path
+description: How Grove achieves near-raw performance by reflecting once at startup.
+---
+
+Grove uses Go reflection exactly once — at model registration time. The hot path (query building, execution, and result scanning) uses cached field offsets and pooled buffers, targeting 5% or less overhead versus raw database driver usage.
+
+## Reflect-Once Architecture
+
+### Registration Phase (Startup)
+
+When you call `db.RegisterModel()`, Grove inspects the struct using reflection and caches:
+
+- Field names, types, and offsets
+- Tag metadata (column name, constraints, relations, privacy)
+- Type converters (Go type to DB type and back)
+- Scan functions (pre-compiled for each field)
+
+```go
+// Reflection happens here — once per model type
+db.RegisterModel((*User)(nil))
+db.RegisterModel((*Post)(nil))
+db.RegisterModel((*Comment)(nil))
+```
+
+### Hot Path (Every Query)
+
+After registration, every query operation uses cached metadata:
+
+```go
+// Zero reflection — uses cached field offsets and pooled buffers
+var users []User
+err := db.NewSelect(&users).
+    Where("active = $1", true).
+    Scan(ctx)
+```
+
+The query builder:
+1. Looks up the `User` table metadata from the registry (map lookup)
+2. Builds SQL using cached column names (string concatenation with pooled buffers)
+3. Scans results using cached field offsets (unsafe pointer arithmetic, no reflection)
+
+## Pooled Buffers
+
+Grove pools byte buffers to minimize allocations during query building:
+
+- Query strings are built into `sync.Pool`-managed buffers
+- Argument slices are pooled and reused
+- Result scanning reuses column-to-field mappings
+
+Target: **0-2 heap allocations per simple query.**
+
+## Performance Targets
+
+Grove targets less than 5% overhead versus raw database driver usage. Formal benchmarks will be published after the performance optimization phase.
+
+Run benchmarks yourself:
+
+```bash
+go test -bench=. -benchmem ./pgdriver/
+```
+
+## Why Not Code Generation?
+
+Code generation (like sqlc or ent) avoids reflection entirely but comes with trade-offs:
+
+- Requires a build step
+- Generated code is harder to debug
+- Doesn't support dynamic model composition (Forge extensions adding fields at runtime)
+
+Grove's reflect-once approach provides near-codegen performance while maintaining the flexibility of a runtime ORM.

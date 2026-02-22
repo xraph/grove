@@ -1,0 +1,504 @@
+---
+title: SQLite
+description: SQLite driver with pure-Go implementation via modernc.org/sqlite.
+---
+
+The SQLite driver provides a pure-Go SQLite implementation for Grove, built on [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite). No CGo or C compiler is required. WAL mode and foreign keys are enabled automatically on every connection.
+
+## Installation
+
+```bash
+go get github.com/xraph/grove
+go get modernc.org/sqlite
+```
+
+## Connection
+
+```go
+import (
+    "context"
+    "log"
+
+    "github.com/xraph/grove"
+    "github.com/xraph/grove/driver"
+    "github.com/xraph/grove/sqlitedriver"
+)
+
+// 1. Create and open the driver
+sdb := sqlitedriver.New()
+if err := sdb.Open(ctx, "file:mydb.sqlite"); err != nil {
+    log.Fatal(err)
+}
+
+// 2. Pass the connected driver to Grove
+db, err := grove.Open(sdb)
+if err != nil {
+    log.Fatal(err)
+}
+defer db.Close()
+```
+
+`Open` automatically runs `PRAGMA journal_mode=WAL` and `PRAGMA foreign_keys=ON`, so you do not need to set these yourself.
+
+### DSN Examples
+
+| DSN | Description |
+|-----|-------------|
+| `"file:mydb.sqlite"` | File-based database |
+| `":memory:"` | In-memory database (ideal for tests) |
+| `"file:test.db?mode=ro"` | Read-only file |
+
+### Connection Pool Options
+
+```go
+sdb := sqlitedriver.New()
+sdb.Open(ctx, "file:mydb.sqlite",
+    driver.WithPoolSize(1), // SQLite is single-writer; 1 is typical
+)
+db, err := grove.Open(sdb)
+```
+
+### Unwrap Pattern
+
+Use `sqlitedriver.Unwrap` to access the underlying `*SqliteDB` from a `*grove.DB` handle. This gives you direct access to the SQLite-specific query builders:
+
+```go
+sdb := sqlitedriver.Unwrap(db) // returns *sqlitedriver.SqliteDB
+
+var users []User
+sdb.NewSelect(&users).
+    Where("email LIKE ?", "%@example.com").
+    Scan(ctx)
+```
+
+## Native Syntax
+
+### Placeholders
+
+SQLite uses `?` for parameterized queries:
+
+```go
+sdb.NewSelect(&users).
+    Where("email LIKE ?", "%@example.com").
+    Where("active = ?", true).
+    Scan(ctx)
+```
+
+### Quoting
+
+Identifiers are quoted with double quotes following the SQL standard:
+
+```sql
+SELECT "id", "email" FROM "users" WHERE "active" = ?
+```
+
+### Type Mapping
+
+| Go Type | SQLite Type |
+|---------|-------------|
+| `bool` | `INTEGER` (0/1) |
+| `int`, `int8`, `int16`, `int32`, `int64` | `INTEGER` |
+| `float32`, `float64` | `REAL` |
+| `string` | `TEXT` |
+| `time.Time`, `*time.Time` | `TEXT` (RFC 3339) |
+| `[]byte` | `BLOB` (stored as `X'hex'`) |
+| `map[string]any` | `TEXT` (JSON) |
+
+## Query Builders
+
+### SELECT
+
+```go
+sdb := sqlitedriver.Unwrap(db)
+
+// Basic select with conditions
+var users []User
+sdb.NewSelect(&users).
+    Where("role = ?", "admin").
+    Where("active = ?", true).
+    OrderExpr("created_at DESC").
+    Limit(20).
+    Offset(0).
+    Scan(ctx)
+
+// Select specific columns
+sdb.NewSelect(&users).
+    Column("id", "name", "email").
+    Where("department = ?", "engineering").
+    Scan(ctx)
+
+// Column expressions
+sdb.NewSelect(&users).
+    ColumnExpr("COUNT(*) AS count").
+    ColumnExpr("department").
+    GroupExpr("department").
+    Having("COUNT(*) > ?", 5).
+    Scan(ctx)
+
+// Joins
+sdb.NewSelect(&users).
+    Join("JOIN", `"orders" AS "o"`, `"o"."user_id" = "users"."id"`).
+    Where(`"o"."total" > ?`, 100).
+    Scan(ctx)
+
+// Left join
+sdb.NewSelect(&users).
+    Join("LEFT JOIN", `"profiles" AS "p"`, `"p"."user_id" = "users"."id"`).
+    Scan(ctx)
+
+// OR conditions
+sdb.NewSelect(&users).
+    Where("role = ?", "admin").
+    WhereOr("role = ?", "superadmin").
+    Scan(ctx)
+
+// Select by primary key
+user := User{ID: 42}
+sdb.NewSelect(&user).WherePK().Scan(ctx)
+
+// Count rows
+count, err := sdb.NewSelect(&users).
+    Where("active = ?", true).
+    Count(ctx)
+
+// Eager-load relations
+sdb.NewSelect(&users).
+    Relation("Orders").
+    Scan(ctx)
+
+// Custom FROM expression (views, subqueries)
+sdb.NewSelect(&users).
+    TableExpr("active_users_view AS u").
+    Scan(ctx)
+```
+
+### Soft Delete Filtering
+
+Models with a `soft_delete` field automatically exclude soft-deleted rows from SELECT queries. Use `WithDeleted()` to include them:
+
+```go
+// Only non-deleted users (default)
+sdb.NewSelect(&users).Scan(ctx)
+
+// Include soft-deleted users
+sdb.NewSelect(&users).WithDeleted().Scan(ctx)
+```
+
+### INSERT
+
+```go
+sdb := sqlitedriver.Unwrap(db)
+
+// Insert a single row
+user := User{Name: "Alice", Email: "alice@example.com"}
+_, err := sdb.NewInsert(&user).Exec(ctx)
+
+// Insert specific columns
+_, err := sdb.NewInsert(&user).
+    Column("name", "email").
+    Exec(ctx)
+
+// Bulk insert from a slice
+users := []User{
+    {Name: "Alice", Email: "alice@example.com"},
+    {Name: "Bob", Email: "bob@example.com"},
+}
+_, err := sdb.NewInsert(&users).Exec(ctx)
+```
+
+### ON CONFLICT (Upsert)
+
+```go
+sdb.NewInsert(&user).
+    OnConflict("(email) DO UPDATE").
+    Set("name = EXCLUDED.name").
+    Set("updated_at = DATETIME('now')").
+    Exec(ctx)
+
+// ON CONFLICT DO NOTHING
+sdb.NewInsert(&user).
+    OnConflict("(email) DO NOTHING").
+    Exec(ctx)
+```
+
+### UPDATE
+
+```go
+sdb := sqlitedriver.Unwrap(db)
+
+// Update all fields from model
+user.Name = "Alice Smith"
+_, err := sdb.NewUpdate(&user).WherePK().Exec(ctx)
+
+// Update specific columns only
+_, err := sdb.NewUpdate(&user).
+    Column("name", "email").
+    WherePK().
+    Exec(ctx)
+
+// Raw SET expressions
+_, err := sdb.NewUpdate(&user).
+    Set("login_count = login_count + ?", 1).
+    Where("id = ?", 42).
+    Exec(ctx)
+
+// Skip zero-value fields
+_, err := sdb.NewUpdate(&user).
+    OmitZero().
+    WherePK().
+    Exec(ctx)
+```
+
+### DELETE
+
+```go
+sdb := sqlitedriver.Unwrap(db)
+
+// Delete by primary key
+user := User{ID: 42}
+_, err := sdb.NewDelete(&user).WherePK().Exec(ctx)
+
+// Delete with conditions
+_, err := sdb.NewDelete(&user).
+    Where("active = ?", false).
+    Where("last_login < ?", cutoffDate).
+    Exec(ctx)
+```
+
+When the model has a `soft_delete` field, `NewDelete` generates an `UPDATE ... SET deleted_at = DATETIME('now')` instead of a real `DELETE`. Use `ForceDelete()` to perform a hard delete:
+
+```go
+// Soft delete (sets deleted_at timestamp)
+sdb.NewDelete(&user).WherePK().Exec(ctx)
+
+// Hard delete (actual DELETE FROM)
+sdb.NewDelete(&user).WherePK().ForceDelete().Exec(ctx)
+```
+
+## RETURNING
+
+SQLite 3.35+ supports `RETURNING` on INSERT, UPDATE, and DELETE. All three query builders expose `.Returning()` and `.Scan()`:
+
+```go
+// INSERT ... RETURNING
+var id int64
+sdb.NewInsert(&user).
+    Returning("id").
+    Scan(ctx, &id)
+
+// UPDATE ... RETURNING
+var updated User
+sdb.NewUpdate(&user).
+    Set("name = ?", "New Name").
+    Where("id = ?", 42).
+    Returning("*").
+    Scan(ctx, &updated.ID, &updated.Name, &updated.Email)
+
+// DELETE ... RETURNING
+var deletedID int64
+sdb.NewDelete(&user).
+    Where("id = ?", 42).
+    ForceDelete().
+    Returning("id").
+    Scan(ctx, &deletedID)
+```
+
+## Transactions
+
+`BeginTxQuery` returns a `*SqliteTx` that exposes all query builders scoped to the transaction:
+
+```go
+sdb := sqlitedriver.Unwrap(db)
+
+tx, err := sdb.BeginTxQuery(ctx, nil)
+if err != nil {
+    return err
+}
+defer tx.Rollback()
+
+_, err = tx.NewInsert(&order).Exec(ctx)
+if err != nil {
+    return err
+}
+
+_, err = tx.NewUpdate(&inventory).
+    Set("quantity = quantity - ?", order.Quantity).
+    Where("product_id = ?", order.ProductID).
+    Exec(ctx)
+if err != nil {
+    return err
+}
+
+return tx.Commit()
+```
+
+All query types are available on `SqliteTx`: `NewSelect`, `NewInsert`, `NewUpdate`, `NewDelete`, and `NewRaw`.
+
+## CreateTable
+
+```go
+sdb := sqlitedriver.Unwrap(db)
+
+// Create table from model
+_, err := sdb.NewCreateTable((*User)(nil)).
+    IfNotExists().
+    Exec(ctx)
+
+// With foreign keys
+_, err := sdb.NewCreateTable((*Order)(nil)).
+    IfNotExists().
+    WithForeignKey("(user_id) REFERENCES users(id) ON DELETE CASCADE").
+    Exec(ctx)
+
+// Temporary table
+_, err := sdb.NewCreateTable((*TempResult)(nil)).
+    Temp().
+    Exec(ctx)
+
+// Drop table
+_, err := sdb.NewDropTable((*User)(nil)).
+    IfExists().
+    Exec(ctx)
+```
+
+## Raw Queries
+
+Use `NewRaw` for queries that do not fit the query builders:
+
+```go
+sdb := sqlitedriver.Unwrap(db)
+
+// Execute DDL or DML
+_, err := sdb.NewRaw("PRAGMA table_info(?)", "users").Exec(ctx)
+
+// Scan into structs
+var users []User
+sdb.NewRaw("SELECT * FROM users WHERE role = ?", "admin").Scan(ctx, &users)
+
+// Scan into scalars
+var count int64
+sdb.NewRaw("SELECT COUNT(*) FROM users").Scan(ctx, &count)
+```
+
+## Migrations
+
+The `sqlitemigrate` package provides a migration executor that uses table-based cooperative locking (SQLite does not support advisory locks). Migration state is stored in the `grove_migrations` table and locks are managed via the `grove_migration_locks` table.
+
+```go
+import (
+    "github.com/xraph/grove/migrate"
+    "github.com/xraph/grove/sqlitedriver"
+    "github.com/xraph/grove/sqlitedriver/sqlitemigrate"
+)
+
+// Define a migration group
+var Migrations = migrate.NewGroup("app")
+
+func init() {
+    Migrations.MustRegister(
+        &migrate.Migration{
+            Name:    "create_users",
+            Version: "20250101120000",
+            Up: func(ctx context.Context, exec migrate.Executor) error {
+                _, err := exec.Exec(ctx, `CREATE TABLE IF NOT EXISTS "users" (
+                    "id"         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    "name"       TEXT NOT NULL,
+                    "email"      TEXT NOT NULL UNIQUE,
+                    "created_at" TEXT NOT NULL DEFAULT (DATETIME('now')),
+                    "deleted_at" TEXT
+                )`)
+                return err
+            },
+            Down: func(ctx context.Context, exec migrate.Executor) error {
+                _, err := exec.Exec(ctx, `DROP TABLE IF EXISTS "users"`)
+                return err
+            },
+        },
+    )
+}
+
+// Run migrations
+sdb := sqlitedriver.New()
+sdb.Open(ctx, "file:mydb.sqlite")
+
+executor := sqlitemigrate.New(sdb)
+orchestrator := migrate.NewOrchestrator(executor, Migrations)
+
+result, err := orchestrator.Migrate(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+log.Printf("Applied %d migrations", len(result.Applied))
+
+// Rollback the last migration
+result, err = orchestrator.Rollback(ctx)
+
+// Check migration status
+statuses, err := orchestrator.Status(ctx)
+```
+
+## Testing with In-Memory Databases
+
+SQLite's `:memory:` DSN creates an ephemeral database that is discarded when the connection closes. This makes it ideal for fast, isolated unit tests:
+
+```go
+func setupTestDB(t *testing.T) *sqlitedriver.SqliteDB {
+    t.Helper()
+
+    sdb := sqlitedriver.New()
+    if err := sdb.Open(context.Background(), ":memory:"); err != nil {
+        t.Fatal(err)
+    }
+    t.Cleanup(func() { sdb.Close() })
+
+    // Create tables
+    _, err := sdb.NewCreateTable((*User)(nil)).IfNotExists().Exec(context.Background())
+    if err != nil {
+        t.Fatal(err)
+    }
+
+    return sdb
+}
+
+func TestUserInsert(t *testing.T) {
+    sdb := setupTestDB(t)
+    ctx := context.Background()
+
+    user := User{Name: "Alice", Email: "alice@test.com"}
+    _, err := sdb.NewInsert(&user).Exec(ctx)
+    if err != nil {
+        t.Fatal(err)
+    }
+
+    var found User
+    err = sdb.NewSelect(&found).Where("email = ?", "alice@test.com").Scan(ctx)
+    if err != nil {
+        t.Fatal(err)
+    }
+
+    if found.Name != "Alice" {
+        t.Fatalf("expected Alice, got %s", found.Name)
+    }
+}
+```
+
+## Hooks
+
+Attach a hook engine to intercept queries and mutations:
+
+```go
+sdb := sqlitedriver.New()
+sdb.Open(ctx, "file:mydb.sqlite")
+sdb.SetHooks(engine) // *hook.Engine or nil to disable
+```
+
+See the [Hooks documentation](/docs/hooks) for details on registering pre/post query and mutation hooks.
+
+## SQLite-Specific Notes
+
+- **Single writer**: SQLite allows only one writer at a time. WAL mode (enabled automatically) improves read concurrency but does not remove the single-writer constraint.
+- **No row locking**: `FOR UPDATE` / `FOR SHARE` are not supported. The entire database is locked during writes.
+- **No DISTINCT ON**: Use standard `DISTINCT` or `GROUP BY` instead.
+- **No CASCADE on DROP TABLE**: Foreign key `ON DELETE CASCADE` works on row deletes, but `DROP TABLE ... CASCADE` is not supported. Drop dependent tables first.
+- **AUTOINCREMENT**: Use `INTEGER PRIMARY KEY AUTOINCREMENT` for auto-incrementing IDs. The schema tag `grove:",autoincrement"` handles this automatically.
+- **Time storage**: Times are stored as RFC 3339 `TEXT` strings. Use `DATETIME('now')` for server-side timestamps.

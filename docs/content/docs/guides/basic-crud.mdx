@@ -1,0 +1,243 @@
+---
+title: Basic CRUD
+description: A step-by-step guide to creating, reading, updating, and deleting records with Grove.
+---
+
+This guide walks through basic CRUD operations with Grove using the PostgreSQL driver.
+
+## Setup
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "time"
+
+    "github.com/xraph/grove"
+    "github.com/xraph/grove/driver"
+    "github.com/xraph/grove/pgdriver"
+)
+
+type User struct {
+    grove.BaseModel `grove:"table:users,alias:u"`
+
+    ID        int64     `grove:"id,pk,autoincrement"`
+    Name      string    `grove:"name,notnull"`
+    Email     string    `grove:"email,notnull,unique"`
+    Active    bool      `grove:"active,default:true"`
+    CreatedAt time.Time `grove:"created_at,default:now()"`
+}
+
+func main() {
+    ctx := context.Background()
+
+    // Create and open the driver
+    pgdb := pgdriver.New()
+    pgdb.Open(ctx, "postgres://user:pass@localhost:5432/mydb?sslmode=disable",
+        driver.WithPoolSize(20),
+    )
+
+    // Pass the connected driver to Grove
+    db, err := grove.Open(pgdb)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+
+    db.RegisterModel((*User)(nil))
+}
+```
+
+## Create Table
+
+```go
+_, err := db.NewCreateTable((*User)(nil)).
+    IfNotExists().
+    Exec(ctx)
+```
+
+## Insert
+
+### Single Record
+
+```go
+user := &User{
+    Name:  "Alice",
+    Email: "alice@example.com",
+}
+
+_, err := db.NewInsert(user).Exec(ctx)
+// user.ID is populated after insert (autoincrement)
+```
+
+### With Returning
+
+```go
+var inserted User
+err := db.NewInsert(user).
+    Returning("*").
+    Scan(ctx, &inserted)
+```
+
+### Bulk Insert
+
+```go
+users := []*User{
+    {Name: "Alice", Email: "alice@example.com"},
+    {Name: "Bob", Email: "bob@example.com"},
+    {Name: "Carol", Email: "carol@example.com"},
+}
+
+_, err := db.NewInsert(&users).Exec(ctx)
+```
+
+### Upsert
+
+```go
+_, err := db.NewInsert(user).
+    OnConflict("(email) DO UPDATE").
+    Set("name = EXCLUDED.name").
+    Exec(ctx)
+```
+
+## Select
+
+### Single Record
+
+```go
+var user User
+err := db.NewSelect(&user).
+    Where("id = $1", 1).
+    Scan(ctx)
+```
+
+### Multiple Records
+
+```go
+var users []User
+err := db.NewSelect(&users).
+    Where("active = $1", true).
+    OrderExpr("created_at DESC").
+    Limit(20).
+    Scan(ctx)
+```
+
+### With Conditions
+
+```go
+var users []User
+err := db.NewSelect(&users).
+    Where("email ILIKE $1", "%@example.com").
+    Where("created_at > $1", time.Now().AddDate(0, -1, 0)).
+    Scan(ctx)
+```
+
+### Count
+
+```go
+count, err := db.NewSelect((*User)(nil)).
+    Where("active = $1", true).
+    Count(ctx)
+```
+
+## Update
+
+### By Primary Key
+
+```go
+user.Name = "Alice Smith"
+_, err := db.NewUpdate(user).
+    WherePK().
+    Exec(ctx)
+```
+
+### Selective Columns
+
+```go
+_, err := db.NewUpdate(user).
+    Column("name", "email").
+    WherePK().
+    Exec(ctx)
+```
+
+### Omit Zero Values
+
+```go
+_, err := db.NewUpdate(user).
+    OmitZero().
+    WherePK().
+    Exec(ctx)
+```
+
+### Bulk Update
+
+```go
+_, err := db.NewUpdate((*User)(nil)).
+    Set("active = $1", false).
+    Where("last_login < $1", time.Now().AddDate(-1, 0, 0)).
+    Exec(ctx)
+```
+
+## Delete
+
+### By Primary Key
+
+```go
+_, err := db.NewDelete(user).
+    WherePK().
+    Exec(ctx)
+```
+
+### By Condition
+
+```go
+_, err := db.NewDelete((*User)(nil)).
+    Where("active = $1", false).
+    Where("created_at < $1", time.Now().AddDate(-2, 0, 0)).
+    Exec(ctx)
+```
+
+### Soft Delete
+
+If your model has a `soft_delete` field, DELETE becomes an UPDATE:
+
+```go
+type User struct {
+    grove.BaseModel `grove:"table:users"`
+    ID        int64      `grove:"id,pk"`
+    DeletedAt *time.Time `grove:"deleted_at,soft_delete"`
+}
+
+// This sets deleted_at instead of deleting
+db.NewDelete(user).WherePK().Exec(ctx)
+
+// SELECT automatically filters deleted rows
+db.NewSelect(&users).Scan(ctx) // WHERE deleted_at IS NULL
+
+// Force actual deletion
+db.NewDelete(user).WherePK().ForceDelete().Exec(ctx)
+```
+
+## Transactions
+
+```go
+tx, err := db.BeginTx(ctx, nil)
+if err != nil {
+    return err
+}
+defer tx.Rollback()
+
+_, err = tx.NewInsert(user).Exec(ctx)
+if err != nil {
+    return err
+}
+
+_, err = tx.NewInsert(profile).Exec(ctx)
+if err != nil {
+    return err
+}
+
+return tx.Commit()
+```

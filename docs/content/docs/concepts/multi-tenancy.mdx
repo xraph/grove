@@ -1,0 +1,107 @@
+---
+title: Multi-Tenancy
+description: How Grove enables tenant data isolation through privacy hooks.
+---
+
+## Tenant Isolation with Hooks
+
+Grove's privacy hook system provides automatic tenant isolation at the query level. Every query can be intercepted to inject tenant filters, ensuring data from one tenant never leaks to another.
+
+Grove does **not** ship a built-in `TenantIsolation` hook or a `WithTenantID()` context helper. Instead, you write your own tenant isolation hook using the standard `PreQueryHook` and `PreMutationHook` interfaces. See the [Tenant Isolation Hook](/docs/hooks/tenant-isolation) page for a complete implementation.
+
+### With Forge
+
+When running inside Forge, tenant context is typically set by middleware (e.g., from a JWT or API key). You define the context key and helper yourself:
+
+```go
+// In your middleware
+ctx = myhooks.WithTenantID(ctx, extractedTenantID)
+```
+
+### Standalone Mode
+
+Without Forge, set tenant context explicitly using your own context helper:
+
+```go
+ctx = myhooks.WithTenantID(ctx, "tenant-123")
+```
+
+Alternatively, you can populate `hook.QueryContext.TenantID` from a higher-priority hook or driver-level middleware.
+
+## Tenant Isolation Hook
+
+Write a custom hook that implements `hook.PreQueryHook` and `hook.PreMutationHook` to inject `WHERE tenant_id = ?` into every query:
+
+```go
+import "github.com/xraph/grove/hook"
+
+tenantHook := &myhooks.TenantIsolation{
+    Column:     "tenant_id",
+    SkipTables: []string{"grove_migrations", "settings"},
+}
+
+db.Hooks().AddHook(tenantHook, hook.Scope{
+    Priority: 1, // Run before other hooks
+})
+```
+
+### How It Works
+
+1. Before every SELECT, UPDATE, or DELETE query, the hook extracts the tenant ID from context (or from `QueryContext.TenantID`)
+2. It returns a `HookResult` with `Decision: Modify` and an `ExtraFilter` containing the `tenant_id = $1` clause
+3. Before every INSERT, it can validate that the data has the correct tenant ID set
+4. If no tenant ID is in context, the hook returns `Decision: Deny` with an error
+
+```go
+// This query:
+db.NewSelect(&users).Where("active = $1", true).Scan(ctx)
+
+// Becomes (after hook injection):
+// SELECT * FROM users WHERE active = $1 AND tenant_id = $2
+```
+
+## Per-Table Opt-Out
+
+Not every table needs tenant isolation. The custom hook's `SkipTables` field (or equivalent logic) excludes shared/global tables:
+
+```go
+db.Hooks().AddHook(&myhooks.TenantIsolation{
+    Column:     "tenant_id",
+    SkipTables: []string{"settings", "grove_migrations", "feature_flags"},
+}, hook.Scope{Priority: 1})
+```
+
+You can also use `hook.Scope` to restrict the hook to specific tables instead:
+
+```go
+db.Hooks().AddHook(&myhooks.TenantIsolation{
+    Column: "tenant_id",
+}, hook.Scope{
+    Tables:   []string{"users", "invoices", "orders"},
+    Priority: 1,
+})
+```
+
+## Tenant-Scoped Operations
+
+All CRUD operations are automatically scoped when the hook is active:
+
+```go
+// Creates a user -- hook validates tenant_id on the data
+db.NewInsert(&user).Exec(ctx)
+
+// Lists users for the current tenant only
+db.NewSelect(&users).Scan(ctx)
+
+// Updates only rows belonging to the current tenant
+db.NewUpdate(&user).WherePK().Exec(ctx)
+
+// Deletes only rows belonging to the current tenant
+db.NewDelete(&user).WherePK().Exec(ctx)
+```
+
+## Cross-Tenant Prevention
+
+- Queries without a tenant context are denied by the hook (returns an error)
+- There is no built-in API to query across tenants
+- Admin/superuser bypass requires adding a context flag check at the top of your hook that returns `hook.Skip` for admin users

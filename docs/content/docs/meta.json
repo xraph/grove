@@ -1,0 +1,25 @@
+{
+  "title": "Documentation",
+  "pages": [
+    "---Introduction---",
+    "index",
+    "getting-started",
+    "architecture",
+    "---Core Concepts---",
+    "...concepts",
+    "---Drivers---",
+    "...drivers",
+    "---Migrations---",
+    "...migrations",
+    "---Hooks---",
+    "...hooks",
+    "---Streaming---",
+    "...streaming",
+    "---Integration---",
+    "...integration",
+    "---Guides---",
+    "...guides",
+    "---Reference---",
+    "...api-reference"
+  ]
+}

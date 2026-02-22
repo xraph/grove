@@ -1,0 +1,481 @@
+---
+title: MySQL
+description: MySQL driver with native syntax, ? placeholders, and backtick quoting.
+---
+
+The MySQL driver provides native MySQL syntax with `?` placeholders and backtick identifier quoting, built on [go-sql-driver/mysql](https://github.com/go-sql-driver/mysql) and `database/sql`.
+
+## Installation
+
+```bash
+go get github.com/xraph/grove
+go get github.com/go-sql-driver/mysql
+```
+
+## Connection
+
+```go
+import (
+    "context"
+    "log"
+
+    "github.com/xraph/grove"
+    "github.com/xraph/grove/driver"
+    "github.com/xraph/grove/mysqldriver"
+)
+
+// 1. Create and open the driver
+mydb := mysqldriver.New()
+err := mydb.Open(ctx, "user:pass@tcp(localhost:3306)/mydb?parseTime=true",
+    driver.WithPoolSize(20),
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+// 2. Pass the connected driver to Grove
+db, err := grove.Open(mydb)
+if err != nil {
+    log.Fatal(err)
+}
+defer db.Close()
+```
+
+The DSN follows the standard `go-sql-driver/mysql` format: `user:pass@tcp(host:port)/dbname?parseTime=true`. Always include `parseTime=true` so that `DATETIME` columns scan into `time.Time`.
+
+### Unwrap
+
+Use `mysqldriver.Unwrap` to extract the underlying `*MysqlDB` from a `*grove.DB`. This gives you access to the MySQL-specific query builders and methods.
+
+```go
+mydb := mysqldriver.Unwrap(db)
+
+// Now use MySQL-specific query builders directly
+var users []User
+mydb.NewSelect(&users).
+    Where("`email` LIKE ?", "%@example.com").
+    Scan(ctx)
+```
+
+`Unwrap` panics if the driver is not a `*MysqlDB`.
+
+## Native Syntax
+
+### Placeholders
+
+MySQL uses `?` for all parameterized queries:
+
+```go
+mydb.NewSelect(&users).
+    Where("`email` LIKE ?", "%@example.com").
+    Where("`created_at` > ?", time.Now().AddDate(0, -1, 0)).
+    Scan(ctx)
+```
+
+### Backtick Quoting
+
+Identifiers are quoted with backticks. The dialect automatically escapes embedded backticks by doubling them:
+
+```go
+// Generates: SELECT `id`, `name` FROM `users` WHERE `status` = ?
+mydb.NewSelect(&users).
+    Column("`id`", "`name`").
+    Where("`status` = ?", "active").
+    Scan(ctx)
+```
+
+## Query Builders
+
+### SELECT
+
+```go
+var users []User
+mydb.NewSelect(&users).
+    Column("`id`", "`name`", "`email`").
+    Where("`status` = ?", "active").
+    WhereOr("`role` = ?", "admin").
+    OrderExpr("`created_at` DESC").
+    Limit(20).
+    Offset(0).
+    Scan(ctx)
+```
+
+Supported methods on `*SelectQuery`:
+
+| Method | Description |
+|--------|-------------|
+| `Column(cols...)` | Select specific columns |
+| `ColumnExpr(expr, args...)` | Raw column expression (e.g., `COUNT(*)`) |
+| `Where(query, args...)` | AND WHERE clause |
+| `WhereOr(query, args...)` | OR WHERE clause |
+| `WherePK()` | WHERE on primary key fields from the model |
+| `Join(type, table, on, args...)` | JOIN clause |
+| `TableExpr(expr, args...)` | Raw FROM expression |
+| `OrderExpr(expr)` | ORDER BY expression |
+| `GroupExpr(expr)` | GROUP BY expression |
+| `Having(query, args...)` | HAVING clause |
+| `Limit(n)` | LIMIT clause |
+| `Offset(n)` | OFFSET clause |
+| `ForUpdate(tables...)` | FOR UPDATE locking |
+| `ForShare()` | LOCK IN SHARE MODE |
+| `Relation(name)` | Eager-load a relation |
+| `WithDeleted()` | Include soft-deleted rows |
+| `Scan(ctx, dest...)` | Execute and scan results |
+| `Count(ctx)` | Execute SELECT COUNT(*) |
+
+#### Joins
+
+```go
+var results []UserOrder
+mydb.NewSelect(&results).
+    Join("LEFT JOIN", "`orders`", "`users`.`id` = `orders`.`user_id`").
+    Where("`orders`.`total` > ?", 100).
+    Scan(ctx)
+```
+
+#### Aggregation
+
+```go
+mydb.NewSelect((*User)(nil)).
+    ColumnExpr("COUNT(*) AS `count`").
+    ColumnExpr("`status`").
+    GroupExpr("`status`").
+    Having("COUNT(*) > ?", 5).
+    Scan(ctx, &results)
+```
+
+#### Count
+
+```go
+count, err := mydb.NewSelect(&users).
+    Where("`status` = ?", "active").
+    Count(ctx)
+```
+
+### INSERT
+
+```go
+user := &User{Name: "Alice", Email: "alice@example.com"}
+result, err := mydb.NewInsert(user).Exec(ctx)
+```
+
+Bulk insert with a slice:
+
+```go
+users := []User{
+    {Name: "Alice", Email: "alice@example.com"},
+    {Name: "Bob", Email: "bob@example.com"},
+}
+result, err := mydb.NewInsert(&users).Exec(ctx)
+```
+
+Supported methods on `*InsertQuery`:
+
+| Method | Description |
+|--------|-------------|
+| `Column(cols...)` | Specify which columns to insert |
+| `Value(values...)` | Add explicit values (manual insert) |
+| `OnConflict(clause)` | ON DUPLICATE KEY UPDATE clause |
+| `Set(expr, args...)` | SET expression for upsert |
+| `Exec(ctx)` | Execute the insert |
+| `Scan(ctx, dest...)` | Execute and retrieve LastInsertId |
+
+### UPDATE
+
+```go
+user.Name = "Alice Updated"
+result, err := mydb.NewUpdate(user).
+    WherePK().
+    Exec(ctx)
+```
+
+Update specific columns:
+
+```go
+result, err := mydb.NewUpdate(user).
+    Column("name", "updated_at").
+    WherePK().
+    Exec(ctx)
+```
+
+Update with raw SET expressions:
+
+```go
+result, err := mydb.NewUpdate((*User)(nil)).
+    Set("`login_count` = `login_count` + 1").
+    Where("`id` = ?", userID).
+    Exec(ctx)
+```
+
+Supported methods on `*UpdateQuery`:
+
+| Method | Description |
+|--------|-------------|
+| `Set(expr, args...)` | Raw SET expression |
+| `Column(cols...)` | Limit which model columns to update |
+| `OmitZero()` | Skip zero-value fields |
+| `Where(query, args...)` | AND WHERE clause |
+| `WhereOr(query, args...)` | OR WHERE clause |
+| `WherePK()` | WHERE on primary key fields |
+| `OrderExpr(expr)` | ORDER BY (MySQL-specific) |
+| `Limit(n)` | LIMIT (MySQL-specific) |
+| `Exec(ctx)` | Execute the update |
+
+### DELETE
+
+```go
+result, err := mydb.NewDelete(user).
+    WherePK().
+    Exec(ctx)
+```
+
+Delete with conditions:
+
+```go
+result, err := mydb.NewDelete((*User)(nil)).
+    Where("`last_login` < ?", cutoffDate).
+    OrderExpr("`last_login` ASC").
+    Limit(100).
+    Exec(ctx)
+```
+
+Models with a `soft_delete` field automatically generate `UPDATE ... SET deleted_at = NOW()` instead of a real DELETE. Use `ForceDelete()` to bypass soft delete:
+
+```go
+result, err := mydb.NewDelete(user).
+    WherePK().
+    ForceDelete().
+    Exec(ctx)
+```
+
+Supported methods on `*DeleteQuery`:
+
+| Method | Description |
+|--------|-------------|
+| `Where(query, args...)` | AND WHERE clause |
+| `WhereOr(query, args...)` | OR WHERE clause |
+| `WherePK()` | WHERE on primary key fields |
+| `ForceDelete()` | Bypass soft delete |
+| `OrderExpr(expr)` | ORDER BY (MySQL-specific) |
+| `Limit(n)` | LIMIT (MySQL-specific) |
+| `Exec(ctx)` | Execute the delete |
+
+### Raw Queries
+
+```go
+var users []User
+mydb.NewRaw("SELECT * FROM `users` WHERE `status` = ?", "active").
+    Scan(ctx, &users)
+```
+
+Execute without scanning:
+
+```go
+mydb.NewRaw("TRUNCATE TABLE `sessions`").Exec(ctx)
+```
+
+Scan scalar values:
+
+```go
+var count int64
+mydb.NewRaw("SELECT COUNT(*) FROM `users`").Scan(ctx, &count)
+```
+
+## ON DUPLICATE KEY UPDATE
+
+MySQL uses `ON DUPLICATE KEY UPDATE` for upsert operations. Pass the full clause to `OnConflict`, then use `Set` for the column assignments:
+
+```go
+user := &User{Email: "alice@example.com", Name: "Alice"}
+result, err := mydb.NewInsert(user).
+    OnConflict("ON DUPLICATE KEY UPDATE").
+    Set("`name` = VALUES(`name`)").
+    Set("`updated_at` = NOW()").
+    Exec(ctx)
+```
+
+## LAST_INSERT_ID
+
+MySQL does not support `INSERT ... RETURNING`. Use `LastInsertId` from the result to retrieve auto-generated IDs:
+
+```go
+// Via Exec result
+result, err := mydb.NewInsert(user).Exec(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+id, err := result.LastInsertId()
+```
+
+Or use `Scan` on the insert query, which calls `LastInsertId` internally and writes it into the destination:
+
+```go
+var id int64
+err := mydb.NewInsert(user).Scan(ctx, &id)
+```
+
+## Transactions
+
+### Using BeginTxQuery
+
+`BeginTxQuery` starts a transaction and returns a `*MysqlTx` that exposes query builder methods. All queries created from the transaction execute within it:
+
+```go
+tx, err := mydb.BeginTxQuery(ctx, nil)
+if err != nil {
+    log.Fatal(err)
+}
+defer tx.Rollback()
+
+// All query builders route through the transaction
+_, err = tx.NewInsert(user).Exec(ctx)
+if err != nil {
+    return err
+}
+
+_, err = tx.NewUpdate(account).
+    Set("`balance` = `balance` - ?", amount).
+    WherePK().
+    Exec(ctx)
+if err != nil {
+    return err
+}
+
+return tx.Commit()
+```
+
+### Transaction Options
+
+```go
+tx, err := mydb.BeginTxQuery(ctx, &driver.TxOptions{
+    IsolationLevel: driver.LevelSerializable,
+    ReadOnly:       false,
+})
+```
+
+Supported isolation levels: `LevelDefault`, `LevelReadUncommitted`, `LevelReadCommitted`, `LevelRepeatableRead`, `LevelSerializable`.
+
+## FOR UPDATE / FOR SHARE
+
+Use row-level locking to prevent concurrent modifications:
+
+```go
+// Exclusive lock - blocks other FOR UPDATE and FOR SHARE
+mydb.NewSelect(&account).
+    Where("`id` = ?", accountID).
+    ForUpdate().
+    Scan(ctx)
+
+// Shared lock (LOCK IN SHARE MODE) - allows other FOR SHARE, blocks FOR UPDATE
+mydb.NewSelect(&account).
+    Where("`id` = ?", accountID).
+    ForShare().
+    Scan(ctx)
+```
+
+## CREATE TABLE
+
+Build `CREATE TABLE` statements from model structs with MySQL-specific options:
+
+```go
+_, err := mydb.NewCreateTable((*User)(nil)).
+    IfNotExists().
+    Engine("InnoDB").
+    Charset("utf8mb4").
+    WithForeignKey("(`org_id`) REFERENCES `organizations`(`id`) ON DELETE CASCADE").
+    Exec(ctx)
+```
+
+Temporary tables:
+
+```go
+_, err := mydb.NewCreateTable((*TempResult)(nil)).
+    Temp().
+    Exec(ctx)
+```
+
+### Type Mapping
+
+The MySQL dialect maps Go types to column types as follows:
+
+| Go Type | MySQL Type |
+|---------|-----------|
+| `bool` | `BOOLEAN` |
+| `int`, `int32` | `INT` |
+| `int64` | `BIGINT` |
+| `int16` | `SMALLINT` |
+| `int8` | `TINYINT` |
+| `float32` | `FLOAT` |
+| `float64` | `DOUBLE` |
+| `string` | `TEXT` (or `VARCHAR(255)` if unique) |
+| `time.Time` | `DATETIME(6)` |
+| `[]byte` | `BLOB` |
+| `map[string]any` | `JSON` |
+
+Auto-increment fields automatically use `INT AUTO_INCREMENT` or `BIGINT AUTO_INCREMENT` depending on the Go type.
+
+## Migrations
+
+The `mysqlmigrate` package provides a MySQL-specific migration executor that uses `GET_LOCK`/`RELEASE_LOCK` for distributed locking, ensuring only one process runs migrations at a time.
+
+```go
+import (
+    "github.com/xraph/grove/migrate"
+    "github.com/xraph/grove/mysqldriver"
+    "github.com/xraph/grove/mysqldriver/mysqlmigrate"
+)
+
+// Define a migration group
+var Migrations = migrate.NewGroup("app")
+
+func init() {
+    Migrations.MustRegister(&migrate.Migration{
+        Name:    "create_users",
+        Version: "20250101120000",
+        Up: func(ctx context.Context, exec migrate.Executor) error {
+            _, err := exec.Exec(ctx, "CREATE TABLE IF NOT EXISTS `users` ("+
+                "`id` BIGINT AUTO_INCREMENT PRIMARY KEY,"+
+                "`name` TEXT NOT NULL,"+
+                "`email` VARCHAR(255) NOT NULL UNIQUE,"+
+                "`created_at` DATETIME(6) NOT NULL DEFAULT NOW(6)"+
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
+            return err
+        },
+        Down: func(ctx context.Context, exec migrate.Executor) error {
+            _, err := exec.Exec(ctx, "DROP TABLE IF EXISTS `users`")
+            return err
+        },
+    })
+}
+
+// Run migrations
+mydb := mysqldriver.Unwrap(db)
+executor := mysqlmigrate.New(mydb)
+orchestrator := migrate.NewOrchestrator(executor, Migrations)
+
+result, err := orchestrator.Migrate(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+log.Printf("Applied %d migrations", len(result.Applied))
+
+// Rollback the last migration
+result, err = orchestrator.Rollback(ctx)
+```
+
+The executor automatically creates two tables:
+- `grove_migrations` -- tracks applied migrations with version, name, and group
+- `grove_migration_locks` -- records which process holds the migration lock
+
+Advisory locking via `GET_LOCK` ensures safe concurrent deployments without table-level locking.
+
+## Connection Pool Options
+
+```go
+mydb := mysqldriver.New()
+err := mydb.Open(ctx, dsn,
+    driver.WithPoolSize(20),
+    driver.WithQueryTimeout(30 * time.Second),
+)
+db, err := grove.Open(mydb)
+```

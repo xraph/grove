@@ -1,0 +1,84 @@
+---
+title: Migrations Overview
+description: Modular, Go-code migrations with dependency-aware ordering.
+---
+
+Grove migrations are Go code, not SQL files. Any Go module can register migrations into named groups with dependency-aware ordering. Forge extensions ship their own migrations that compose automatically.
+
+## Key Concepts
+
+- **Migrations are Go functions** — not SQL files, enabling logic, conditionals, and data transformations
+- **Groups** — Migrations belong to named groups (e.g., `"core"`, `"forge.billing"`)
+- **Dependencies** — Groups declare dependencies on other groups for ordering
+- **Topological Sort** — The migrator resolves execution order automatically
+- **Locking** — Advisory locks prevent concurrent migration runs
+
+## Defining Migrations
+
+```go
+import "github.com/xraph/grove/migrate"
+
+var Migrations = migrate.NewGroup("core")
+
+func init() {
+    Migrations.MustRegister(&migrate.Migration{
+        Name:    "create_users",
+        Version: "20240101000000",
+        Up: func(ctx context.Context, exec migrate.Executor) error {
+            _, err := exec.NewCreateTable((*User)(nil)).
+                IfNotExists().
+                Exec(ctx)
+            return err
+        },
+        Down: func(ctx context.Context, exec migrate.Executor) error {
+            _, err := exec.NewDropTable((*User)(nil)).
+                IfExists().
+                Exec(ctx)
+            return err
+        },
+    })
+}
+```
+
+## Running Migrations
+
+```go
+import "github.com/xraph/grove/pgdriver/pgmigrate"
+
+// Create a driver-specific executor
+pgdb := pgdriver.Unwrap(db)
+executor := pgmigrate.NewExecutor(pgdb)
+
+// Create the orchestrator with the executor
+orchestrator := migrate.NewOrchestrator(executor,
+    core.Migrations,
+    billing.Migrations,
+)
+
+// Migrate up
+result, err := orchestrator.Migrate(ctx)
+fmt.Printf("Applied %d migrations\n", len(result.Applied))
+
+// Rollback last migration
+result, err = orchestrator.Rollback(ctx)
+
+// Check status
+statuses, err := orchestrator.Status(ctx)
+```
+
+## Migration Table
+
+Grove tracks migration state in `grove_migrations`:
+
+```sql
+CREATE TABLE grove_migrations (
+    id         SERIAL PRIMARY KEY,
+    group_name VARCHAR(255) NOT NULL,
+    name       VARCHAR(255) NOT NULL,
+    version    VARCHAR(255) NOT NULL,
+    batch      INTEGER NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(group_name, version)
+);
+```
+
