@@ -1,0 +1,51 @@
+---
+title: Benchmarks
+description: "Performance comparison: Grove vs raw SQL, Bun, and GORM"
+---
+
+Grove is designed for near-raw performance. These benchmarks compare Grove
+against raw `database/sql`, Bun, and GORM using SQLite in-memory databases.
+
+## Running Benchmarks
+
+```bash
+# Run all benchmarks
+make bench
+
+# Generate markdown report
+make bench-report
+
+# Update README.md and docs with latest results
+make bench-update
+```
+
+## Results
+
+{/* BENCH:START */}
+_Run `make bench-update` to generate benchmark results._
+{/* BENCH:END */}
+
+## Methodology
+
+- **Database:** SQLite in-memory (`:memory:`) -- isolates ORM overhead from network/disk
+- **Runs:** 5 iterations per benchmark (`-count=5`) for statistical stability
+- **Model:** `User` struct with 6 fields (ID, Name, Email, Age, Active, CreatedAt)
+- **Metrics:** ns/op, B/op (bytes allocated), allocs/op (heap allocations)
+- **Overhead:** Computed as `(ORM - RawSQL) / RawSQL * 100%`
+
+## What's Measured
+
+| Category | Description |
+|----------|-------------|
+| Insert | Single row INSERT |
+| SelectOne | SELECT single row by PK |
+| SelectMulti | SELECT 50 rows with WHERE + LIMIT |
+| Update | UPDATE 2 columns by PK |
+| Delete | DELETE single row by PK |
+| BulkInsert100 | INSERT 100 rows in one operation |
+| BulkInsert1000 | INSERT 1000 rows in one operation |
+| BuildSelect | SQL generation only (no I/O) |
+| BuildInsert | SQL generation only (no I/O) |
+| BuildUpdate | SQL generation only (no I/O) |
+| SchemaCache | Schema registry cache hit vs cold start |
+| TagResolution | Grove tags vs bun tag fallback resolution |

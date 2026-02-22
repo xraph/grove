@@ -6,6 +6,7 @@
     "zero-reflection",
     "type-ids",
     "multi-tenancy",
-    "errors"
+    "errors",
+    "benchmarks"
   ]
 }

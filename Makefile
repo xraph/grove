@@ -1,4 +1,4 @@
-.PHONY: help build run test clean fmt lint lint-fix vet tidy deps install dev hot check coverage b r t c f l lf v check-deps
+.PHONY: help build run test clean fmt lint lint-fix vet tidy deps install dev hot check coverage bench bench-report bench-update b r t c f l lf v check-deps
 
 # Default target
 .DEFAULT_GOAL := help
@@ -42,6 +42,9 @@ help:
 	@echo "  make test-race      - Run tests with race detector"
 	@echo "  make coverage       - Generate test coverage report"
 	@echo "  make coverage-html  - Generate HTML coverage report"
+	@echo "  make bench          - Run benchmarks"
+	@echo "  make bench-report   - Generate benchmark report (markdown)"
+	@echo "  make bench-update   - Run benchmarks and update README + docs"
 	@echo ""
 	@echo "$(GREEN)Dependencies:$(NC)"
 	@echo "  make deps           - Install development dependencies"
@@ -161,6 +164,24 @@ coverage-html: coverage
 	$(GO) tool cover -html=coverage.out -o coverage.html
 	@echo "$(GREEN)✓ HTML coverage report: coverage.html$(NC)"
 	@command -v open >/dev/null 2>&1 && open coverage.html || echo "Open coverage.html in your browser"
+
+## bench: Run benchmarks
+bench:
+	@echo "$(BLUE)Running benchmarks...$(NC)"
+	$(GO) test -bench=. -benchmem -count=1 -timeout=10m ./bench/
+	@echo "$(GREEN)Benchmarks complete$(NC)"
+
+## bench-report: Generate benchmark report
+bench-report:
+	@echo "$(BLUE)Generating benchmark report...$(NC)"
+	$(GO) run ./bench/cmd/benchreport
+	@echo "$(GREEN)Report generated$(NC)"
+
+## bench-update: Run benchmarks and update README + docs
+bench-update:
+	@echo "$(BLUE)Running benchmarks and updating reports...$(NC)"
+	$(GO) run ./bench/cmd/benchreport --update
+	@echo "$(GREEN)Benchmark reports updated$(NC)"
 
 ## tidy: Tidy and verify modules
 tidy:
