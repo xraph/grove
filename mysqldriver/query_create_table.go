@@ -155,7 +155,7 @@ func (q *CreateTableQuery) Build() (string, []any, error) {
 			}
 			buf.WriteString(dialect.Quote(col))
 		}
-		buf.WriteByte(')')
+		_ = buf.WriteByte(')')
 	}
 
 	// Foreign key constraints.
@@ -164,7 +164,7 @@ func (q *CreateTableQuery) Build() (string, []any, error) {
 		buf.WriteString(fk)
 	}
 
-	buf.WriteByte(')')
+	_ = buf.WriteByte(')')
 
 	// MySQL table options.
 	if q.engine != "" {

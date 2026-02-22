@@ -263,12 +263,12 @@ func formatPositiveInt(n int64) string {
 	if remainder > 0 {
 		buf.WriteString(s[:remainder])
 		if len(s) > remainder {
-			buf.WriteByte(',')
+			_ = buf.WriteByte(',')
 		}
 	}
 	for i := remainder; i < len(s); i += 3 {
 		if i > remainder {
-			buf.WriteByte(',')
+			_ = buf.WriteByte(',')
 		}
 		buf.WriteString(s[i : i+3])
 	}
@@ -305,10 +305,10 @@ func generateMarkdown(groups map[string][]avgResult, count int) string {
 	osArch := fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)
 	dateStamp := time.Now().Format("2006-01-02")
 
-	buf.WriteString(fmt.Sprintf(
+	fmt.Fprintf(&buf,
 		"> Benchmarks generated on %s with %s on %s. Each benchmark ran %d times; values are averages.\n",
 		dateStamp, goVersion, osArch, count,
-	))
+	)
 
 	for _, category := range categoryOrder {
 		variants, ok := groups[category]
@@ -316,7 +316,7 @@ func generateMarkdown(groups map[string][]avgResult, count int) string {
 			continue
 		}
 
-		buf.WriteString(fmt.Sprintf("\n### %s\n\n", category))
+		fmt.Fprintf(&buf, "\n### %s\n\n", category)
 
 		if hasRawSQL(variants) {
 			baselineNsOp := getRawSQLNsOp(variants)
@@ -342,13 +342,13 @@ func generateMarkdown(groups map[string][]avgResult, count int) string {
 				if v.Variant != "RawSQL" {
 					overhead = formatOverhead(v.NsOp, baselineNsOp)
 				}
-				buf.WriteString(fmt.Sprintf("| %s | %s | %s | %d | %s |\n",
+				fmt.Fprintf(&buf, "| %s | %s | %s | %d | %s |\n",
 					variantDisplayName(v.Variant),
 					formatNumber(v.NsOp),
 					formatNumber(v.BOp),
 					int64(math.Round(v.AllocsOp)),
 					overhead,
-				))
+				)
 			}
 		} else {
 			buf.WriteString("| Variant | ns/op | B/op | allocs/op |\n")
@@ -362,12 +362,12 @@ func generateMarkdown(groups map[string][]avgResult, count int) string {
 			})
 
 			for _, v := range sorted {
-				buf.WriteString(fmt.Sprintf("| %s | %s | %s | %d |\n",
+				fmt.Fprintf(&buf, "| %s | %s | %s | %d |\n",
 					variantDisplayName(v.Variant),
 					formatNumber(v.NsOp),
 					formatNumber(v.BOp),
 					int64(math.Round(v.AllocsOp)),
-				))
+				)
 			}
 		}
 	}
@@ -388,7 +388,7 @@ func generateMarkdown(groups map[string][]avgResult, count int) string {
 	for _, category := range extras {
 		variants := groups[category]
 
-		buf.WriteString(fmt.Sprintf("\n### %s\n\n", category))
+		fmt.Fprintf(&buf, "\n### %s\n\n", category)
 
 		if hasRawSQL(variants) {
 			baselineNsOp := getRawSQLNsOp(variants)
@@ -413,13 +413,13 @@ func generateMarkdown(groups map[string][]avgResult, count int) string {
 				if v.Variant != "RawSQL" {
 					overhead = formatOverhead(v.NsOp, baselineNsOp)
 				}
-				buf.WriteString(fmt.Sprintf("| %s | %s | %s | %d | %s |\n",
+				fmt.Fprintf(&buf, "| %s | %s | %s | %d | %s |\n",
 					variantDisplayName(v.Variant),
 					formatNumber(v.NsOp),
 					formatNumber(v.BOp),
 					int64(math.Round(v.AllocsOp)),
 					overhead,
-				))
+				)
 			}
 		} else {
 			buf.WriteString("| Variant | ns/op | B/op | allocs/op |\n")
@@ -432,12 +432,12 @@ func generateMarkdown(groups map[string][]avgResult, count int) string {
 			})
 
 			for _, v := range sorted {
-				buf.WriteString(fmt.Sprintf("| %s | %s | %s | %d |\n",
+				fmt.Fprintf(&buf, "| %s | %s | %s | %d |\n",
 					variantDisplayName(v.Variant),
 					formatNumber(v.NsOp),
 					formatNumber(v.BOp),
 					int64(math.Round(v.AllocsOp)),
-				))
+				)
 			}
 		}
 	}

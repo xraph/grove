@@ -27,7 +27,6 @@ type UpdateQuery struct {
 	columns    []string // If set, only update these columns from the model
 	omitZero   bool     // Skip zero-value fields
 	returning  []string
-	args       []any
 	err        error
 }
 
@@ -178,9 +177,9 @@ func (q *UpdateQuery) Build() (string, []any, error) {
 		buf.WriteString(" WHERE ")
 		for i, w := range q.wheres {
 			if i > 0 {
-				buf.WriteByte(' ')
+				_ = buf.WriteByte(' ')
 				buf.WriteString(w.sep)
-				buf.WriteByte(' ')
+				_ = buf.WriteByte(' ')
 			}
 			buf.WriteString(w.query)
 			args = append(args, w.args...)

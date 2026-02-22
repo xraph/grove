@@ -70,11 +70,11 @@ func ToSnakeCase(s string) string {
 			prev := runes[i-1]
 			if unicode.IsLower(prev) || unicode.IsDigit(prev) {
 				// Transition from lower/digit to upper: add underscore.
-				buf.WriteByte('_')
+				_ = buf.WriteByte('_')
 			} else if unicode.IsUpper(prev) && i+1 < n && unicode.IsLower(runes[i+1]) {
 				// We are inside an acronym run and the next char is lowercase,
 				// meaning this char starts a new word. E.g., "HTMLParser" at 'P'.
-				buf.WriteByte('_')
+				_ = buf.WriteByte('_')
 			}
 		}
 

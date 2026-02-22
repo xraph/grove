@@ -135,7 +135,7 @@ func (q *SelectQuery) loadHasMany(ctx context.Context, target any, rel *schema.R
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 
 		// Create a new slice to hold results.
 		resultSlice := reflect.New(sliceType).Interface()
@@ -200,7 +200,7 @@ func (q *SelectQuery) loadHasManyForSlice(ctx context.Context, sliceVal reflect.
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	// Scan all related rows.
 	allRelated := reflect.New(elemType).Interface()
@@ -322,7 +322,7 @@ func buildRelationInQuery(dialect *MysqlDialect, table *schema.Table, col string
 		}
 		buf.WriteString(dialect.Placeholder(i + 1))
 	}
-	buf.WriteByte(')')
+	_ = buf.WriteByte(')')
 
 	return buf.String(), vals
 }

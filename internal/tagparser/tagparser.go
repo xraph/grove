@@ -73,15 +73,15 @@ func splitTokens(tag string) []string {
 		switch {
 		case ch == '\'' && !inQuote:
 			inQuote = true
-			buf.WriteByte(ch)
+			_ = buf.WriteByte(ch)
 		case ch == '\'' && inQuote:
 			inQuote = false
-			buf.WriteByte(ch)
+			_ = buf.WriteByte(ch)
 		case ch == ',' && !inQuote:
 			tokens = append(tokens, buf.String())
 			buf.Reset()
 		default:
-			buf.WriteByte(ch)
+			_ = buf.WriteByte(ch)
 		}
 	}
 

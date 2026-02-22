@@ -163,7 +163,7 @@ func (s *Stream[T]) All(yield func(T, error) bool) {
 
 // Collect drains the stream into a slice.
 func (s *Stream[T]) Collect(ctx context.Context) ([]T, error) {
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	var result []T
 	for s.Next(ctx) {
@@ -177,7 +177,7 @@ func (s *Stream[T]) Collect(ctx context.Context) ([]T, error) {
 
 // Count drains the stream counting rows without allocating models.
 func (s *Stream[T]) Count(ctx context.Context) (int64, error) {
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	var count int64
 	for s.Next(ctx) {

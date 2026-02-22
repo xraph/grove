@@ -270,7 +270,7 @@ func (q *SelectQuery) Build() (string, []any, error) {
 			}
 			if q.table.Alias != "" {
 				buf.WriteString(q.db.dialect.Quote(q.table.Alias))
-				buf.WriteByte('.')
+				_ = buf.WriteByte('.')
 			}
 			buf.WriteString(q.db.dialect.Quote(f.Options.Column))
 		}
@@ -297,9 +297,9 @@ func (q *SelectQuery) Build() (string, []any, error) {
 
 	// JOINs
 	for _, j := range q.joins {
-		buf.WriteByte(' ')
+		_ = buf.WriteByte(' ')
 		buf.WriteString(j.joinType)
-		buf.WriteByte(' ')
+		_ = buf.WriteByte(' ')
 		buf.WriteString(j.table)
 		if j.on != "" {
 			buf.WriteString(" ON ")
@@ -330,9 +330,9 @@ func (q *SelectQuery) Build() (string, []any, error) {
 		buf.WriteString(" HAVING ")
 		for i, h := range q.having {
 			if i > 0 {
-				buf.WriteByte(' ')
+				_ = buf.WriteByte(' ')
 				buf.WriteString(h.sep)
-				buf.WriteByte(' ')
+				_ = buf.WriteByte(' ')
 			}
 			buf.WriteString(h.query)
 			q.args = append(q.args, h.args...)
@@ -413,9 +413,9 @@ func (q *SelectQuery) BuildCount() (string, []any, error) {
 
 	// JOINs
 	for _, j := range q.joins {
-		buf.WriteByte(' ')
+		_ = buf.WriteByte(' ')
 		buf.WriteString(j.joinType)
-		buf.WriteByte(' ')
+		_ = buf.WriteByte(' ')
 		buf.WriteString(j.table)
 		if j.on != "" {
 			buf.WriteString(" ON ")
@@ -446,9 +446,9 @@ func (q *SelectQuery) BuildCount() (string, []any, error) {
 		buf.WriteString(" HAVING ")
 		for i, h := range q.having {
 			if i > 0 {
-				buf.WriteByte(' ')
+				_ = buf.WriteByte(' ')
 				buf.WriteString(h.sep)
-				buf.WriteByte(' ')
+				_ = buf.WriteByte(' ')
 			}
 			buf.WriteString(h.query)
 			q.args = append(q.args, h.args...)
@@ -539,7 +539,7 @@ func (q *SelectQuery) Scan(ctx context.Context, dest ...any) error {
 			if qerr != nil {
 				return qerr
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			if err := scan.ScanRows(rows, target, table); err != nil {
 				return err
 			}

@@ -122,7 +122,7 @@ func (q *InsertQuery) Build() (string, []any, error) {
 			if rowIdx > 0 {
 				buf.WriteString(", ")
 			}
-			buf.WriteByte('(')
+			_ = buf.WriteByte('(')
 			for colIdx, val := range row {
 				if colIdx > 0 {
 					buf.WriteString(", ")
@@ -131,7 +131,7 @@ func (q *InsertQuery) Build() (string, []any, error) {
 				buf.WriteString(dialect.Placeholder(argIdx))
 				args = append(args, val)
 			}
-			buf.WriteByte(')')
+			_ = buf.WriteByte(')')
 		}
 	} else {
 		// Extract values from model.
@@ -143,7 +143,7 @@ func (q *InsertQuery) Build() (string, []any, error) {
 			if rowIdx > 0 {
 				buf.WriteString(", ")
 			}
-			buf.WriteByte('(')
+			_ = buf.WriteByte('(')
 			for colIdx, val := range row {
 				if colIdx > 0 {
 					buf.WriteString(", ")
@@ -152,7 +152,7 @@ func (q *InsertQuery) Build() (string, []any, error) {
 				buf.WriteString(dialect.Placeholder(argIdx))
 				args = append(args, val)
 			}
-			buf.WriteByte(')')
+			_ = buf.WriteByte(')')
 		}
 	}
 

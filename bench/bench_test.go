@@ -86,7 +86,7 @@ func newRawDB(b *testing.B) *sql.DB {
 	if _, err := db.Exec(createTableSQL); err != nil {
 		b.Fatal(err)
 	}
-	b.Cleanup(func() { db.Close() })
+	b.Cleanup(func() { _ = db.Close() })
 	return db
 }
 
@@ -100,7 +100,7 @@ func newGroveDB(b *testing.B) *sqlitedriver.SqliteDB {
 	if _, err := sdb.NewCreateTable((*User)(nil)).IfNotExists().Exec(ctx); err != nil {
 		b.Fatal(err)
 	}
-	b.Cleanup(func() { sdb.Close() })
+	b.Cleanup(func() { _ = sdb.Close() })
 	return sdb
 }
 
@@ -117,7 +117,7 @@ func newBunDB(b *testing.B) *bun.DB {
 	if _, err := db.Exec(createTableSQL); err != nil {
 		b.Fatal(err)
 	}
-	b.Cleanup(func() { db.Close() })
+	b.Cleanup(func() { _ = db.Close() })
 	return db
 }
 
@@ -137,7 +137,7 @@ func newGormDB(b *testing.B) *gorm.DB {
 	if err := db.AutoMigrate(&User{}); err != nil {
 		b.Fatal(err)
 	}
-	b.Cleanup(func() { sqlDB.Close() })
+	b.Cleanup(func() { _ = sqlDB.Close() })
 	return db
 }
 
@@ -250,7 +250,7 @@ func BenchmarkSelectOne(b *testing.B) {
 		// Seed via Grove
 		for i := 0; i < 100; i++ {
 			u := sampleUser(i)
-			sdb.NewInsert(&u).Exec(ctx)
+			_, _ = sdb.NewInsert(&u).Exec(ctx)
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -270,7 +270,7 @@ func BenchmarkSelectOne(b *testing.B) {
 		// Seed
 		for i := 0; i < 100; i++ {
 			u := sampleUser(i)
-			db.NewInsert().Model(&u).Exec(ctx)
+			_, _ = db.NewInsert().Model(&u).Exec(ctx)
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -326,7 +326,7 @@ func BenchmarkSelectMulti(b *testing.B) {
 				}
 				users = append(users, u)
 			}
-			rows.Close()
+			_ = rows.Close()
 			if len(users) == 0 {
 				b.Fatal("no rows returned")
 			}
@@ -338,7 +338,7 @@ func BenchmarkSelectMulti(b *testing.B) {
 		ctx := context.Background()
 		for i := 0; i < 200; i++ {
 			u := sampleUser(i)
-			sdb.NewInsert(&u).Exec(ctx)
+			_, _ = sdb.NewInsert(&u).Exec(ctx)
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -361,7 +361,7 @@ func BenchmarkSelectMulti(b *testing.B) {
 		ctx := context.Background()
 		for i := 0; i < 200; i++ {
 			u := sampleUser(i)
-			db.NewInsert().Model(&u).Exec(ctx)
+			_, _ = db.NewInsert().Model(&u).Exec(ctx)
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -423,7 +423,7 @@ func BenchmarkUpdate(b *testing.B) {
 		ctx := context.Background()
 		for i := 0; i < 100; i++ {
 			u := sampleUser(i)
-			sdb.NewInsert(&u).Exec(ctx)
+			_, _ = sdb.NewInsert(&u).Exec(ctx)
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -443,7 +443,7 @@ func BenchmarkUpdate(b *testing.B) {
 		ctx := context.Background()
 		for i := 0; i < 100; i++ {
 			u := sampleUser(i)
-			db.NewInsert().Model(&u).Exec(ctx)
+			_, _ = db.NewInsert().Model(&u).Exec(ctx)
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -489,7 +489,7 @@ func BenchmarkDelete(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			b.StopTimer()
-			db.Exec(`DELETE FROM "users"`)
+			_, _ = db.Exec(`DELETE FROM "users"`)
 			seedUsers(b, db, 10)
 			b.StartTimer()
 			_, err := db.Exec(`DELETE FROM "users" WHERE "id" = ?`, 1)
@@ -505,10 +505,10 @@ func BenchmarkDelete(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			b.StopTimer()
-			sdb.Exec(ctx, `DELETE FROM "users"`)
+			_, _ = sdb.Exec(ctx, `DELETE FROM "users"`)
 			for j := 0; j < 10; j++ {
 				u := sampleUser(j)
-				sdb.NewInsert(&u).Exec(ctx)
+				_, _ = sdb.NewInsert(&u).Exec(ctx)
 			}
 			b.StartTimer()
 			_, err := sdb.NewDelete(&User{}).
@@ -527,10 +527,10 @@ func BenchmarkDelete(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			b.StopTimer()
-			db.Exec("DELETE FROM \"users\"")
+			_, _ = db.Exec("DELETE FROM \"users\"")
 			for j := 0; j < 10; j++ {
 				u := sampleUser(j)
-				db.NewInsert().Model(&u).Exec(ctx)
+				_, _ = db.NewInsert().Model(&u).Exec(ctx)
 			}
 			b.StartTimer()
 			_, err := db.NewDelete().Model((*User)(nil)).
@@ -570,7 +570,7 @@ func BenchmarkBulkInsert100(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			b.StopTimer()
-			db.Exec(`DELETE FROM "users"`)
+			_, _ = db.Exec(`DELETE FROM "users"`)
 			b.StartTimer()
 			tx, err := db.Begin()
 			if err != nil {
@@ -587,7 +587,7 @@ func BenchmarkBulkInsert100(b *testing.B) {
 					b.Fatal(err)
 				}
 			}
-			stmt.Close()
+			_ = stmt.Close()
 			if err := tx.Commit(); err != nil {
 				b.Fatal(err)
 			}
@@ -600,7 +600,7 @@ func BenchmarkBulkInsert100(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			b.StopTimer()
-			sdb.Exec(ctx, `DELETE FROM "users"`)
+			_, _ = sdb.Exec(ctx, `DELETE FROM "users"`)
 			users := make([]User, 100)
 			for j := range users {
 				users[j] = sampleUser(j)
@@ -619,7 +619,7 @@ func BenchmarkBulkInsert100(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			b.StopTimer()
-			db.Exec("DELETE FROM \"users\"")
+			_, _ = db.Exec("DELETE FROM \"users\"")
 			users := make([]User, 100)
 			for j := range users {
 				users[j] = sampleUser(j)
@@ -660,7 +660,7 @@ func BenchmarkBulkInsert1000(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			b.StopTimer()
-			db.Exec(`DELETE FROM "users"`)
+			_, _ = db.Exec(`DELETE FROM "users"`)
 			b.StartTimer()
 			tx, err := db.Begin()
 			if err != nil {
@@ -677,7 +677,7 @@ func BenchmarkBulkInsert1000(b *testing.B) {
 					b.Fatal(err)
 				}
 			}
-			stmt.Close()
+			_ = stmt.Close()
 			if err := tx.Commit(); err != nil {
 				b.Fatal(err)
 			}
@@ -690,7 +690,7 @@ func BenchmarkBulkInsert1000(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			b.StopTimer()
-			sdb.Exec(ctx, `DELETE FROM "users"`)
+			_, _ = sdb.Exec(ctx, `DELETE FROM "users"`)
 			users := make([]User, 1000)
 			for j := range users {
 				users[j] = sampleUser(j)
@@ -709,7 +709,7 @@ func BenchmarkBulkInsert1000(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			b.StopTimer()
-			db.Exec("DELETE FROM \"users\"")
+			_, _ = db.Exec("DELETE FROM \"users\"")
 			users := make([]User, 1000)
 			for j := range users {
 				users[j] = sampleUser(j)
@@ -850,13 +850,13 @@ func BenchmarkSchemaCache(b *testing.B) {
 	b.Run("ColdStart", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			r := schema.NewRegistry()
-			r.Register((*User)(nil))
+			_, _ = r.Register((*User)(nil))
 		}
 	})
 
 	b.Run("CacheHit", func(b *testing.B) {
 		r := schema.NewRegistry()
-		r.Register((*User)(nil))
+		_, _ = r.Register((*User)(nil))
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			r.Get((*User)(nil))
@@ -872,14 +872,14 @@ func BenchmarkTagResolution(b *testing.B) {
 	b.Run("GroveTags", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			r := schema.NewRegistry()
-			r.Register((*User)(nil))
+			_, _ = r.Register((*User)(nil))
 		}
 	})
 
 	b.Run("BunFallback", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			r := schema.NewRegistry()
-			r.Register((*BunTagUser)(nil))
+			_, _ = r.Register((*BunTagUser)(nil))
 		}
 	})
 }

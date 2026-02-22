@@ -70,7 +70,7 @@ func (q *RawQuery) Scan(ctx context.Context, dest ...any) error {
 						if qerr != nil {
 							return qerr
 						}
-						defer rows.Close()
+						defer func() { _ = rows.Close() }()
 						return scan.ScanRows(rows, target, table)
 					}
 				}

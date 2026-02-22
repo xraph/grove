@@ -19,7 +19,6 @@ type DeleteQuery struct {
 	wheres      []whereClause
 	returning   []string
 	forceDelete bool // bypass soft delete
-	args        []any
 	err         error
 }
 
@@ -132,9 +131,9 @@ func (q *DeleteQuery) buildHardDelete() (string, []any, error) {
 		buf.WriteString(" WHERE ")
 		for i, w := range q.wheres {
 			if i > 0 {
-				buf.WriteByte(' ')
+				_ = buf.WriteByte(' ')
 				buf.WriteString(w.sep)
-				buf.WriteByte(' ')
+				_ = buf.WriteByte(' ')
 			}
 			buf.WriteString(w.query)
 			args = append(args, w.args...)
@@ -174,9 +173,9 @@ func (q *DeleteQuery) buildSoftDelete() (string, []any, error) {
 		buf.WriteString(" WHERE ")
 		for i, w := range q.wheres {
 			if i > 0 {
-				buf.WriteByte(' ')
+				_ = buf.WriteByte(' ')
 				buf.WriteString(w.sep)
-				buf.WriteByte(' ')
+				_ = buf.WriteByte(' ')
 			}
 			buf.WriteString(w.query)
 			args = append(args, w.args...)

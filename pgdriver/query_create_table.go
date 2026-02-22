@@ -99,7 +99,7 @@ func (q *CreateTableQuery) Build() (string, []any, error) {
 
 		// Column name.
 		buf.WriteString(dialect.Quote(f.Options.Column))
-		buf.WriteByte(' ')
+		_ = buf.WriteByte(' ')
 
 		// Column type.
 		colType := q.resolveColumnType(f)
@@ -136,7 +136,7 @@ func (q *CreateTableQuery) Build() (string, []any, error) {
 			}
 			buf.WriteString(dialect.Quote(col))
 		}
-		buf.WriteByte(')')
+		_ = buf.WriteByte(')')
 	}
 
 	// Foreign key constraints.
@@ -145,7 +145,7 @@ func (q *CreateTableQuery) Build() (string, []any, error) {
 		buf.WriteString(fk)
 	}
 
-	buf.WriteByte(')')
+	_ = buf.WriteByte(')')
 
 	return buf.String(), nil, nil
 }
