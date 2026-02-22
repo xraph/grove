@@ -626,11 +626,3 @@ func extractFieldValue(model any, field *schema.Field) (any, bool) {
 	return fv.Interface(), true
 }
 
-// countArgs counts the total number of args across all where clauses.
-func countArgs(wheres []whereClause) int {
-	n := 0
-	for _, w := range wheres {
-		n += len(w.args)
-	}
-	return n
-}

@@ -113,7 +113,7 @@ func (q *CreateTableQuery) Build() (string, []any, error) {
 
 		// Column name.
 		buf.WriteString(dialect.Quote(f.Options.Column))
-		buf.WriteByte(' ')
+		_ = buf.WriteByte(' ')
 
 		// Column type.
 		colType := q.resolveColumnType(f)

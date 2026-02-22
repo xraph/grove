@@ -109,7 +109,7 @@ func (e *Executor) ListApplied(ctx context.Context) ([]*migrate.AppliedMigration
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var applied []*migrate.AppliedMigration
 	for rows.Next() {

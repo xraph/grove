@@ -48,58 +48,6 @@ func collectionName(table *schema.Table) string {
 	return table.Name
 }
 
-// extractFieldValues extracts field values from a struct value using field index chains.
-func extractFieldValues(structVal reflect.Value, fields []*schema.Field) ([]any, error) {
-	values := make([]any, len(fields))
-	for i, f := range fields {
-		fv := structVal
-		for _, idx := range f.GoIndex {
-			fv = fv.Field(idx)
-		}
-		values[i] = fv.Interface()
-	}
-	return values, nil
-}
-
-// structToMap converts a struct to a bson.M map using the schema field metadata.
-// It includes all fields except those with ScanOnly.
-func structToMap(model any, table *schema.Table) (M, error) {
-	val := reflect.ValueOf(model)
-	for val.Kind() == reflect.Ptr {
-		if val.IsNil() {
-			return nil, fmt.Errorf("mongodriver: nil model pointer")
-		}
-		val = val.Elem()
-	}
-
-	if val.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("mongodriver: expected struct, got %v", val.Kind())
-	}
-
-	doc := make(M, len(table.Fields))
-	for _, f := range table.Fields {
-		if f.Options.ScanOnly {
-			continue
-		}
-
-		fv := val
-		for _, idx := range f.GoIndex {
-			fv = fv.Field(idx)
-		}
-
-		// Use the column name as the BSON key.
-		// Map "id" to "_id" for MongoDB's primary key convention.
-		key := f.Options.Column
-		if f.Options.IsPK && key == "id" {
-			key = "_id"
-		}
-
-		doc[key] = fv.Interface()
-	}
-
-	return doc, nil
-}
-
 // structToMapInsert converts a struct to a bson.M map for inserts.
 // It excludes AutoIncrement fields (MongoDB generates _id automatically).
 func structToMapInsert(model any, table *schema.Table) (M, error) {

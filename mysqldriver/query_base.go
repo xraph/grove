@@ -38,9 +38,9 @@ func (q *baseQuery) appendWheres(buf *pool.Buffer) {
 	buf.WriteString(" WHERE ")
 	for i, w := range q.wheres {
 		if i > 0 {
-			buf.WriteByte(' ')
+			_ = buf.WriteByte(' ')
 			buf.WriteString(w.sep)
-			buf.WriteByte(' ')
+			_ = buf.WriteByte(' ')
 		}
 		buf.WriteString(w.query)
 		q.args = append(q.args, w.args...)

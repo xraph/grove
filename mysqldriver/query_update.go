@@ -29,7 +29,6 @@ type UpdateQuery struct {
 	omitZero   bool     // Skip zero-value fields
 	orderExprs []string // MySQL supports ORDER BY in UPDATE
 	limit      int      // MySQL supports LIMIT in UPDATE
-	args       []any
 	err        error
 }
 

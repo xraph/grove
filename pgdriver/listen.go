@@ -189,7 +189,7 @@ func (db *PgDB) Listen(ctx context.Context, channel string, handler func(*Notifi
 	l.OnNotification(channel, handler)
 
 	if err := l.Listen(ctx, channel); err != nil {
-		l.Close()
+		_ = l.Close()
 		return nil, err
 	}
 

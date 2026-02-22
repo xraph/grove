@@ -21,7 +21,6 @@ type DeleteQuery struct {
 	forceDelete bool     // bypass soft delete
 	orderExprs  []string // MySQL supports ORDER BY in DELETE
 	limit       int      // MySQL supports LIMIT in DELETE
-	args        []any
 	err         error
 }
 

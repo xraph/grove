@@ -2,7 +2,6 @@ package sqlitedriver
 
 import (
 	"context"
-	"reflect"
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/internal/pool"
