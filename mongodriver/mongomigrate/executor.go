@@ -173,7 +173,7 @@ func (e *Executor) ListApplied(ctx context.Context) ([]*migrate.AppliedMigration
 	if err != nil {
 		return nil, fmt.Errorf("mongomigrate: list applied: %w", err)
 	}
-	defer cursor.Close(ctx)
+	defer func() { _ = cursor.Close(ctx) }()
 
 	var docs []migrationDoc
 	if err := cursor.All(ctx, &docs); err != nil {

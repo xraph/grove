@@ -112,7 +112,7 @@ func (q *AggregateQuery) Scan(ctx context.Context, dest any) error {
 	if err != nil {
 		return fmt.Errorf("mongodriver: aggregate: %w", err)
 	}
-	defer cursor.Close(ctx)
+	defer func() { _ = cursor.Close(ctx) }()
 
 	if err := cursor.All(ctx, dest); err != nil {
 		return fmt.Errorf("mongodriver: aggregate decode: %w", err)

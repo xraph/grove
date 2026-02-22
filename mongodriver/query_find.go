@@ -161,7 +161,7 @@ func (q *FindQuery) scanMany(ctx context.Context, coll *mongo.Collection, dest a
 	if err != nil {
 		return fmt.Errorf("mongodriver: find: %w", err)
 	}
-	defer cursor.Close(ctx)
+	defer func() { _ = cursor.Close(ctx) }()
 
 	if err := cursor.All(ctx, dest); err != nil {
 		return fmt.Errorf("mongodriver: decode results: %w", err)
