@@ -38,14 +38,15 @@ import (
 // ---------------------------------------------------------------------------
 
 // User is the benchmark model. All three ORMs use the same struct with their
-// respective tags.
+// respective tags. CreatedAt is stored as string to avoid SQLite TEXT→time.Time
+// scan issues across drivers — benchmarks measure ORM overhead, not date parsing.
 type User struct {
-	ID        int64     `grove:"id,pk,autoincrement" bun:",pk,autoincrement" gorm:"primaryKey;autoIncrement"`
-	Name      string    `grove:"name" bun:"name" gorm:"column:name"`
-	Email     string    `grove:"email" bun:"email" gorm:"column:email"`
-	Age       int       `grove:"age" bun:"age" gorm:"column:age"`
-	Active    bool      `grove:"active" bun:"active" gorm:"column:active"`
-	CreatedAt time.Time `grove:"created_at" bun:"created_at" gorm:"column:created_at"`
+	ID        int64  `grove:"id,pk,autoincrement" bun:",pk,autoincrement" gorm:"primaryKey;autoIncrement"`
+	Name      string `grove:"name" bun:"name" gorm:"column:name"`
+	Email     string `grove:"email" bun:"email" gorm:"column:email"`
+	Age       int    `grove:"age" bun:"age" gorm:"column:age"`
+	Active    bool   `grove:"active" bun:"active" gorm:"column:active"`
+	CreatedAt string `grove:"created_at" bun:"created_at" gorm:"column:created_at;type:text"`
 }
 
 func (User) TableName() string { return "users" }
@@ -146,7 +147,7 @@ func sampleUser(i int) User {
 		Email:     fmt.Sprintf("user_%d@example.com", i),
 		Age:       20 + (i % 50),
 		Active:    i%3 != 0,
-		CreatedAt: time.Now(),
+		CreatedAt: time.Now().Format(time.RFC3339),
 	}
 }
 
@@ -156,7 +157,7 @@ func seedUsers(b *testing.B, rawDB *sql.DB, n int) {
 		u := sampleUser(i)
 		_, err := rawDB.Exec(
 			`INSERT INTO "users" ("name","email","age","active","created_at") VALUES (?,?,?,?,?)`,
-			u.Name, u.Email, u.Age, u.Active, u.CreatedAt.Format(time.RFC3339),
+			u.Name, u.Email, u.Age, u.Active, u.CreatedAt,
 		)
 		if err != nil {
 			b.Fatal(err)
@@ -176,7 +177,7 @@ func BenchmarkInsert(b *testing.B) {
 			u := sampleUser(i)
 			_, err := db.Exec(
 				`INSERT INTO "users" ("name","email","age","active","created_at") VALUES (?,?,?,?,?)`,
-				u.Name, u.Email, u.Age, u.Active, u.CreatedAt.Format(time.RFC3339),
+				u.Name, u.Email, u.Age, u.Active, u.CreatedAt,
 			)
 			if err != nil {
 				b.Fatal(err)
@@ -581,7 +582,7 @@ func BenchmarkBulkInsert100(b *testing.B) {
 			}
 			for j := 0; j < 100; j++ {
 				u := sampleUser(j)
-				_, err := stmt.Exec(u.Name, u.Email, u.Age, u.Active, u.CreatedAt.Format(time.RFC3339))
+				_, err := stmt.Exec(u.Name, u.Email, u.Age, u.Active, u.CreatedAt)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -671,7 +672,7 @@ func BenchmarkBulkInsert1000(b *testing.B) {
 			}
 			for j := 0; j < 1000; j++ {
 				u := sampleUser(j)
-				_, err := stmt.Exec(u.Name, u.Email, u.Age, u.Active, u.CreatedAt.Format(time.RFC3339))
+				_, err := stmt.Exec(u.Name, u.Email, u.Age, u.Active, u.CreatedAt)
 				if err != nil {
 					b.Fatal(err)
 				}
