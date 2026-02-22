@@ -3,15 +3,13 @@ package schema
 import (
 	"fmt"
 	"reflect"
-	"sync"
 )
 
 // baseModelType is the reflect.Type for grove.BaseModel.
 // We detect it by name + package path to avoid importing the root grove package
 // (which would cause a circular import).
 var (
-	baseModelDetectOnce sync.Once
-	baseModelTypeName   = "BaseModel"
+	baseModelTypeName = "BaseModel"
 	baseModelPkgSuffix  = "github.com/xraph/grove"
 )
 

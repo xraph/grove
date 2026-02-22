@@ -67,7 +67,7 @@ func Take[T any](s *Stream[T], n int) *Stream[T] {
 // Reduce accumulates a value over the entire stream.
 func Reduce[T, A any](s *Stream[T], initial A, fn func(A, T) A) (A, error) {
 	ctx := context.Background()
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	acc := initial
 	for s.Next(ctx) {
@@ -79,7 +79,7 @@ func Reduce[T, A any](s *Stream[T], initial A, fn func(A, T) A) (A, error) {
 // ForEach processes every element with a callback. Returns first error.
 func ForEach[T any](s *Stream[T], fn func(T) error) error {
 	ctx := context.Background()
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	for s.Next(ctx) {
 		if err := fn(s.Value()); err != nil {

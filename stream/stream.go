@@ -148,7 +148,7 @@ func (s *Stream[T]) Close() error {
 //	}
 func (s *Stream[T]) All(yield func(T, error) bool) {
 	ctx := context.Background()
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	for s.Next(ctx) {
 		if !yield(s.Value(), nil) {

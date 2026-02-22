@@ -19,7 +19,6 @@ type DeleteQuery struct {
 	wheres      []whereClause
 	returning   []string
 	forceDelete bool // bypass soft delete
-	args        []any
 	err         error
 }
 

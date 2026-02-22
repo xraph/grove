@@ -80,11 +80,6 @@ type Hook struct {
 	collector Collector
 }
 
-// contextKey type for storing start times.
-type contextKey string
-
-const startTimeKey contextKey = "observability_start"
-
 var _ hook.PreQueryHook = (*Hook)(nil)
 var _ hook.PostQueryHook = (*Hook)(nil)
 var _ hook.PreMutationHook = (*Hook)(nil)

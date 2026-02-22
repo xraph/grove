@@ -57,13 +57,13 @@ func (db *SqliteDB) Open(ctx context.Context, dsn string, opts ...driver.Option)
 
 	// SQLite only supports one writer at a time; enable WAL mode for better concurrency.
 	if _, err := sqlDB.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
-		sqlDB.Close()
+		_ = sqlDB.Close()
 		return fmt.Errorf("sqlitedriver: enable WAL: %w", err)
 	}
 
 	// Enable foreign keys.
 	if _, err := sqlDB.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
-		sqlDB.Close()
+		_ = sqlDB.Close()
 		return fmt.Errorf("sqlitedriver: enable foreign keys: %w", err)
 	}
 

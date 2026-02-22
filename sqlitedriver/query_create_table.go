@@ -161,11 +161,6 @@ func (q *CreateTableQuery) resolveColumnType(f *schema.Field) string {
 
 	// AutoIncrement fields use INTEGER (SQLite uses INTEGER PRIMARY KEY AUTOINCREMENT).
 	if f.Options.AutoIncrement {
-		goType := f.GoType
-		if goType.Kind() == reflect.Ptr {
-			goType = goType.Elem()
-		}
-		// SQLite always uses INTEGER for autoincrement regardless of int size.
 		return "INTEGER"
 	}
 

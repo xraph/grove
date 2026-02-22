@@ -128,7 +128,7 @@ func (cs *ChangeStream[T]) ResumeToken() any {
 // All returns a range-over-func iterator for change events.
 func (cs *ChangeStream[T]) All(yield func(ChangeEvent[T], error) bool) {
 	ctx := context.Background()
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 
 	for cs.Next(ctx) {
 		if !yield(cs.Event(), nil) {

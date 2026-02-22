@@ -281,6 +281,9 @@ func formatOverhead(nsOp, baselineNsOp float64) string {
 		return "N/A"
 	}
 	pct := ((nsOp - baselineNsOp) / baselineNsOp) * 100.0
+	if pct < 0 {
+		return fmt.Sprintf("%.1f%%", pct)
+	}
 	return fmt.Sprintf("+%.1f%%", pct)
 }
 
