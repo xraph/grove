@@ -21,6 +21,7 @@ type FieldOptions struct {
 	DriverHint    string    // Driver-specific hint (e.g., "pg", "pg,mongo")
 	Index         string    // Named index
 	CompositeIdx  string    // Composite index group name
+	CRDTType      string    // CRDT type (e.g., "lww", "counter", "set")
 	TagSource     TagSource // Which tag was used
 }
 
@@ -108,6 +109,9 @@ func NewField(sf reflect.StructField) *Field {
 	}
 	if v := tag.GetOption("composite"); v != "" {
 		f.Options.CompositeIdx = v
+	}
+	if v := tag.GetOption("crdt"); v != "" {
+		f.Options.CRDTType = v
 	}
 
 	return f
