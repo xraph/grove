@@ -75,7 +75,7 @@ func (q *SelectQuery) loadHasOne(ctx context.Context, target any, rel *schema.Re
 		}
 
 		relModel := reflect.New(relType).Interface()
-		relTable, err := resolveTable(relModel)
+		relTable, err := resolveTable(q.db.registry, relModel)
 		if err != nil {
 			return err
 		}
@@ -124,7 +124,7 @@ func (q *SelectQuery) loadHasMany(ctx context.Context, target any, rel *schema.R
 		}
 
 		relModel := reflect.New(elemType).Interface()
-		relTable, err := resolveTable(relModel)
+		relTable, err := resolveTable(q.db.registry, relModel)
 		if err != nil {
 			return err
 		}
@@ -188,7 +188,7 @@ func (q *SelectQuery) loadHasManyForSlice(ctx context.Context, sliceVal reflect.
 	}
 
 	relModel := reflect.New(innerType).Interface()
-	relTable, err := resolveTable(relModel)
+	relTable, err := resolveTable(q.db.registry, relModel)
 	if err != nil {
 		return err
 	}
@@ -256,7 +256,7 @@ func (q *SelectQuery) loadBelongsTo(ctx context.Context, target any, rel *schema
 	}
 
 	relModel := reflect.New(relType).Interface()
-	relTable, err := resolveTable(relModel)
+	relTable, err := resolveTable(q.db.registry, relModel)
 	if err != nil {
 		return err
 	}

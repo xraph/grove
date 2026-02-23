@@ -124,8 +124,13 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
+      - name: Download bench modules
+        working-directory: bench
+        run: go mod download
+
       - name: Run benchmarks
-        run: go test -bench=. -benchmem -count=1 -timeout=10m ./bench/
+        working-directory: bench
+        run: go test -bench=. -benchmem -count=1 -timeout=10m ./...
 
   # ─── Docs ───────────────────────────────────────────────────────────
   docs:

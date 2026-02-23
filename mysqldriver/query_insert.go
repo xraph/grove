@@ -13,15 +13,16 @@ import (
 
 // InsertQuery builds MySQL INSERT statements.
 type InsertQuery struct {
-	db         *MysqlDB
-	table      *schema.Table
-	model      any
-	columns    []string // explicit columns
-	values     [][]any  // explicit values (for manual inserts)
-	onConflict string   // ON DUPLICATE KEY UPDATE clause
-	setClauses []string // SET expressions for upsert
-	setArgs    [][]any  // args for each SET expression
-	err        error
+	db          *MysqlDB
+	table       *schema.Table
+	model       any
+	columns     []string // explicit columns
+	values      [][]any  // explicit values (for manual inserts)
+	onConflict  string   // ON DUPLICATE KEY UPDATE clause
+	setClauses  []string // SET expressions for upsert
+	setArgs     [][]any  // args for each SET expression
+	useMultiRow bool     // force multi-row VALUES statement instead of prepared-statement loop
+	err         error
 }
 
 // NewInsert creates an INSERT query.
@@ -32,7 +33,7 @@ func (db *MysqlDB) NewInsert(model any) *InsertQuery {
 		model: model,
 	}
 
-	table, err := resolveTable(model)
+	table, err := resolveTable(db.registry, model)
 	if err != nil {
 		q.err = err
 		return q
@@ -69,6 +70,14 @@ func (q *InsertQuery) Set(expr string, args ...any) *InsertQuery {
 	return q
 }
 
+// MultiRow forces the insert to use a single multi-row VALUES statement
+// instead of a prepared statement loop. This may be preferred for small
+// batches where single-statement atomicity matters.
+func (q *InsertQuery) MultiRow() *InsertQuery {
+	q.useMultiRow = true
+	return q
+}
+
 // Build generates the SQL and args.
 func (q *InsertQuery) Build() (string, []any, error) {
 	if q.err != nil {
@@ -78,8 +87,6 @@ func (q *InsertQuery) Build() (string, []any, error) {
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
 
-	var args []any
-
 	dialect := q.db.dialect
 
 	buf.WriteString("INSERT INTO ")
@@ -87,6 +94,8 @@ func (q *InsertQuery) Build() (string, []any, error) {
 
 	// Determine fields to insert.
 	fields := q.insertableFields()
+
+	args := make([]any, 0, len(fields))
 
 	// Determine columns.
 	columns := q.columns
@@ -205,6 +214,17 @@ func (q *InsertQuery) Exec(ctx context.Context) (driver.Result, error) {
 		}
 	}
 
+	// For bulk inserts (slice models), use prepared-statement loop by default.
+	if !q.useMultiRow && len(q.values) == 0 {
+		val := reflect.ValueOf(q.model)
+		for val.Kind() == reflect.Ptr {
+			val = val.Elem()
+		}
+		if val.Kind() == reflect.Slice && val.Len() > 0 {
+			return q.execPrepared(ctx, qc)
+		}
+	}
+
 	query, args, err := q.Build()
 	if err != nil {
 		return nil, err
@@ -293,6 +313,163 @@ func (q *InsertQuery) Scan(ctx context.Context, dest ...any) error {
 	}
 
 	return nil
+}
+
+// execPrepared executes a bulk insert using a prepared statement loop
+// within a transaction. This is significantly faster than a single
+// multi-row VALUES statement for large batches.
+func (q *InsertQuery) execPrepared(ctx context.Context, qc *hook.QueryContext) (driver.Result, error) {
+	fields := q.insertableFields()
+
+	singleRowSQL, err := q.buildSingleRowInsert(fields)
+	if err != nil {
+		return nil, err
+	}
+
+	if qc != nil {
+		qc.RawQuery = singleRowSQL
+	}
+
+	// If already in a transaction, prepare and execute directly.
+	if q.db.txConn != nil {
+		result, execErr := q.execPreparedWith(ctx, q.db, fields, singleRowSQL)
+		if execErr != nil {
+			return nil, execErr
+		}
+		// Run post-mutation hooks.
+		if q.db.hooks != nil && qc != nil {
+			if err := q.db.hooks.RunPostMutation(ctx, qc, q.model, result); err != nil {
+				return nil, err
+			}
+		}
+		return result, nil
+	}
+
+	// Otherwise, create a transaction for atomicity.
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("mysqldriver: bulk insert begin tx: %w", err)
+	}
+
+	mtx := &MysqlTx{db: q.db, tx: tx}
+	txdb := mtx.txDB()
+
+	result, execErr := q.execPreparedWith(ctx, txdb, fields, singleRowSQL)
+	if execErr != nil {
+		_ = tx.Rollback()
+		return nil, execErr
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("mysqldriver: bulk insert commit: %w", err)
+	}
+
+	// Run post-mutation hooks.
+	if q.db.hooks != nil && qc != nil {
+		if err := q.db.hooks.RunPostMutation(ctx, qc, q.model, result); err != nil {
+			return nil, err
+		}
+	}
+
+	return result, nil
+}
+
+// execPreparedWith executes a prepared-statement bulk insert using the given db.
+func (q *InsertQuery) execPreparedWith(ctx context.Context, db *MysqlDB, fields []*schema.Field, query string) (driver.Result, error) {
+	stmt, err := db.Prepare(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = stmt.Close() }()
+
+	val := reflect.ValueOf(q.model)
+	for val.Kind() == reflect.Ptr {
+		val = val.Elem()
+	}
+
+	n := val.Len()
+	rowArgs := make([]any, len(fields))
+	var totalAffected int64
+
+	for i := 0; i < n; i++ {
+		elem := val.Index(i)
+		for elem.Kind() == reflect.Ptr {
+			elem = elem.Elem()
+		}
+
+		for j, f := range fields {
+			fv := elem
+			for _, idx := range f.GoIndex {
+				fv = fv.Field(idx)
+			}
+			rowArgs[j] = fv.Interface()
+		}
+
+		res, err := stmt.Exec(ctx, rowArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("mysqldriver: bulk insert row %d: %w", i, err)
+		}
+		affected, _ := res.RowsAffected()
+		totalAffected += affected
+	}
+
+	return &mysqlBulkResult{rowsAffected: totalAffected}, nil
+}
+
+// buildSingleRowInsert generates a single-row INSERT statement for prepared-statement use.
+func (q *InsertQuery) buildSingleRowInsert(fields []*schema.Field) (string, error) {
+	if q.err != nil {
+		return "", q.err
+	}
+
+	buf := pool.GetBuffer()
+	defer pool.PutBuffer(buf)
+
+	dialect := q.db.dialect
+
+	buf.WriteString("INSERT INTO ")
+	buf.WriteString(dialect.Quote(q.table.Name))
+
+	columns := q.columns
+	if len(columns) == 0 {
+		columns = make([]string, len(fields))
+		for i, f := range fields {
+			columns[i] = f.Options.Column
+		}
+	}
+
+	buf.WriteString(" (")
+	for i, col := range columns {
+		if i > 0 {
+			buf.WriteString(", ")
+		}
+		buf.WriteString(dialect.Quote(col))
+	}
+	buf.WriteString(") VALUES (")
+	for i := range columns {
+		if i > 0 {
+			buf.WriteString(", ")
+		}
+		buf.WriteString("?")
+	}
+	buf.WriteString(")")
+
+	if q.onConflict != "" {
+		buf.WriteString(" ")
+		buf.WriteString(q.onConflict)
+	}
+
+	return buf.String(), nil
+}
+
+// mysqlBulkResult implements driver.Result for prepared-statement bulk inserts.
+type mysqlBulkResult struct {
+	rowsAffected int64
+}
+
+func (r *mysqlBulkResult) RowsAffected() (int64, error) { return r.rowsAffected, nil }
+func (r *mysqlBulkResult) LastInsertId() (int64, error) {
+	return 0, fmt.Errorf("mysqldriver: LastInsertId not available for bulk insert")
 }
 
 // insertableFields returns the fields eligible for INSERT.

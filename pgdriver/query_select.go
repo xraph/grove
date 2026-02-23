@@ -59,7 +59,7 @@ func (db *PgDB) NewSelect(model ...any) *SelectQuery {
 
 	if len(model) > 0 && model[0] != nil {
 		q.model = model[0]
-		table, err := resolveTable(model[0])
+		table, err := resolveTable(db.registry, model[0])
 		if err != nil {
 			q.err = err
 		} else {
@@ -576,7 +576,7 @@ func (q *SelectQuery) Scan(ctx context.Context, dest ...any) error {
 	// Resolve the table for scanning.
 	table := q.table
 	if table == nil {
-		table, err = resolveTable(target)
+		table, err = resolveTable(q.db.registry, target)
 		if err != nil {
 			return err
 		}

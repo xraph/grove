@@ -52,7 +52,7 @@ func (q *baseQuery) appendWheres(buf *pool.Buffer) {
 //   - *User or (*User)(nil) -> looks up User's table
 //   - *[]User -> looks up User's table
 //   - User{} -> looks up User's table
-func resolveTable(model any) (*schema.Table, error) {
+func resolveTable(reg *schema.Registry, model any) (*schema.Table, error) {
 	if model == nil {
 		return nil, fmt.Errorf("pgdriver: nil model")
 	}
@@ -77,7 +77,7 @@ func resolveTable(model any) (*schema.Table, error) {
 		return nil, fmt.Errorf("pgdriver: model must be a struct or pointer/slice of struct, got %v", typ.Kind())
 	}
 
-	// Create a nil pointer of the struct type for NewTable.
+	// Create a nil pointer of the struct type for registry lookup (uses sync.Map cache).
 	modelPtr := reflect.New(typ).Interface()
-	return schema.NewTable(modelPtr)
+	return reg.Register(modelPtr)
 }

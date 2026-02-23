@@ -78,6 +78,7 @@ type sqliteTx struct {
 }
 
 var _ driver.Tx = (*sqliteTx)(nil)
+var _ driver.Preparer = (*sqliteTx)(nil)
 
 // Exec executes a query within the transaction that does not return rows.
 func (t *sqliteTx) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
@@ -113,4 +114,13 @@ func (t *sqliteTx) Commit() error {
 // underlying sql driver will return nil if the transaction is already closed.
 func (t *sqliteTx) Rollback() error {
 	return t.tx.Rollback()
+}
+
+// Prepare creates a prepared statement within the transaction.
+func (t *sqliteTx) Prepare(ctx context.Context, query string) (driver.Stmt, error) {
+	stmt, err := t.tx.PrepareContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("sqlitedriver: tx prepare: %w", err)
+	}
+	return &sqliteStmt{stmt: stmt}, nil
 }

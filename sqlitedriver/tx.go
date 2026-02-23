@@ -72,8 +72,9 @@ func (t *SqliteTx) Rollback() error {
 // the transaction instead of the pool.
 func (t *SqliteTx) txDB() *SqliteDB {
 	return &SqliteDB{
-		dialect: t.db.dialect,
-		opts:    t.db.opts,
-		txConn:  t.tx,
+		dialect:  t.db.dialect,
+		opts:     t.db.opts,
+		txConn:   t.tx,
+		registry: t.db.registry,
 	}
 }

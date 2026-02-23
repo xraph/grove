@@ -15,16 +15,13 @@ type ColumnMap struct {
 }
 
 // NewColumnMap creates a ColumnMap from a Table's fields.
-// The map is keyed by the database column name (Field.Options.Column).
+// It reuses the pre-built FieldsByColumn map from the table instead of
+// rebuilding one on every call.
 func NewColumnMap(table *schema.Table) *ColumnMap {
-	cm := &ColumnMap{
+	return &ColumnMap{
 		fields:   table.Fields,
-		fieldMap: make(map[string]*schema.Field, len(table.Fields)),
+		fieldMap: table.FieldsByColumn,
 	}
-	for _, f := range table.Fields {
-		cm.fieldMap[f.Options.Column] = f
-	}
-	return cm
 }
 
 // Resolve returns the fields that correspond to the given column names,

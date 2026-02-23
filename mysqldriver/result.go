@@ -78,6 +78,7 @@ type mysqlTx struct {
 }
 
 var _ driver.Tx = (*mysqlTx)(nil)
+var _ driver.Preparer = (*mysqlTx)(nil)
 
 // Exec executes a query within the transaction that does not return rows.
 func (t *mysqlTx) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
@@ -114,4 +115,13 @@ func (t *mysqlTx) Commit() error {
 // already closed.
 func (t *mysqlTx) Rollback() error {
 	return t.tx.Rollback()
+}
+
+// Prepare creates a prepared statement within the transaction.
+func (t *mysqlTx) Prepare(ctx context.Context, query string) (driver.Stmt, error) {
+	stmt, err := t.tx.PrepareContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("mysqldriver: tx prepare: %w", err)
+	}
+	return &mysqlStmt{stmt: stmt}, nil
 }

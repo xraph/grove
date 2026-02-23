@@ -26,7 +26,7 @@ func (db *SqliteDB) NewCreateTable(model any) *CreateTableQuery {
 		model: model,
 	}
 
-	table, err := resolveTable(model)
+	table, err := resolveTable(db.registry, model)
 	if err != nil {
 		q.err = err
 		return q
@@ -191,7 +191,7 @@ func (db *SqliteDB) NewDropTable(model any) *DropTableQuery {
 		model: model,
 	}
 
-	table, err := resolveTable(model)
+	table, err := resolveTable(db.registry, model)
 	if err != nil {
 		q.err = err
 		return q

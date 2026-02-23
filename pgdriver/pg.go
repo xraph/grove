@@ -9,6 +9,7 @@ import (
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/schema"
 )
 
 // PgDB implements driver.Driver for PostgreSQL using pgxpool.
@@ -18,20 +19,23 @@ import (
 // When txConn is set (by PgTx), Exec/Query/QueryRow route through
 // the transaction instead of the pool.
 type PgDB struct {
-	pool    *pgxpool.Pool
-	dialect *PgDialect
-	opts    *driver.DriverOptions
-	txConn  driver.Tx    // non-nil when operating inside a transaction
-	hooks   *hook.Engine // optional hook engine for lifecycle hooks
+	pool     *pgxpool.Pool
+	dialect  *PgDialect
+	opts     *driver.DriverOptions
+	txConn   driver.Tx        // non-nil when operating inside a transaction
+	hooks    *hook.Engine     // optional hook engine for lifecycle hooks
+	registry *schema.Registry // cached table metadata to avoid repeated reflection
 }
 
 var _ driver.Driver = (*PgDB)(nil)
 var _ driver.StreamCapable = (*PgDB)(nil)
+var _ driver.Preparer = (*PgDB)(nil)
 
 // New creates a new unconnected PgDB. Call Open to establish a connection pool.
 func New() *PgDB {
 	return &PgDB{
-		dialect: &PgDialect{},
+		dialect:  &PgDialect{},
+		registry: schema.NewRegistry(),
 	}
 }
 
@@ -172,6 +176,30 @@ func (db *PgDB) GroveUpdate(model any) any { return db.NewUpdate(model) }
 
 // GroveDelete is the adapter method for grove.DB.NewDelete().
 func (db *PgDB) GroveDelete(model any) any { return db.NewDelete(model) }
+
+// Prepare creates a prepared statement for repeated execution.
+// If operating within a transaction, it delegates to the transaction's Prepare.
+// For pool connections, it acquires a connection from the pool, prepares the
+// statement on it, and returns a pgPoolStmt that releases the connection on Close.
+func (db *PgDB) Prepare(ctx context.Context, query string) (driver.Stmt, error) {
+	if db.txConn != nil {
+		if p, ok := db.txConn.(driver.Preparer); ok {
+			return p.Prepare(ctx, query)
+		}
+		return nil, fmt.Errorf("pgdriver: transaction does not support Prepare")
+	}
+	conn, err := db.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("pgdriver: acquire conn for prepare: %w", err)
+	}
+	name := fmt.Sprintf("grove_ps_%p", conn)
+	sd, err := conn.Conn().Prepare(ctx, name, query)
+	if err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("pgdriver: prepare: %w", err)
+	}
+	return &pgPoolStmt{conn: conn, sd: sd}, nil
+}
 
 // mapIsolationLevel converts a driver.IsolationLevel to the corresponding
 // pgx.TxIsoLevel string constant.

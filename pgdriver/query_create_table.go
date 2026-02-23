@@ -27,7 +27,7 @@ func (db *PgDB) NewCreateTable(model any) *CreateTableQuery {
 		model: model,
 	}
 
-	table, err := resolveTable(model)
+	table, err := resolveTable(db.registry, model)
 	if err != nil {
 		q.err = err
 		return q
@@ -202,7 +202,7 @@ func (db *PgDB) NewDropTable(model any) *DropTableQuery {
 		model: model,
 	}
 
-	table, err := resolveTable(model)
+	table, err := resolveTable(db.registry, model)
 	if err != nil {
 		q.err = err
 		return q

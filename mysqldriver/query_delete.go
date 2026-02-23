@@ -31,7 +31,7 @@ func (db *MysqlDB) NewDelete(model any) *DeleteQuery {
 		model: model,
 	}
 
-	table, err := resolveTable(model)
+	table, err := resolveTable(db.registry, model)
 	if err != nil {
 		q.err = err
 		return q
@@ -81,7 +81,7 @@ func (q *DeleteQuery) WherePK() *DeleteQuery {
 			fv = fv.Field(idx)
 		}
 		q.wheres = append(q.wheres, whereClause{
-			query: fmt.Sprintf("%s = ?", q.db.dialect.Quote(pkField.Options.Column)),
+			query: q.db.dialect.Quote(pkField.Options.Column) + " = ?",
 			args:  []any{fv.Interface()},
 			sep:   "AND",
 		})
@@ -128,7 +128,7 @@ func (q *DeleteQuery) buildHardDelete() (string, []any, error) {
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
 
-	var args []any
+	args := make([]any, 0, len(q.wheres))
 	dialect := q.db.dialect
 
 	buf.WriteString("DELETE FROM ")
@@ -173,7 +173,7 @@ func (q *DeleteQuery) buildSoftDelete() (string, []any, error) {
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
 
-	var args []any
+	args := make([]any, 0, len(q.wheres))
 	dialect := q.db.dialect
 
 	buf.WriteString("UPDATE ")

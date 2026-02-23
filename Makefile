@@ -168,19 +168,19 @@ coverage-html: coverage
 ## bench: Run benchmarks
 bench:
 	@echo "$(BLUE)Running benchmarks...$(NC)"
-	$(GO) test -bench=. -benchmem -count=1 -timeout=10m ./bench/
+	cd bench && $(GO) test -bench=. -benchmem -count=1 -timeout=10m ./...
 	@echo "$(GREEN)Benchmarks complete$(NC)"
 
 ## bench-report: Generate benchmark report
 bench-report:
 	@echo "$(BLUE)Generating benchmark report...$(NC)"
-	$(GO) run ./bench/cmd/benchreport
+	cd bench && $(GO) run ./cmd/benchreport
 	@echo "$(GREEN)Report generated$(NC)"
 
 ## bench-update: Run benchmarks and update README + docs
 bench-update:
 	@echo "$(BLUE)Running benchmarks and updating reports...$(NC)"
-	$(GO) run ./bench/cmd/benchreport --update
+	cd bench && $(GO) run ./cmd/benchreport --update
 	@echo "$(GREEN)Benchmark reports updated$(NC)"
 
 ## tidy: Tidy and verify modules

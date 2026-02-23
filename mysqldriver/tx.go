@@ -72,8 +72,9 @@ func (t *MysqlTx) Rollback() error {
 // the transaction instead of the pool.
 func (t *MysqlTx) txDB() *MysqlDB {
 	return &MysqlDB{
-		dialect: t.db.dialect,
-		opts:    t.db.opts,
-		txConn:  t.tx,
+		dialect:  t.db.dialect,
+		opts:     t.db.opts,
+		txConn:   t.tx,
+		registry: t.db.registry,
 	}
 }

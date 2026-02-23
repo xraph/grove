@@ -106,3 +106,16 @@ type StreamCapable interface {
 	// (e.g., PG logical replication, Mongo change streams, MySQL binlog).
 	SupportsCDC() bool
 }
+
+// Preparer is an optional interface for drivers that support prepared statements.
+// Used for efficient bulk inserts via prepared-statement loops.
+type Preparer interface {
+	Prepare(ctx context.Context, query string) (Stmt, error)
+}
+
+// Stmt is a prepared statement that can be executed multiple times with
+// different arguments. It must be closed when no longer needed.
+type Stmt interface {
+	Exec(ctx context.Context, args ...any) (Result, error)
+	Close() error
+}

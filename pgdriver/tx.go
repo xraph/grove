@@ -72,8 +72,9 @@ func (t *PgTx) Rollback() error {
 // the transaction instead of the pool.
 func (t *PgTx) txDB() *PgDB {
 	return &PgDB{
-		dialect: t.db.dialect,
-		opts:    t.db.opts,
-		txConn:  t.tx,
+		dialect:  t.db.dialect,
+		opts:     t.db.opts,
+		txConn:   t.tx,
+		registry: t.db.registry,
 	}
 }

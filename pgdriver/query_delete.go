@@ -29,7 +29,7 @@ func (db *PgDB) NewDelete(model any) *DeleteQuery {
 		model: model,
 	}
 
-	table, err := resolveTable(model)
+	table, err := resolveTable(db.registry, model)
 	if err != nil {
 		q.err = err
 		return q
@@ -78,9 +78,8 @@ func (q *DeleteQuery) WherePK() *DeleteQuery {
 		for _, idx := range pkField.GoIndex {
 			fv = fv.Field(idx)
 		}
-		placeholder := "?" // placeholder will be replaced during build
 		q.wheres = append(q.wheres, whereClause{
-			query: fmt.Sprintf("%s = %s", q.db.dialect.Quote(pkField.Options.Column), placeholder),
+			query: q.db.dialect.Quote(pkField.Options.Column) + " = ?",
 			args:  []any{fv.Interface()},
 			sep:   "AND",
 		})
@@ -121,7 +120,7 @@ func (q *DeleteQuery) buildHardDelete() (string, []any, error) {
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
 
-	var args []any
+	args := make([]any, 0, len(q.wheres))
 	argIdx := 0
 	dialect := q.db.dialect
 
@@ -166,7 +165,7 @@ func (q *DeleteQuery) buildSoftDelete() (string, []any, error) {
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
 
-	var args []any
+	args := make([]any, 0, len(q.wheres))
 	argIdx := 0
 	dialect := q.db.dialect
 

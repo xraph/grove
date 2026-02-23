@@ -9,6 +9,7 @@ import (
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/schema"
 )
 
 // MysqlDB implements driver.Driver for MySQL using database/sql.
@@ -18,19 +19,22 @@ import (
 // When txConn is set (by MysqlTx), Exec/Query/QueryRow route through
 // the transaction instead of the pool.
 type MysqlDB struct {
-	db      *sql.DB
-	dialect *MysqlDialect
-	opts    *driver.DriverOptions
-	txConn  driver.Tx    // non-nil when operating inside a transaction
-	hooks   *hook.Engine // optional hook engine for lifecycle hooks
+	db       *sql.DB
+	dialect  *MysqlDialect
+	opts     *driver.DriverOptions
+	txConn   driver.Tx        // non-nil when operating inside a transaction
+	hooks    *hook.Engine     // optional hook engine for lifecycle hooks
+	registry *schema.Registry // cached table metadata to avoid repeated reflection
 }
 
 var _ driver.Driver = (*MysqlDB)(nil)
+var _ driver.Preparer = (*MysqlDB)(nil)
 
 // New creates a new unconnected MysqlDB. Call Open to establish a connection pool.
 func New() *MysqlDB {
 	return &MysqlDB{
-		dialect: &MysqlDialect{},
+		dialect:  &MysqlDialect{},
+		registry: schema.NewRegistry(),
 	}
 }
 
@@ -157,6 +161,22 @@ func (db *MysqlDB) GroveUpdate(model any) any { return db.NewUpdate(model) }
 
 // GroveDelete is the adapter method for grove.DB.NewDelete().
 func (db *MysqlDB) GroveDelete(model any) any { return db.NewDelete(model) }
+
+// Prepare creates a prepared statement for repeated execution.
+// If operating within a transaction, it delegates to the transaction's Prepare.
+func (db *MysqlDB) Prepare(ctx context.Context, query string) (driver.Stmt, error) {
+	if db.txConn != nil {
+		if p, ok := db.txConn.(driver.Preparer); ok {
+			return p.Prepare(ctx, query)
+		}
+		return nil, fmt.Errorf("mysqldriver: transaction does not support Prepare")
+	}
+	stmt, err := db.db.PrepareContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("mysqldriver: prepare: %w", err)
+	}
+	return &mysqlStmt{stmt: stmt}, nil
+}
 
 // mapIsolationLevel converts a driver.IsolationLevel to the corresponding
 // sql.IsolationLevel constant.

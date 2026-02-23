@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/xraph/grove"
+	"github.com/xraph/grove/schema"
 )
 
 // ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ type TestPost struct {
 // ---------------------------------------------------------------------------
 
 func newTestDB() *MysqlDB {
-	return &MysqlDB{dialect: &MysqlDialect{}}
+	return &MysqlDB{dialect: &MysqlDialect{}, registry: schema.NewRegistry()}
 }
 
 // =========================================================================

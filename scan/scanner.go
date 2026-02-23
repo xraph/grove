@@ -3,9 +3,36 @@ package scan
 import (
 	"fmt"
 	"reflect"
+	"sync"
 
 	"github.com/xraph/grove/schema"
 )
+
+var scanPtrPool = sync.Pool{
+	New: func() any {
+		s := make([]any, 0, 16)
+		return &s
+	},
+}
+
+func getScanPtrs(n int) *[]any {
+	sp := scanPtrPool.Get().(*[]any)
+	s := *sp
+	if cap(s) < n {
+		*sp = make([]any, n)
+	} else {
+		*sp = s[:n]
+	}
+	return sp
+}
+
+func putScanPtrs(sp *[]any) {
+	s := *sp
+	for i := range s {
+		s[i] = nil
+	}
+	scanPtrPool.Put(sp)
+}
 
 // Row interface compatible with driver.Row.
 // It represents a single result row from a query.
@@ -38,12 +65,14 @@ func ScanRow(row Row, dest any, table *schema.Table) error {
 	}
 
 	// Build scan targets from the table's field list.
-	ptrs := make([]any, len(table.Fields))
+	sp := getScanPtrs(len(table.Fields))
+	ptrs := *sp
 	for i, field := range table.Fields {
 		ptrs[i] = FieldPtr(v, field)
 	}
-
-	return row.Scan(ptrs...)
+	err := row.Scan(ptrs...)
+	putScanPtrs(sp)
+	return err
 }
 
 // ScanRows scans all rows from a result set into a slice of structs using the

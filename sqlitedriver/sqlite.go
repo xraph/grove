@@ -9,6 +9,7 @@ import (
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/schema"
 )
 
 // SqliteDB implements driver.Driver for SQLite using database/sql
@@ -19,19 +20,22 @@ import (
 // When txConn is set (by SqliteTx), Exec/Query/QueryRow route through
 // the transaction instead of the pool.
 type SqliteDB struct {
-	db      *sql.DB
-	dialect *SqliteDialect
-	opts    *driver.DriverOptions
-	txConn  driver.Tx    // non-nil when operating inside a transaction
-	hooks   *hook.Engine // optional hook engine for lifecycle hooks
+	db       *sql.DB
+	dialect  *SqliteDialect
+	opts     *driver.DriverOptions
+	txConn   driver.Tx        // non-nil when operating inside a transaction
+	hooks    *hook.Engine     // optional hook engine for lifecycle hooks
+	registry *schema.Registry // cached table metadata to avoid repeated reflection
 }
 
 var _ driver.Driver = (*SqliteDB)(nil)
+var _ driver.Preparer = (*SqliteDB)(nil)
 
 // New creates a new unconnected SqliteDB. Call Open to establish a connection.
 func New() *SqliteDB {
 	return &SqliteDB{
-		dialect: &SqliteDialect{},
+		dialect:  &SqliteDialect{},
+		registry: schema.NewRegistry(),
 	}
 }
 
@@ -169,6 +173,22 @@ func (db *SqliteDB) GroveUpdate(model any) any { return db.NewUpdate(model) }
 
 // GroveDelete is the adapter method for grove.DB.NewDelete().
 func (db *SqliteDB) GroveDelete(model any) any { return db.NewDelete(model) }
+
+// Prepare creates a prepared statement for repeated execution.
+// If operating within a transaction, it delegates to the transaction's Prepare.
+func (db *SqliteDB) Prepare(ctx context.Context, query string) (driver.Stmt, error) {
+	if db.txConn != nil {
+		if p, ok := db.txConn.(driver.Preparer); ok {
+			return p.Prepare(ctx, query)
+		}
+		return nil, fmt.Errorf("sqlitedriver: transaction does not support Prepare")
+	}
+	stmt, err := db.db.PrepareContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("sqlitedriver: prepare: %w", err)
+	}
+	return &sqliteStmt{stmt: stmt}, nil
+}
 
 // mapIsolationLevel converts a driver.IsolationLevel to the corresponding
 // sql.IsolationLevel constant. SQLite only truly supports Serializable,

@@ -23,13 +23,14 @@ func isBaseModelField(sf reflect.StructField) bool {
 
 // Table represents metadata about a model's database table.
 type Table struct {
-	ModelType  reflect.Type // The Go struct type
-	Name       string       // Table name (from tag or snake_case of type name)
-	Alias      string       // Table alias for queries
-	Fields     []*Field     // All mapped fields (excluding skip, relations)
-	PKFields   []*Field     // Primary key fields
-	Relations  []*Relation  // Declared relations
-	SoftDelete *Field       // Soft delete field, if any
+	ModelType      reflect.Type     // The Go struct type
+	Name           string           // Table name (from tag or snake_case of type name)
+	Alias          string           // Table alias for queries
+	Fields         []*Field         // All mapped fields (excluding skip, relations)
+	FieldsByColumn map[string]*Field // column name -> field, built once
+	PKFields       []*Field         // Primary key fields
+	Relations      []*Relation      // Declared relations
+	SoftDelete     *Field           // Soft delete field, if any
 }
 
 // ErrInvalidModel is returned when a model is not a valid struct or pointer to struct.
@@ -54,6 +55,12 @@ func NewTable(model any) (*Table, error) {
 	// Walk struct fields.
 	if err := t.processFields(typ, nil); err != nil {
 		return nil, err
+	}
+
+	// Pre-build column -> field lookup so scanners can reuse it.
+	t.FieldsByColumn = make(map[string]*Field, len(t.Fields))
+	for _, f := range t.Fields {
+		t.FieldsByColumn[f.Options.Column] = f
 	}
 
 	return t, nil

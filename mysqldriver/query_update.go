@@ -39,7 +39,7 @@ func (db *MysqlDB) NewUpdate(model any) *UpdateQuery {
 		model: model,
 	}
 
-	table, err := resolveTable(model)
+	table, err := resolveTable(db.registry, model)
 	if err != nil {
 		q.err = err
 		return q
@@ -107,7 +107,7 @@ func (q *UpdateQuery) WherePK() *UpdateQuery {
 			fv = fv.Field(idx)
 		}
 		q.wheres = append(q.wheres, whereClause{
-			query: fmt.Sprintf("%s = ?", q.db.dialect.Quote(pkField.Options.Column)),
+			query: q.db.dialect.Quote(pkField.Options.Column) + " = ?",
 			args:  []any{fv.Interface()},
 			sep:   "AND",
 		})
@@ -136,7 +136,7 @@ func (q *UpdateQuery) Build() (string, []any, error) {
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
 
-	var args []any
+	args := make([]any, 0, len(q.table.Fields)+len(q.wheres))
 	dialect := q.db.dialect
 
 	buf.WriteString("UPDATE ")

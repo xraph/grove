@@ -12,6 +12,9 @@ import (
 //
 // v must be the reflect.Value of the struct (not a pointer to it).
 func FieldPtr(v reflect.Value, field *schema.Field) any {
+	if len(field.GoIndex) == 1 {
+		return v.Field(field.GoIndex[0]).Addr().Interface()
+	}
 	fv := v
 	for _, idx := range field.GoIndex {
 		fv = fv.Field(idx)

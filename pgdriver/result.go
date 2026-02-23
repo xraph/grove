@@ -93,6 +93,7 @@ type pgTx struct {
 }
 
 var _ driver.Tx = (*pgTx)(nil)
+var _ driver.Preparer = (*pgTx)(nil)
 
 // Exec executes a query within the transaction that does not return rows.
 func (t *pgTx) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
@@ -128,4 +129,14 @@ func (t *pgTx) Commit() error {
 // underlying pgx driver will return nil if the transaction is already closed.
 func (t *pgTx) Rollback() error {
 	return t.tx.Rollback(context.Background())
+}
+
+// Prepare creates a prepared statement within the transaction.
+func (t *pgTx) Prepare(ctx context.Context, query string) (driver.Stmt, error) {
+	name := fmt.Sprintf("grove_txps_%p", t)
+	_, err := t.tx.Prepare(ctx, name, query)
+	if err != nil {
+		return nil, fmt.Errorf("pgdriver: tx prepare: %w", err)
+	}
+	return &pgTxStmt{name: name, tx: t}, nil
 }

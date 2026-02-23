@@ -29,7 +29,7 @@ func (db *MysqlDB) NewCreateTable(model any) *CreateTableQuery {
 		model: model,
 	}
 
-	table, err := resolveTable(model)
+	table, err := resolveTable(db.registry, model)
 	if err != nil {
 		q.err = err
 		return q
@@ -232,7 +232,7 @@ func (db *MysqlDB) NewDropTable(model any) *DropTableQuery {
 		model: model,
 	}
 
-	table, err := resolveTable(model)
+	table, err := resolveTable(db.registry, model)
 	if err != nil {
 		q.err = err
 		return q

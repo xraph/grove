@@ -2,9 +2,9 @@
 //
 // Usage:
 //
-//	go run ./bench/cmd/benchreport
-//	go run ./bench/cmd/benchreport --update
-//	go run ./bench/cmd/benchreport --count 3 --timeout 5m
+//	go run ./cmd/benchreport
+//	go run ./cmd/benchreport --update
+//	go run ./cmd/benchreport --count 3 --timeout 5m
 package main
 
 import (
@@ -92,14 +92,14 @@ func main() {
 
 	if *update {
 		// Update README.md
-		if err := updateFile("README.md", "<!-- BENCH:START -->", "<!-- BENCH:END -->", md); err != nil {
+		if err := updateFile("../README.md", "<!-- BENCH:START -->", "<!-- BENCH:END -->", md); err != nil {
 			fmt.Fprintf(os.Stderr, "Error updating README.md: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println("Updated README.md")
 
 		// Update benchmarks.mdx
-		mdxPath := "docs/content/docs/concepts/benchmarks.mdx"
+		mdxPath := "../docs/content/docs/concepts/benchmarks.mdx"
 		if err := updateFile(mdxPath, "{/* BENCH:START */}", "{/* BENCH:END */}", md); err != nil {
 			fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", mdxPath, err)
 			os.Exit(1)
@@ -118,7 +118,7 @@ func runBenchmarks(count int, timeout string) ([]benchResult, error) {
 		"-benchmem",
 		fmt.Sprintf("-count=%d", count),
 		fmt.Sprintf("-timeout=%s", timeout),
-		"./bench/",
+		"./...",
 	}
 
 	cmd := exec.Command("go", args...)

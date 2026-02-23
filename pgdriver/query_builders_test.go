@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/xraph/grove"
+	"github.com/xraph/grove/schema"
 )
 
 // ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ type TestPost struct {
 // ---------------------------------------------------------------------------
 
 func newTestDB() *PgDB {
-	return &PgDB{dialect: &PgDialect{}}
+	return &PgDB{dialect: &PgDialect{}, registry: schema.NewRegistry()}
 }
 
 // =========================================================================

@@ -64,7 +64,7 @@ func (q *RawQuery) Scan(ctx context.Context, dest ...any) error {
 					elemType = elemType.Elem()
 				}
 				if elemType.Kind() == reflect.Struct {
-					table, err := resolveTable(target)
+					table, err := resolveTable(q.db.registry, target)
 					if err == nil {
 						rows, qerr := q.db.Query(ctx, q.query, q.args...)
 						if qerr != nil {
@@ -78,7 +78,7 @@ func (q *RawQuery) Scan(ctx context.Context, dest ...any) error {
 
 			// Struct pointer: single-row scan.
 			if innerType.Kind() == reflect.Struct {
-				table, err := resolveTable(target)
+				table, err := resolveTable(q.db.registry, target)
 				if err == nil {
 					row := q.db.QueryRow(ctx, q.query, q.args...)
 					return scan.ScanRow(row, target, table)
