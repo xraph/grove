@@ -57,16 +57,12 @@ func BenchmarkMergeSet(b *testing.B) {
 			local := NewORSetState()
 			remote := NewORSetState()
 			for i := 0; i < size; i++ {
-				elem := fmt.Sprintf("elem-%d", i)
-				local.Entries[elem] = &ORSetEntry{
-					Value: json.RawMessage(fmt.Sprintf(`"%s"`, elem)),
-					Clock: HLC{Timestamp: int64(i), NodeID: "node-a"},
-					Alive: true,
+				elem := fmt.Sprintf(`"elem-%d"`, i)
+				local.Entries[elem] = []Tag{
+					{NodeID: "node-a", HLC: HLC{Timestamp: int64(i), NodeID: "node-a"}},
 				}
-				remote.Entries[elem] = &ORSetEntry{
-					Value: json.RawMessage(fmt.Sprintf(`"%s"`, elem)),
-					Clock: HLC{Timestamp: int64(i + 1), NodeID: "node-b"},
-					Alive: true,
+				remote.Entries[elem] = []Tag{
+					{NodeID: "node-b", HLC: HLC{Timestamp: int64(i + 1), NodeID: "node-b"}},
 				}
 			}
 
@@ -117,17 +113,9 @@ func BenchmarkMergeEngine_MergeField(b *testing.B) {
 
 	b.Run("Set", func(b *testing.B) {
 		s1 := NewORSetState()
-		s1.Entries["x"] = &ORSetEntry{
-			Value: json.RawMessage(`"x"`),
-			Clock: HLC{Timestamp: 100, NodeID: "a"},
-			Alive: true,
-		}
+		s1.Entries[`"x"`] = []Tag{{NodeID: "a", HLC: HLC{Timestamp: 100, NodeID: "a"}}}
 		s2 := NewORSetState()
-		s2.Entries["y"] = &ORSetEntry{
-			Value: json.RawMessage(`"y"`),
-			Clock: HLC{Timestamp: 200, NodeID: "b"},
-			Alive: true,
-		}
+		s2.Entries[`"y"`] = []Tag{{NodeID: "b", HLC: HLC{Timestamp: 200, NodeID: "b"}}}
 		local := &FieldState{Type: TypeSet, SetState: s1}
 		remote := &FieldState{Type: TypeSet, SetState: s2}
 
