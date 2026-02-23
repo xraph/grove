@@ -1,0 +1,431 @@
+---
+title: ClickHouse
+description: ClickHouse driver for OLAP analytics with MergeTree engines and columnar storage.
+---
+
+The ClickHouse driver provides Grove support for [ClickHouse](https://clickhouse.com/), the high-performance columnar database optimized for real-time analytics. It is built on the [official Go driver](https://github.com/ClickHouse/clickhouse-go) and uses `database/sql` for connectivity.
+
+ClickHouse differs from traditional SQL databases in several important ways that are reflected in the driver's API.
+
+## Installation
+
+```bash
+go get github.com/xraph/grove
+go get github.com/ClickHouse/clickhouse-go/v2
+```
+
+## Connection
+
+```go
+import (
+    "context"
+    "log"
+
+    "github.com/xraph/grove"
+    "github.com/xraph/grove/driver"
+    "github.com/xraph/grove/clickhousedriver"
+    _ "github.com/ClickHouse/clickhouse-go/v2"
+)
+
+// 1. Create and open the driver
+chdb := clickhousedriver.New()
+err := chdb.Open(ctx, "clickhouse://user:pass@localhost:9000/mydb",
+    driver.WithPoolSize(10),
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+// 2. Pass the connected driver to Grove
+db, err := grove.Open(chdb)
+if err != nil {
+    log.Fatal(err)
+}
+defer db.Close()
+```
+
+### DSN Examples
+
+| DSN | Description |
+|-----|-------------|
+| `"clickhouse://localhost:9000/mydb"` | Native protocol (port 9000) |
+| `"clickhouse://user:pass@host:9000/db"` | With authentication |
+| `"http://localhost:8123/mydb"` | HTTP protocol (port 8123) |
+
+### Unwrap Pattern
+
+```go
+chdb := clickhousedriver.Unwrap(db)
+
+var events []Event
+chdb.NewSelect(&events).
+    Where("timestamp > ?", cutoff).
+    OrderExpr("timestamp DESC").
+    Limit(1000).
+    Scan(ctx)
+```
+
+## ClickHouse-Specific Options
+
+| Option | Description |
+|--------|-------------|
+| `clickhousedriver.WithNativeProtocol()` | Use native ClickHouse protocol |
+| `clickhousedriver.WithCompression()` | Enable LZ4 compression |
+| `clickhousedriver.WithBatchSize(n)` | Batch size for bulk inserts |
+| `driver.WithPoolSize(n)` | Connection pool size |
+
+## Key Differences from SQL Databases
+
+Before diving into the API, understand these ClickHouse-specific behaviors:
+
+1. **No traditional UPDATE/DELETE** -- ClickHouse uses `ALTER TABLE ... UPDATE` and `ALTER TABLE ... DELETE` for mutations, which are asynchronous operations.
+2. **No RETURNING clause** -- ClickHouse does not support `INSERT ... RETURNING`.
+3. **ENGINE required** -- Every table needs an ENGINE (MergeTree family for most use cases).
+4. **ORDER BY required** -- MergeTree tables require an ORDER BY clause in the table definition.
+5. **No foreign keys** -- ClickHouse does not enforce referential integrity.
+6. **Eventual consistency for mutations** -- ALTER TABLE mutations are processed asynchronously.
+
+## Native Syntax
+
+### Placeholders
+
+ClickHouse uses `?` for parameterized queries:
+
+```go
+chdb.NewSelect(&events).
+    Where("timestamp > ?", time.Now().Add(-24*time.Hour)).
+    Where("event_type = ?", "click").
+    Scan(ctx)
+```
+
+### Backtick Quoting
+
+Identifiers are quoted with backticks (same as MySQL):
+
+```sql
+SELECT `id`, `event_type`, `timestamp` FROM `events` WHERE `user_id` = ?
+```
+
+### Type Mapping
+
+| Go Type | ClickHouse Type |
+|---------|----------------|
+| `bool` | `Bool` |
+| `int8` | `Int8` |
+| `int16` | `Int16` |
+| `int32` | `Int32` |
+| `int`, `int64` | `Int64` |
+| `uint8` | `UInt8` |
+| `uint16` | `UInt16` |
+| `uint32` | `UInt32` |
+| `uint`, `uint64` | `UInt64` |
+| `float32` | `Float32` |
+| `float64` | `Float64` |
+| `string` | `String` |
+| `time.Time` | `DateTime64(3)` |
+| `*time.Time` | `Nullable(DateTime64(3))` |
+| `[]byte` | `String` |
+| `map[string]any` | `String` (JSON) |
+
+## Query Builders
+
+### SELECT
+
+```go
+chdb := clickhousedriver.Unwrap(db)
+
+var events []Event
+chdb.NewSelect(&events).
+    Where("event_type = ?", "click").
+    Where("timestamp > ?", cutoff).
+    OrderExpr("timestamp DESC").
+    Limit(1000).
+    Scan(ctx)
+```
+
+#### PREWHERE (ClickHouse-Specific)
+
+`PREWHERE` is a ClickHouse optimization that filters data before reading non-referenced columns from disk. Use it for high-selectivity filters on large tables:
+
+```go
+chdb.NewSelect(&events).
+    Prewhere("event_type = ?", "click").
+    Where("user_id = ?", userID).
+    Scan(ctx)
+```
+
+#### SAMPLE (ClickHouse-Specific)
+
+Query a random sample of data for approximate results on large datasets:
+
+```go
+chdb.NewSelect(&events).
+    Sample(0.1). // 10% sample
+    Where("timestamp > ?", cutoff).
+    Scan(ctx)
+```
+
+#### FINAL (ClickHouse-Specific)
+
+For `ReplacingMergeTree` tables, use `FINAL` to get deduplicated results:
+
+```go
+chdb.NewSelect(&users).
+    Final().
+    Where("active = ?", true).
+    Scan(ctx)
+```
+
+#### Aggregation
+
+```go
+type HourlyStats struct {
+    Hour  string  `grove:"hour"`
+    Count int64   `grove:"count"`
+    Avg   float64 `grove:"avg_duration"`
+}
+
+var stats []HourlyStats
+chdb.NewSelect((*Event)(nil)).
+    ColumnExpr("toStartOfHour(timestamp) AS hour").
+    ColumnExpr("count() AS count").
+    ColumnExpr("avg(duration) AS avg_duration").
+    Where("timestamp > ?", cutoff).
+    GroupExpr("hour").
+    OrderExpr("hour DESC").
+    Scan(ctx, &stats)
+```
+
+### INSERT
+
+ClickHouse is optimized for bulk inserts. Single-row inserts work but batch inserts are strongly recommended:
+
+```go
+// Single insert
+event := Event{Type: "click", UserID: 42, Timestamp: time.Now()}
+_, err := chdb.NewInsert(&event).Exec(ctx)
+
+// Bulk insert (recommended)
+events := make([]Event, 1000)
+// ... populate events ...
+_, err := chdb.NewInsert(&events).Exec(ctx)
+```
+
+### UPDATE (Mutations)
+
+ClickHouse does not support traditional `UPDATE` statements. The driver uses `ALTER TABLE ... UPDATE` syntax. These are asynchronous mutations:
+
+```go
+// Update via the standard interface (generates ALTER TABLE ... UPDATE)
+_, err := chdb.NewUpdate((*Event)(nil)).
+    Set("`status` = ?", "processed").
+    Where("`event_type` = ?", "click").
+    Exec(ctx)
+```
+
+For explicit ALTER TABLE mutations:
+
+```go
+_, err := chdb.NewAlterUpdate((*Event)(nil)).
+    Set("`status` = ?", "processed").
+    Where("`event_type` = ?", "click").
+    Exec(ctx)
+```
+
+### DELETE (Mutations)
+
+Similarly, deletions are asynchronous `ALTER TABLE ... DELETE` operations:
+
+```go
+// Delete via standard interface
+_, err := chdb.NewDelete((*Event)(nil)).
+    Where("`timestamp` < ?", cutoff).
+    Exec(ctx)
+
+// Explicit ALTER TABLE DELETE
+_, err := chdb.NewAlterDelete((*Event)(nil)).
+    Where("`timestamp` < ?", cutoff).
+    Exec(ctx)
+```
+
+### Raw Queries
+
+```go
+var events []Event
+chdb.NewRaw("SELECT * FROM events WHERE event_type = ? LIMIT 100", "click").
+    Scan(ctx, &events)
+```
+
+## CREATE TABLE
+
+ClickHouse tables require an ENGINE and ORDER BY clause. The driver provides a fluent API for these:
+
+```go
+_, err := chdb.NewCreateTable((*Event)(nil)).
+    IfNotExists().
+    Engine("MergeTree()").
+    OrderBy("timestamp", "event_type").
+    PartitionBy("toYYYYMM(timestamp)").
+    TTL("timestamp + INTERVAL 90 DAY").
+    Exec(ctx)
+```
+
+### Engine Options
+
+| Engine | Use Case |
+|--------|----------|
+| `MergeTree()` | General purpose, most common |
+| `ReplacingMergeTree(version)` | Deduplication by ORDER BY key |
+| `SummingMergeTree(columns)` | Auto-sum numeric columns on merge |
+| `AggregatingMergeTree()` | Pre-aggregated materialized views |
+| `CollapsingMergeTree(sign)` | Collapsing rows with +1/-1 sign |
+| `Log()` | Small tables, append-only |
+
+### Table Definition Options
+
+```go
+chdb.NewCreateTable((*Event)(nil)).
+    IfNotExists().
+    Engine("ReplacingMergeTree(version)").
+    OrderBy("user_id", "timestamp").
+    PartitionBy("toYYYYMM(timestamp)").
+    TTL("timestamp + INTERVAL 1 YEAR").
+    Settings("index_granularity = 8192").
+    Exec(ctx)
+```
+
+## Type Helpers
+
+The `clickhousedriver` package provides helper functions for ClickHouse-specific type wrappers:
+
+```go
+// Use in struct tags with grove:",sqltype:..."
+type Event struct {
+    ID        uint64    `grove:"id,pk"`
+    Type      string    `grove:"event_type,sqltype:LowCardinality(String)"`
+    Tags      string    `grove:"tags,sqltype:Array(String)"`
+    Timestamp time.Time `grove:"timestamp"`
+}
+```
+
+Or use the helper functions when building types programmatically:
+
+```go
+clickhousedriver.LowCardinality("String")  // "LowCardinality(String)"
+clickhousedriver.ArrayType("String")        // "Array(String)"
+clickhousedriver.NullableType("Int64")      // "Nullable(Int64)"
+```
+
+## Transactions
+
+ClickHouse has limited transaction support. Transactions work for INSERT operations within a single partition, but not for ALTER TABLE mutations:
+
+```go
+tx, err := chdb.BeginTxQuery(ctx, nil)
+if err != nil {
+    return err
+}
+defer tx.Rollback()
+
+_, err = tx.NewInsert(&events).Exec(ctx)
+if err != nil {
+    return err
+}
+
+return tx.Commit()
+```
+
+## Migrations
+
+The `clickhousemigrate` package provides a ClickHouse-specific migration executor:
+
+```go
+import (
+    "github.com/xraph/grove/migrate"
+    "github.com/xraph/grove/clickhousedriver"
+    "github.com/xraph/grove/clickhousedriver/clickhousemigrate"
+)
+
+chdb := clickhousedriver.Unwrap(db)
+executor := clickhousemigrate.New(chdb)
+orchestrator := migrate.NewOrchestrator(executor, Migrations)
+
+result, err := orchestrator.Migrate(ctx)
+```
+
+### Migration Example
+
+```go
+var Migrations = migrate.NewGroup("analytics")
+
+func init() {
+    Migrations.MustRegister(&migrate.Migration{
+        Name:    "create_events",
+        Version: "20250101120000",
+        Up: func(ctx context.Context, exec migrate.Executor) error {
+            _, err := exec.Exec(ctx, `
+                CREATE TABLE IF NOT EXISTS events (
+                    id          UInt64,
+                    event_type  LowCardinality(String),
+                    user_id     UInt64,
+                    payload     String,
+                    timestamp   DateTime64(3)
+                )
+                ENGINE = MergeTree()
+                ORDER BY (timestamp, event_type)
+                PARTITION BY toYYYYMM(timestamp)
+                TTL timestamp + INTERVAL 90 DAY
+            `)
+            return err
+        },
+        Down: func(ctx context.Context, exec migrate.Executor) error {
+            _, err := exec.Exec(ctx, "DROP TABLE IF EXISTS events")
+            return err
+        },
+    })
+}
+```
+
+## Best Practices
+
+### Insert in Batches
+
+ClickHouse performs best with batch inserts of 1,000-100,000 rows at a time. Avoid single-row inserts in production:
+
+```go
+// Good: batch insert
+_, err := chdb.NewInsert(&largeEventSlice).Exec(ctx)
+
+// Avoid in production: single-row insert
+_, err := chdb.NewInsert(&singleEvent).Exec(ctx)
+```
+
+### Use PREWHERE for Selective Filters
+
+`PREWHERE` reads less data from disk than `WHERE` for highly selective conditions:
+
+```go
+// Good: PREWHERE for selective filter, WHERE for the rest
+chdb.NewSelect(&events).
+    Prewhere("event_type = ?", "purchase").
+    Where("amount > ?", 100).
+    Scan(ctx)
+```
+
+### Use LowCardinality for Low-Entropy Strings
+
+Columns with few distinct values (status, type, country) benefit from `LowCardinality`:
+
+```go
+type Event struct {
+    Type    string `grove:"event_type,sqltype:LowCardinality(String)"`
+    Country string `grove:"country,sqltype:LowCardinality(String)"`
+}
+```
+
+### Avoid Frequent Mutations
+
+`ALTER TABLE ... UPDATE` and `ALTER TABLE ... DELETE` are heavy operations. Design your schema to minimize mutations:
+- Use `TTL` for automatic data expiration instead of manual deletes
+- Use `ReplacingMergeTree` for upsert-like behavior instead of updates
+- Use `CollapsingMergeTree` for mutable state tracking

@@ -52,6 +52,7 @@ type DriverOptions struct {
 	PoolSize     int
 	QueryTimeout time.Duration
 	Logger       *slog.Logger
+	Extra        map[string]any // driver-specific options
 }
 
 // DefaultDriverOptions returns a DriverOptions with sensible defaults.

@@ -479,3 +479,23 @@ err := mydb.Open(ctx, dsn,
 )
 db, err := grove.Open(mydb)
 ```
+
+## Compatible Databases
+
+### TiDB
+
+[TiDB](https://www.pingcap.com/tidb/) is a MySQL-compatible distributed SQL database. The mysqldriver works with TiDB out of the box:
+
+```go
+mydb := mysqldriver.New()
+err := mydb.Open(ctx, "user:pass@tcp(localhost:4000)/mydb?parseTime=true",
+    driver.WithPoolSize(20),
+)
+```
+
+**Known differences:**
+
+- `AUTO_INCREMENT` works but TiDB also supports `AUTO_RANDOM` for distributed ID generation (use raw SQL for `AUTO_RANDOM`)
+- `ON DUPLICATE KEY UPDATE` and all standard MySQL syntax is fully supported
+- `GET_LOCK` / `RELEASE_LOCK` for migration locking works with TiDB
+- `FOREIGN KEY` constraints are supported but not enforced by default in some TiDB versions -- check your TiDB version's documentation

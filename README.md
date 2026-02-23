@@ -13,10 +13,12 @@ A polyglot Go ORM that generates native query syntax per database.
 
 ## Supported Databases
 
-- **PostgreSQL** -- Native `$1` placeholders, `DISTINCT ON`, `FOR UPDATE`, JSONB operators
+- **PostgreSQL** -- Native `$1` placeholders, `DISTINCT ON`, `FOR UPDATE`, JSONB operators (also compatible with CockroachDB, Neon, Supabase)
 - **SQLite** -- Lightweight embedded database with `INSERT OR REPLACE`
-- **MySQL** -- Backtick quoting, `ON DUPLICATE KEY UPDATE`, `USE INDEX` hints _(planned)_
-- **MongoDB** -- Native BSON filter documents, aggregation pipelines _(planned)_
+- **MySQL** -- Backtick quoting, `ON DUPLICATE KEY UPDATE`, `USE INDEX` hints (also compatible with TiDB)
+- **MongoDB** -- Native BSON filter documents, aggregation pipelines (also compatible with FerretDB)
+- **Turso / libSQL** -- Distributed SQLite at the edge with embedded replicas and multi-region replication
+- **ClickHouse** -- Columnar OLAP analytics with MergeTree engines, PREWHERE, SAMPLE, and batch inserts
 
 ## Quick Start
 

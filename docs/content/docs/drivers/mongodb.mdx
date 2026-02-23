@@ -544,3 +544,16 @@ All write operations (insert, update, delete) return a result object with the fo
 | `UpsertedCount()` | Number of documents upserted |
 
 `LastInsertId()` always returns an error because MongoDB does not use auto-incrementing integer IDs. Use `InsertedID()` instead.
+
+## Compatible Databases
+
+### FerretDB
+
+[FerretDB](https://www.ferretdb.com/) implements the MongoDB wire protocol on top of PostgreSQL or SQLite. The mongodriver works with FerretDB using a standard MongoDB connection string:
+
+```go
+mdb := mongodriver.New()
+err := mdb.Open(ctx, "mongodb://localhost:27017/mydb") // FerretDB endpoint
+```
+
+FerretDB supports the core MongoDB operations used by Grove's mongodriver (Find, Insert, Update, Delete, Aggregate). Some advanced MongoDB features may have limited support -- consult the [FerretDB compatibility matrix](https://docs.ferretdb.io/reference/supported-commands/) for details.

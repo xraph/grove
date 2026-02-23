@@ -1,0 +1,273 @@
+---
+title: Turso / libSQL
+description: Turso driver for distributed SQLite at the edge via libSQL.
+---
+
+The Turso driver provides Grove support for [Turso](https://turso.tech/), a distributed SQLite database built on [libSQL](https://github.com/tursodatabase/libsql). It shares the same SQLite dialect and query syntax as the SQLite driver, but connects to Turso's cloud-hosted databases with authentication, embedded replicas, and multi-region replication.
+
+## Installation
+
+```bash
+go get github.com/xraph/grove
+go get github.com/tursodatabase/go-libsql
+```
+
+## Connection
+
+```go
+import (
+    "context"
+    "log"
+
+    "github.com/xraph/grove"
+    "github.com/xraph/grove/driver"
+    "github.com/xraph/grove/tursodriver"
+    _ "github.com/tursodatabase/go-libsql"
+)
+
+// 1. Create and open the driver
+tdb := tursodriver.New()
+err := tdb.Open(ctx, "libsql://your-db-name-org.turso.io",
+    tursodriver.WithAuthToken("your-auth-token"),
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+// 2. Pass the connected driver to Grove
+db, err := grove.Open(tdb)
+if err != nil {
+    log.Fatal(err)
+}
+defer db.Close()
+```
+
+### Embedded Replicas
+
+Turso supports embedded replicas -- a local SQLite file that automatically syncs with the remote database. Reads are served from the local copy for sub-millisecond latency, while writes are forwarded to the primary:
+
+```go
+tdb := tursodriver.New()
+err := tdb.Open(ctx, "libsql://your-db-name-org.turso.io",
+    tursodriver.WithAuthToken("your-auth-token"),
+    tursodriver.WithEmbeddedReplica("/tmp/local-replica.db"),
+    tursodriver.WithSyncInterval(5 * time.Second),
+)
+```
+
+### Local Development
+
+For local development, point the Turso driver at a regular SQLite file. The driver automatically detects local file paths and uses the SQLite driver:
+
+```go
+tdb := tursodriver.New()
+err := tdb.Open(ctx, "file:dev.db")
+```
+
+### DSN Examples
+
+| DSN | Description |
+|-----|-------------|
+| `"libsql://db-org.turso.io"` | Turso cloud database |
+| `"file:local.db"` | Local SQLite file (fallback) |
+| `":memory:"` | In-memory database (for tests) |
+
+### Unwrap Pattern
+
+Use `tursodriver.Unwrap` to access the underlying `*TursoDB` from a `*grove.DB` handle:
+
+```go
+tdb := tursodriver.Unwrap(db) // returns *tursodriver.TursoDB
+
+var users []User
+tdb.NewSelect(&users).
+    Where("email LIKE ?", "%@example.com").
+    Scan(ctx)
+```
+
+## Turso-Specific Options
+
+| Option | Description |
+|--------|-------------|
+| `tursodriver.WithAuthToken(token)` | Authentication token for Turso cloud |
+| `tursodriver.WithEmbeddedReplica(path)` | Enable embedded replica at local path |
+| `tursodriver.WithSyncInterval(d)` | Sync interval for embedded replicas |
+| `driver.WithPoolSize(n)` | Connection pool size |
+| `driver.WithQueryTimeout(d)` | Default query timeout |
+
+## Query Syntax
+
+The Turso driver uses identical SQL syntax to the SQLite driver. All query builders, placeholders, and quoting rules are the same.
+
+### Placeholders
+
+```go
+tdb.NewSelect(&users).
+    Where("email LIKE ?", "%@example.com").
+    Where("active = ?", true).
+    Scan(ctx)
+```
+
+### Type Mapping
+
+| Go Type | Database Type |
+|---------|-------------|
+| `bool` | `INTEGER` (0/1) |
+| `int`, `int8`-`int64` | `INTEGER` |
+| `float32`, `float64` | `REAL` |
+| `string` | `TEXT` |
+| `time.Time` | `TEXT` (RFC 3339) |
+| `[]byte` | `BLOB` |
+| `map[string]any` | `TEXT` (JSON) |
+
+## Query Builders
+
+All query builders work identically to the [SQLite driver](/docs/drivers/sqlite):
+
+### SELECT
+
+```go
+tdb := tursodriver.Unwrap(db)
+
+var users []User
+tdb.NewSelect(&users).
+    Where("role = ?", "admin").
+    OrderExpr("created_at DESC").
+    Limit(20).
+    Scan(ctx)
+```
+
+### INSERT
+
+```go
+user := User{Name: "Alice", Email: "alice@example.com"}
+_, err := tdb.NewInsert(&user).Exec(ctx)
+
+// Bulk insert
+users := []User{
+    {Name: "Alice", Email: "alice@example.com"},
+    {Name: "Bob", Email: "bob@example.com"},
+}
+_, err := tdb.NewInsert(&users).Exec(ctx)
+```
+
+### Upsert
+
+```go
+tdb.NewInsert(&user).
+    OnConflict("(email) DO UPDATE").
+    Set("name = EXCLUDED.name").
+    Exec(ctx)
+```
+
+### UPDATE
+
+```go
+user.Name = "Alice Smith"
+_, err := tdb.NewUpdate(&user).WherePK().Exec(ctx)
+
+// Raw SET
+_, err := tdb.NewUpdate(&user).
+    Set("login_count = login_count + ?", 1).
+    Where("id = ?", 42).
+    Exec(ctx)
+```
+
+### DELETE
+
+```go
+_, err := tdb.NewDelete(&user).WherePK().Exec(ctx)
+
+// Soft delete is automatic for models with soft_delete field
+// Use ForceDelete() for hard delete
+_, err := tdb.NewDelete(&user).WherePK().ForceDelete().Exec(ctx)
+```
+
+### RETURNING
+
+SQLite 3.35+ (and Turso/libSQL) support `RETURNING`:
+
+```go
+var id int64
+tdb.NewInsert(&user).
+    Returning("id").
+    Scan(ctx, &id)
+```
+
+### Raw Queries
+
+```go
+var users []User
+tdb.NewRaw("SELECT * FROM users WHERE role = ?", "admin").Scan(ctx, &users)
+```
+
+## Transactions
+
+```go
+tdb := tursodriver.Unwrap(db)
+
+tx, err := tdb.BeginTxQuery(ctx, nil)
+if err != nil {
+    return err
+}
+defer tx.Rollback()
+
+_, err = tx.NewInsert(&order).Exec(ctx)
+if err != nil {
+    return err
+}
+
+_, err = tx.NewUpdate(&inventory).
+    Set("quantity = quantity - ?", order.Quantity).
+    Where("product_id = ?", order.ProductID).
+    Exec(ctx)
+if err != nil {
+    return err
+}
+
+return tx.Commit()
+```
+
+## CREATE TABLE
+
+```go
+_, err := tdb.NewCreateTable((*User)(nil)).
+    IfNotExists().
+    Exec(ctx)
+
+_, err := tdb.NewCreateTable((*Order)(nil)).
+    IfNotExists().
+    WithForeignKey("(user_id) REFERENCES users(id) ON DELETE CASCADE").
+    Exec(ctx)
+```
+
+## Migrations
+
+The `tursomigrate` package provides a migration executor compatible with Grove's migration system:
+
+```go
+import (
+    "github.com/xraph/grove/migrate"
+    "github.com/xraph/grove/tursodriver"
+    "github.com/xraph/grove/tursodriver/tursomigrate"
+)
+
+tdb := tursodriver.Unwrap(db)
+executor := tursomigrate.New(tdb)
+orchestrator := migrate.NewOrchestrator(executor, Migrations)
+
+result, err := orchestrator.Migrate(ctx)
+```
+
+## Turso vs SQLite
+
+| Feature | SQLite | Turso |
+|---------|--------|-------|
+| Storage | Local file | Cloud-hosted + optional local replica |
+| Replication | None | Multi-region |
+| Auth | None | Token-based |
+| Edge deployment | Manual file distribution | Automatic replication |
+| Query syntax | Identical | Identical |
+| Go driver | `modernc.org/sqlite` | `github.com/tursodatabase/go-libsql` |
+
+The Turso driver is ideal when you need SQLite's simplicity with cloud-native distribution, edge deployment, or managed infrastructure.

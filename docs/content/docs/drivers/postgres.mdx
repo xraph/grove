@@ -132,3 +132,58 @@ pgdb.Open(ctx, dsn,
 )
 db, err := grove.Open(pgdb)
 ```
+
+## Compatible Databases
+
+### CockroachDB
+
+[CockroachDB](https://www.cockroachlabs.com/) is PostgreSQL wire-compatible. The pgdriver works with CockroachDB out of the box with a few caveats:
+
+```go
+pgdb := pgdriver.New()
+err := pgdb.Open(ctx, "postgresql://root@localhost:26257/mydb?sslmode=disable",
+    driver.WithPoolSize(20),
+)
+```
+
+**Known differences:**
+
+- `LISTEN/NOTIFY` is not supported -- CockroachDB does not implement PostgreSQL's pub/sub system
+- `DISTINCT ON` works but may behave differently with distributed query execution
+- `SERIAL` columns should be replaced with `UUID` or `INT DEFAULT unique_rowid()` for distributed ID generation
+- Advisory locks (`pg_advisory_lock`) are not supported -- use CockroachDB's built-in locking
+
+### Neon
+
+[Neon](https://neon.tech/) is serverless PostgreSQL. The pgdriver works directly with Neon:
+
+```go
+pgdb := pgdriver.New()
+err := pgdb.Open(ctx, "postgresql://user:pass@ep-example-123.us-east-2.aws.neon.tech/mydb?sslmode=require",
+    driver.WithPoolSize(5), // Keep pool size small for serverless
+)
+```
+
+**Tips for Neon:**
+
+- Use `sslmode=require` in the DSN
+- Keep connection pool size small (5-10) since Neon uses a connection pooler (pgbouncer)
+- Cold starts may add latency on the first connection -- consider using Neon's connection pooler endpoint
+- All PostgreSQL features (JSONB, LISTEN/NOTIFY, CTEs, etc.) are fully supported
+
+### Supabase
+
+[Supabase](https://supabase.com/) provides hosted PostgreSQL. The pgdriver connects directly:
+
+```go
+pgdb := pgdriver.New()
+err := pgdb.Open(ctx, "postgresql://postgres.[project-ref]:[password]@aws-0-us-east-1.pooler.supabase.com:6543/postgres",
+    driver.WithPoolSize(10),
+)
+```
+
+**Tips for Supabase:**
+
+- Use the pooler connection string (port 6543) for application connections
+- Use the direct connection string (port 5432) for migrations
+- All PostgreSQL features are supported, including RLS (Row Level Security)
