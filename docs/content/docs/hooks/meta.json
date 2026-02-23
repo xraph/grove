@@ -1,7 +1,4 @@
 {
   "title": "Hooks",
-  "pages": [
-    "overview",
-    "tenant-isolation"
-  ]
+  "pages": ["overview", "tenant-isolation"]
 }

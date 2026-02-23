@@ -70,7 +70,12 @@ function MiniQueryPipelineDiagram() {
             }
           />
           <FlowLine length={24} color="blue" delay={1} />
-          <FlowNode label="QueryBuilder" color="indigo" size="sm" delay={0.55} />
+          <FlowNode
+            label="QueryBuilder"
+            color="indigo"
+            size="sm"
+            delay={0.55}
+          />
           <FlowLine length={24} color="blue" delay={2} />
           <FlowNode label="Database" color="blue" size="sm" pulse delay={0.7} />
         </div>
@@ -108,7 +113,13 @@ function MiniQueryPipelineDiagram() {
           <FlowLine length={24} color="indigo" delay={3} />
           <FlowNode label="MySQL" color="blue" size="sm" delay={1.0} />
           <FlowLine length={24} color="indigo" delay={4} />
-          <FlowNode label="MongoDB" color="indigo" size="sm" pulse delay={1.15} />
+          <FlowNode
+            label="MongoDB"
+            color="indigo"
+            size="sm"
+            pulse
+            delay={1.15}
+          />
         </div>
 
         {/* Row 3: Query pipeline events */}
@@ -122,7 +133,12 @@ function MiniQueryPipelineDiagram() {
               className="flex items-center gap-0"
             >
               <FlowLine length={28} color="green" delay={3} />
-              <FlowNode label="tag.resolve" color="gray" size="sm" delay={1.1} />
+              <FlowNode
+                label="tag.resolve"
+                color="gray"
+                size="sm"
+                delay={1.1}
+              />
               <FlowLine length={24} color="green" delay={4} />
               <StatusBadge status="delivered" label={'grove:"..." tag'} />
             </motion.div>
@@ -153,7 +169,12 @@ function MiniQueryPipelineDiagram() {
               className="flex items-center gap-0"
             >
               <FlowLine length={28} color="green" delay={7} />
-              <FlowNode label="scan.result" color="gray" size="sm" delay={1.5} />
+              <FlowNode
+                label="scan.result"
+                color="gray"
+                size="sm"
+                delay={1.5}
+              />
               <FlowLine length={24} color="green" delay={8} />
               <StatusBadge status="delivered" label="zero-copy" />
             </motion.div>
