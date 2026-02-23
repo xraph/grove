@@ -9,8 +9,8 @@ import (
 // We detect it by name + package path to avoid importing the root grove package
 // (which would cause a circular import).
 var (
-	baseModelTypeName = "BaseModel"
-	baseModelPkgSuffix  = "github.com/xraph/grove"
+	baseModelTypeName  = "BaseModel"
+	baseModelPkgSuffix = "github.com/xraph/grove"
 )
 
 // isBaseModelField returns true if the struct field is an embedded grove.BaseModel.
@@ -23,14 +23,14 @@ func isBaseModelField(sf reflect.StructField) bool {
 
 // Table represents metadata about a model's database table.
 type Table struct {
-	ModelType      reflect.Type     // The Go struct type
-	Name           string           // Table name (from tag or snake_case of type name)
-	Alias          string           // Table alias for queries
-	Fields         []*Field         // All mapped fields (excluding skip, relations)
+	ModelType      reflect.Type      // The Go struct type
+	Name           string            // Table name (from tag or snake_case of type name)
+	Alias          string            // Table alias for queries
+	Fields         []*Field          // All mapped fields (excluding skip, relations)
 	FieldsByColumn map[string]*Field // column name -> field, built once
-	PKFields       []*Field         // Primary key fields
-	Relations      []*Relation      // Declared relations
-	SoftDelete     *Field           // Soft delete field, if any
+	PKFields       []*Field          // Primary key fields
+	Relations      []*Relation       // Declared relations
+	SoftDelete     *Field            // Soft delete field, if any
 }
 
 // ErrInvalidModel is returned when a model is not a valid struct or pointer to struct.

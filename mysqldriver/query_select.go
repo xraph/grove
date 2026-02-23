@@ -625,4 +625,3 @@ func extractFieldValue(model any, field *schema.Field) (any, bool) {
 
 	return fv.Interface(), true
 }
-
