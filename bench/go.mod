@@ -7,6 +7,7 @@ require (
 	github.com/uptrace/bun/dialect/sqlitedialect v1.2.17
 	github.com/uptrace/bun/driver/sqliteshim v1.2.17
 	github.com/xraph/grove v0.0.0
+	github.com/xraph/grove/sqlitedriver v0.0.0
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.1
 )
@@ -33,4 +34,7 @@ require (
 	modernc.org/sqlite v1.46.1 // indirect
 )
 
-replace github.com/xraph/grove => ../
+replace (
+	github.com/xraph/grove => ../
+	github.com/xraph/grove/sqlitedriver => ../sqlitedriver
+)

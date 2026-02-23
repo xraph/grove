@@ -47,11 +47,49 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
-      - name: Verify build
+      - name: Verify root module
         run: |
           go mod download
           go build ./...
           go test -race -count=1 ./...
+
+      - name: Verify driver sub-modules
+        run: |
+          for mod in pgdriver mysqldriver sqlitedriver mongodriver tursodriver clickhousedriver; do
+            echo "::group::Verifying $mod"
+            cd "$mod"
+            go mod download
+            go build ./...
+            go test -race -count=1 ./...
+            cd ..
+            echo "::endgroup::"
+          done
+
+      - name: Verify extension module
+        working-directory: extension
+        run: |
+          go mod download
+          go build ./...
+
+      - name: Tag sub-modules
+        run: |
+          TAG="${{ steps.set-tag.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Tag all driver sub-modules
+          for mod in pgdriver mysqldriver sqlitedriver mongodriver tursodriver clickhousedriver; do
+            MOD_TAG="$mod/$TAG"
+            echo "Tagging $MOD_TAG"
+            git tag "$MOD_TAG"
+            git push origin "$MOD_TAG"
+          done
+
+          # Tag extension sub-module
+          EXT_TAG="extension/$TAG"
+          echo "Tagging $EXT_TAG"
+          git tag "$EXT_TAG"
+          git push origin "$EXT_TAG"
 
       - name: Generate release notes
         id: notes
@@ -82,6 +120,21 @@ jobs:
             ### Installation
 
             ```bash
-            go get github.com/xraph/warden@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove@${{ steps.set-tag.outputs.tag }}
+            ```
+
+            Driver sub-modules:
+            ```bash
+            go get github.com/xraph/grove/pgdriver@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove/mysqldriver@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove/sqlitedriver@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove/mongodriver@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove/tursodriver@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove/clickhousedriver@${{ steps.set-tag.outputs.tag }}
+            ```
+
+            Forge extension:
+            ```bash
+            go get github.com/xraph/grove/extension@${{ steps.set-tag.outputs.tag }}
             ```
           generate_release_notes: true

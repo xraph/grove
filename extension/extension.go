@@ -1,25 +1,40 @@
-// Package extension provides the Grove ORM Forge extension entry point.
-// It registers Grove as a Forge-managed database layer, handling connection
-// lifecycle, migration execution, and hook setup.
+// Package extension adapts Grove as a Forge extension.
 package extension
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+
+	"github.com/xraph/forge"
+	"github.com/xraph/vessel"
 
 	"github.com/xraph/grove"
 	"github.com/xraph/grove/hook"
 	"github.com/xraph/grove/migrate"
 )
 
-// Extension implements the Forge extension pattern for Grove.
+// ExtensionName is the name registered with Forge.
+const ExtensionName = "grove"
+
+// ExtensionDescription is the human-readable description.
+const ExtensionDescription = "Polyglot Go ORM with native query syntax per database"
+
+// ExtensionVersion is the semantic version.
+const ExtensionVersion = "0.1.0"
+
+// Ensure Extension implements forge.Extension at compile time.
+var _ forge.Extension = (*Extension)(nil)
+
+// Extension adapts Grove as a Forge extension.
 type Extension struct {
+	config Config
 	db     *grove.DB
-	opts   *extensionOptions
+	logger *slog.Logger
+	driver grove.GroveDriver
 	groups []*migrate.Group
 	hooks  []hookEntry
-	logger *slog.Logger
 }
 
 type hookEntry struct {
@@ -27,107 +42,96 @@ type hookEntry struct {
 	scope hook.Scope
 }
 
-type extensionOptions struct {
-	driver     grove.GroveDriver
-	migrations []*migrate.Group
-	hooks      []hookEntry
-	logger     *slog.Logger
-}
-
-// Option configures the extension.
-type Option func(*extensionOptions)
-
-// WithDriver sets the database driver for the extension.
-func WithDriver(drv grove.GroveDriver) Option {
-	return func(o *extensionOptions) {
-		o.driver = drv
-	}
-}
-
-// WithMigrations adds migration groups to the extension.
-func WithMigrations(groups ...*migrate.Group) Option {
-	return func(o *extensionOptions) {
-		o.migrations = append(o.migrations, groups...)
-	}
-}
-
-// WithHook adds a hook to the extension.
-func WithHook(h any, scope ...hook.Scope) Option {
-	return func(o *extensionOptions) {
-		s := hook.Scope{Priority: 100}
-		if len(scope) > 0 {
-			s = scope[0]
-		}
-		o.hooks = append(o.hooks, hookEntry{hook: h, scope: s})
-	}
-}
-
-// WithLogger sets the logger for the extension.
-func WithLogger(l *slog.Logger) Option {
-	return func(o *extensionOptions) {
-		o.logger = l
-	}
-}
-
-// New creates a new Grove extension with the given options.
-func New(opts ...Option) *Extension {
-	o := &extensionOptions{
-		logger: slog.Default(),
-	}
+// New creates a Grove Forge extension with the given options.
+func New(opts ...ExtOption) *Extension {
+	e := &Extension{}
 	for _, opt := range opts {
-		opt(o)
+		opt(e)
 	}
-	return &Extension{
-		opts:   o,
-		groups: o.migrations,
-		hooks:  o.hooks,
-		logger: o.logger,
-	}
+	return e
 }
 
 // Name returns the extension name.
-func (e *Extension) Name() string {
-	return "grove"
-}
+func (e *Extension) Name() string { return ExtensionName }
 
-// Init initializes the Grove extension — creates the DB, registers hooks,
-// and prepares migrations.
-func (e *Extension) Init(ctx context.Context) error {
-	if e.opts.driver == nil {
-		return fmt.Errorf("grove extension: no driver configured; use WithDriver()")
+// Description returns the extension description.
+func (e *Extension) Description() string { return ExtensionDescription }
+
+// Version returns the extension version.
+func (e *Extension) Version() string { return ExtensionVersion }
+
+// Dependencies returns the list of extension names this extension depends on.
+func (e *Extension) Dependencies() []string { return []string{} }
+
+// DB returns the Grove DB instance (nil until Register is called).
+func (e *Extension) DB() *grove.DB { return e.db }
+
+// MigrationGroups returns all registered migration groups.
+func (e *Extension) MigrationGroups() []*migrate.Group { return e.groups }
+
+// Register implements [forge.Extension].
+func (e *Extension) Register(fapp forge.App) error {
+	if err := e.Init(fapp); err != nil {
+		return err
 	}
 
-	db, err := grove.Open(e.opts.driver)
+	if err := vessel.Provide(fapp.Container(), func() (*grove.DB, error) {
+		return e.db, nil
+	}); err != nil {
+		return fmt.Errorf("grove: register db in container: %w", err)
+	}
+
+	return nil
+}
+
+// Init builds the DB and registers hooks.
+func (e *Extension) Init(_ forge.App) error {
+	if e.driver == nil {
+		return errors.New("grove: no driver configured; use WithDriver()")
+	}
+
+	logger := e.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	e.logger = logger
+
+	db, err := grove.Open(e.driver)
 	if err != nil {
-		return fmt.Errorf("grove extension: open: %w", err)
+		return fmt.Errorf("grove: open: %w", err)
 	}
 	e.db = db
 
-	// Register hooks
 	for _, h := range e.hooks {
 		db.Hooks().AddHook(h.hook, h.scope)
 	}
 
 	e.logger.Info("grove extension initialized",
-		slog.String("driver", e.opts.driver.Name()),
+		slog.String("driver", e.driver.Name()),
 	)
 	return nil
 }
 
-// DB returns the Grove DB instance. Returns nil if Init hasn't been called.
-func (e *Extension) DB() *grove.DB {
-	return e.db
+// Start implements [forge.Extension].
+func (e *Extension) Start(_ context.Context) error {
+	if e.db == nil {
+		return errors.New("grove: extension not initialized")
+	}
+	return nil
 }
 
-// MigrationGroups returns all registered migration groups.
-func (e *Extension) MigrationGroups() []*migrate.Group {
-	return e.groups
+// Stop gracefully shuts down the Grove DB.
+func (e *Extension) Stop(_ context.Context) error {
+	if e.db == nil {
+		return nil
+	}
+	return e.db.Close()
 }
 
-// Close shuts down the Grove extension.
-func (e *Extension) Close() error {
-	if e.db != nil {
-		return e.db.Close()
+// Health implements [forge.Extension].
+func (e *Extension) Health(_ context.Context) error {
+	if e.db == nil {
+		return errors.New("grove: extension not initialized")
 	}
 	return nil
 }
