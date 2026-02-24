@@ -6,9 +6,9 @@
     "store-interface",
     "keyspaces",
     "codecs",
-    "...drivers",
-    "...middleware",
-    "...crdt",
-    "...extensions"
+    "drivers",
+    "middleware",
+    "crdt",
+    "extensions"
   ]
 }
