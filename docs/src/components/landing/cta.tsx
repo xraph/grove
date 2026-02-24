@@ -20,12 +20,12 @@ export function CTA() {
           className="max-w-2xl mx-auto text-center"
         >
           <h2 className="text-3xl font-bold tracking-tight text-fd-foreground sm:text-4xl">
-            Start building with Grove
+            Build data-intensive Go apps
           </h2>
           <p className="mt-4 text-lg text-fd-muted-foreground leading-relaxed">
-            Add a high-performance ORM to your Go service in minutes. Grove
-            handles query building, model mapping, migrations, and privacy hooks
-            with near-raw performance.
+            Polyglot ORM, offline-first CRDT sync, universal KV store, and
+            privacy hooks across 7 database drivers. Add Grove to your Go
+            service in minutes.
           </p>
 
           {/* Install command */}

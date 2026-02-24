@@ -4,12 +4,7 @@ import { motion } from "framer-motion";
 import Link from "next/link";
 import { cn } from "@/lib/cn";
 import { AnimatedTagline } from "./animated-tagline";
-import {
-  FloatingBadge,
-  FlowLine,
-  FlowNode,
-  StatusBadge,
-} from "./flow-primitives";
+import { FloatingBadge, FlowLine, FlowNode } from "./flow-primitives";
 
 function GitHubIcon({ className }: { className?: string }) {
   return (
@@ -24,8 +19,8 @@ function GitHubIcon({ className }: { className?: string }) {
   );
 }
 
-// ─── Mini Query Pipeline Diagram ─────────────────────────────
-function MiniQueryPipelineDiagram() {
+// ─── Ecosystem Diagram ──────────────────────────────────────
+function EcosystemDiagram() {
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -34,15 +29,16 @@ function MiniQueryPipelineDiagram() {
       className="relative w-full max-w-md mx-auto"
     >
       {/* Background glow */}
-      <div className="absolute inset-0 -m-8 bg-gradient-to-br from-blue-500/5 via-transparent to-indigo-500/5 rounded-3xl blur-2xl" />
+      <div className="absolute inset-0 -m-8 bg-linear-to-br from-blue-500/5 via-transparent to-indigo-500/5 rounded-3xl blur-2xl" />
 
       <div className="relative space-y-6 p-4">
-        {/* Row 1: Model -> QueryBuilder -> Database */}
-        <div className="flex items-center justify-center gap-0">
+        {/* Row 1: Grove center node */}
+        <div className="flex items-center justify-center">
           <FlowNode
-            label="Model"
+            label="Grove"
             color="blue"
             size="sm"
+            pulse
             delay={0.4}
             icon={
               <svg
@@ -51,42 +47,24 @@ function MiniQueryPipelineDiagram() {
                 fill="none"
                 aria-hidden="true"
               >
-                <rect
-                  x="1.5"
-                  y="1.5"
-                  width="9"
-                  height="9"
-                  rx="1.5"
+                <path
+                  d="M6 1L1 4v4l5 3 5-3V4L6 1z"
                   stroke="currentColor"
                   strokeWidth="1.5"
-                />
-                <path
-                  d="M4 4h4M4 6h4M4 8h2"
-                  stroke="currentColor"
-                  strokeWidth="1"
-                  strokeLinecap="round"
+                  strokeLinejoin="round"
                 />
               </svg>
             }
           />
-          <FlowLine length={24} color="blue" delay={1} />
-          <FlowNode
-            label="QueryBuilder"
-            color="indigo"
-            size="sm"
-            delay={0.55}
-          />
-          <FlowLine length={24} color="blue" delay={2} />
-          <FlowNode label="Database" color="blue" size="sm" pulse delay={0.7} />
         </div>
 
-        {/* Row 2: PostgreSQL -> MySQL -> MongoDB */}
+        {/* Row 2: Three pillars — ORM, CRDT, KV */}
         <div className="flex items-center justify-center gap-0">
           <FlowNode
-            label="PostgreSQL"
-            color="indigo"
+            label="ORM"
+            color="blue"
             size="sm"
-            delay={0.85}
+            delay={0.55}
             icon={
               <svg
                 className="size-3"
@@ -110,83 +88,128 @@ function MiniQueryPipelineDiagram() {
               </svg>
             }
           />
-          <FlowLine length={24} color="indigo" delay={3} />
-          <FlowNode label="MySQL" color="blue" size="sm" delay={1.0} />
-          <FlowLine length={24} color="indigo" delay={4} />
+          <FlowLine length={20} color="blue" delay={1} />
           <FlowNode
-            label="MongoDB"
-            color="indigo"
+            label="CRDT"
+            color="green"
             size="sm"
-            pulse
-            delay={1.15}
+            delay={0.7}
+            icon={
+              <svg
+                className="size-3"
+                viewBox="0 0 12 12"
+                fill="none"
+                aria-hidden="true"
+              >
+                <path
+                  d="M1 6h3M8 6h3M6 1v3M6 8v3"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                />
+                <circle
+                  cx="6"
+                  cy="6"
+                  r="2"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                />
+              </svg>
+            }
+          />
+          <FlowLine length={20} color="green" delay={2} />
+          <FlowNode
+            label="KV Store"
+            color="purple"
+            size="sm"
+            delay={0.85}
+            icon={
+              <svg
+                className="size-3"
+                viewBox="0 0 12 12"
+                fill="none"
+                aria-hidden="true"
+              >
+                <path
+                  d="M4 3h5M4 6h5M4 9h3"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                />
+                <circle cx="2" cy="3" r="1" fill="currentColor" />
+                <circle cx="2" cy="6" r="1" fill="currentColor" />
+                <circle cx="2" cy="9" r="1" fill="currentColor" />
+              </svg>
+            }
           />
         </div>
 
-        {/* Row 3: Query pipeline events */}
+        {/* Row 3: Pipeline events */}
         <div className="flex items-start justify-center">
           <div className="space-y-2.5">
-            {/* Event 1: tag.resolve */}
             <motion.div
               initial={{ opacity: 0, x: -10 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ delay: 1.0 }}
               className="flex items-center gap-0"
             >
-              <FlowLine length={28} color="green" delay={3} />
+              <FlowLine length={28} color="blue" delay={3} />
               <FlowNode
-                label="tag.resolve"
+                label="query.build"
                 color="gray"
                 size="sm"
                 delay={1.1}
               />
-              <FlowLine length={24} color="green" delay={4} />
-              <StatusBadge status="delivered" label={'grove:"..." tag'} />
+              <FlowLine length={24} color="blue" delay={4} />
+              <div className="rounded-md border border-green-500/20 bg-green-500/10 px-2 py-0.5 font-mono text-[10px] font-medium text-green-600 dark:text-green-400 whitespace-nowrap">
+                native SQL
+              </div>
             </motion.div>
 
-            {/* Event 2: query.build */}
             <motion.div
               initial={{ opacity: 0, x: -10 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ delay: 1.2 }}
               className="flex items-center gap-0"
             >
-              <FlowLine length={28} color="blue" delay={5} />
+              <FlowLine length={28} color="green" delay={5} />
               <FlowNode
-                label="query.build"
+                label="crdt.sync"
                 color="gray"
                 size="sm"
                 delay={1.3}
               />
-              <FlowLine length={24} color="blue" delay={6} />
-              <StatusBadge status="retry" label="native SQL" />
+              <FlowLine length={24} color="green" delay={6} />
+              <div className="rounded-md border border-green-500/20 bg-green-500/10 px-2 py-0.5 font-mono text-[10px] font-medium text-green-600 dark:text-green-400 whitespace-nowrap">
+                converged
+              </div>
             </motion.div>
 
-            {/* Event 3: scan.result */}
             <motion.div
               initial={{ opacity: 0, x: -10 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ delay: 1.4 }}
               className="flex items-center gap-0"
             >
-              <FlowLine length={28} color="green" delay={7} />
-              <FlowNode
-                label="scan.result"
-                color="gray"
-                size="sm"
-                delay={1.5}
-              />
-              <FlowLine length={24} color="green" delay={8} />
-              <StatusBadge status="delivered" label="zero-copy" />
+              <FlowLine length={28} color="purple" delay={7} />
+              <FlowNode label="kv.get" color="gray" size="sm" delay={1.5} />
+              <FlowLine length={24} color="purple" delay={8} />
+              <div className="rounded-md border border-green-500/20 bg-green-500/10 px-2 py-0.5 font-mono text-[10px] font-medium text-green-600 dark:text-green-400 whitespace-nowrap">
+                cache hit
+              </div>
             </motion.div>
           </div>
         </div>
 
-        {/* Floating capability badges */}
+        {/* Floating driver badges */}
         <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
           <FloatingBadge label="PostgreSQL" delay={1.6} />
-          <FloatingBadge label="MySQL" delay={1.8} />
-          <FloatingBadge label="MongoDB" delay={2.0} />
-          <FloatingBadge label="SQLite" delay={2.2} />
+          <FloatingBadge label="MySQL" delay={1.7} />
+          <FloatingBadge label="MongoDB" delay={1.8} />
+          <FloatingBadge label="SQLite" delay={1.9} />
+          <FloatingBadge label="Turso" delay={2.0} />
+          <FloatingBadge label="ClickHouse" delay={2.1} />
+          <FloatingBadge label="Elasticsearch" delay={2.2} />
         </div>
       </div>
     </motion.div>
@@ -201,8 +224,8 @@ export function Hero() {
       <div className="absolute inset-0 bg-dotted opacity-40 dark:opacity-20" />
 
       {/* Radial gradient overlays */}
-      <div className="absolute inset-0 bg-gradient-to-b from-fd-background via-transparent to-fd-background" />
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[600px] bg-gradient-to-b from-blue-500/8 to-transparent rounded-full blur-3xl" />
+      <div className="absolute inset-0 bg-linear-to-b from-fd-background via-transparent to-fd-background" />
+      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[600px] bg-linear-to-b from-blue-500/8 to-transparent rounded-full blur-3xl" />
 
       <div className="relative container max-w-(--fd-layout-width) mx-auto px-4 sm:px-6">
         <div className="grid gap-12 lg:grid-cols-2 lg:gap-16 items-center py-20 sm:py-28 md:py-32">
@@ -215,7 +238,7 @@ export function Hero() {
               transition={{ duration: 0.4 }}
             >
               <span className="inline-flex items-center rounded-full border border-blue-500/20 bg-blue-500/10 px-3.5 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 mb-6">
-                Polyglot Go ORM with Native Query Syntax
+                The Complete Go Data Toolkit
               </span>
             </motion.div>
 
@@ -229,9 +252,9 @@ export function Hero() {
               transition={{ duration: 0.5, delay: 0.6 }}
               className="mt-6 text-lg text-fd-muted-foreground leading-relaxed max-w-lg"
             >
-              Near-raw performance with native query syntax per database. Dual
-              grove/bun tag system, modular migrations, and privacy hooks
-              &mdash; part of the Forge ecosystem.
+              Polyglot ORM with native query syntax, offline-first CRDT sync,
+              universal KV store, and privacy hooks &mdash; across 7 database
+              drivers. Part of the Forge ecosystem.
             </motion.p>
 
             {/* Install command */}
@@ -279,9 +302,9 @@ export function Hero() {
             </motion.div>
           </div>
 
-          {/* Right: Mini Query Pipeline diagram */}
+          {/* Right: Ecosystem diagram */}
           <div className="relative lg:pl-8">
-            <MiniQueryPipelineDiagram />
+            <EcosystemDiagram />
           </div>
         </div>
       </div>

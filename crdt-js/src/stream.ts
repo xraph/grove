@@ -6,19 +6,21 @@
  * configurable delay.
  */
 
-import type { HLC, ChangeRecord, StreamConfig } from "./types.js";
+import type {
+  HLC,
+  ChangeRecord,
+  StreamConfig,
+  AuthProvider,
+  StreamEvent,
+  StreamEventHandler,
+} from "./types.js";
 import { hlcAfter, hlcIsZero } from "./hlc.js";
 
-/** Event types emitted by the CRDT stream. */
-export type CRDTStreamEvent =
-  | { type: "change"; data: ChangeRecord }
-  | { type: "changes"; data: ChangeRecord[] }
-  | { type: "error"; error: Error }
-  | { type: "connected" }
-  | { type: "disconnected" };
+/** Event types emitted by the CRDT stream (alias for StreamEvent). */
+export type CRDTStreamEvent = StreamEvent;
 
-/** Callback for stream events. */
-export type StreamEventHandler = (event: CRDTStreamEvent) => void;
+/** Re-export StreamEventHandler for backward compatibility. */
+export type { StreamEventHandler } from "./types.js";
 
 /**
  * SSE streaming client with auto-reconnect.
@@ -38,12 +40,14 @@ export class CRDTStream {
   private _since: HLC | null;
   private shouldReconnect = false;
   private fetchImpl: typeof fetch;
+  private auth?: AuthProvider;
 
   constructor(
     baseURL: string,
     config?: StreamConfig,
     headers?: Record<string, string>,
-    fetchImpl?: typeof fetch
+    fetchImpl?: typeof fetch,
+    auth?: AuthProvider
   ) {
     this.baseURL = baseURL;
     this.tables = config?.tables ?? [];
@@ -51,6 +55,7 @@ export class CRDTStream {
     this._since = config?.since ?? null;
     this.headers = headers ?? {};
     this.fetchImpl = fetchImpl ?? globalThis.fetch.bind(globalThis);
+    this.auth = auth;
   }
 
   /** Whether the stream is currently connected. */
@@ -129,12 +134,17 @@ export class CRDTStream {
     this.abortController = new AbortController();
     const url = this.buildStreamURL();
 
+    const authHeaders = this.auth
+      ? await Promise.resolve(this.auth.getHeaders())
+      : {};
+
     const response = await this.fetchImpl(url, {
       method: "GET",
       headers: {
         Accept: "text/event-stream",
         "Cache-Control": "no-cache",
         ...this.headers,
+        ...authHeaders,
       },
       signal: this.abortController.signal,
     });

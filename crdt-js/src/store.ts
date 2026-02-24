@@ -15,6 +15,7 @@ import type {
   ORSetState,
   ORSetTag,
   CRDTType,
+  StorageAdapter,
 } from "./types.js";
 import { HybridClock } from "./hlc.js";
 import {
@@ -23,6 +24,7 @@ import {
   setElements,
   tagKey,
 } from "./merge.js";
+import { MemoryStorage } from "./storage.js";
 
 type Listener = () => void;
 
@@ -39,6 +41,7 @@ type Listener = () => void;
 export class CRDTStore {
   private nodeID: string;
   private clock: HybridClock;
+  private storage: StorageAdapter;
 
   /** Internal state: table → pk → DocumentState */
   private state = new Map<string, Map<string, DocumentState>>();
@@ -55,9 +58,18 @@ export class CRDTStore {
   /** Per-table listeners: table → listeners */
   private tableListeners = new Map<string, Set<Listener>>();
 
-  constructor(nodeID: string, clock: HybridClock) {
+  /**
+   * Resolves when persisted state has been hydrated.
+   * The store is usable immediately (starts empty), but consumers
+   * should await `ready` before relying on persisted data.
+   */
+  readonly ready: Promise<void>;
+
+  constructor(nodeID: string, clock: HybridClock, storage?: StorageAdapter) {
     this.nodeID = nodeID;
     this.clock = clock;
+    this.storage = storage ?? new MemoryStorage();
+    this.ready = this.hydrate();
   }
 
   // --- Read ---
@@ -117,6 +129,8 @@ export class CRDTStore {
 
     this.applyChangeInternal(change);
     this.pending.push(change);
+    this.persistDocument(table, pk);
+    this.persistPending();
     this.notifyListeners(table, pk);
     return change;
   }
@@ -143,6 +157,8 @@ export class CRDTStore {
 
     this.applyChangeInternal(change);
     this.pending.push(change);
+    this.persistDocument(table, pk);
+    this.persistPending();
     this.notifyListeners(table, pk);
     return change;
   }
@@ -169,6 +185,8 @@ export class CRDTStore {
 
     this.applyChangeInternal(change);
     this.pending.push(change);
+    this.persistDocument(table, pk);
+    this.persistPending();
     this.notifyListeners(table, pk);
     return change;
   }
@@ -195,6 +213,8 @@ export class CRDTStore {
 
     this.applyChangeInternal(change);
     this.pending.push(change);
+    this.persistDocument(table, pk);
+    this.persistPending();
     this.notifyListeners(table, pk);
     return change;
   }
@@ -221,6 +241,8 @@ export class CRDTStore {
 
     this.applyChangeInternal(change);
     this.pending.push(change);
+    this.persistDocument(table, pk);
+    this.persistPending();
     this.notifyListeners(table, pk);
     return change;
   }
@@ -243,9 +265,11 @@ export class CRDTStore {
     const doc = this.ensureDocument(table, pk);
     doc.tombstone = true;
     doc.tombstone_hlc = hlc;
-    this.notifyListeners(table, pk);
 
     this.pending.push(change);
+    this.persistDocument(table, pk);
+    this.persistPending();
+    this.notifyListeners(table, pk);
     return change;
   }
 
@@ -263,9 +287,10 @@ export class CRDTStore {
       affected.add(`${change.table}:${change.pk}`);
     }
 
-    // Batch-notify all affected documents.
+    // Batch-persist and notify all affected documents.
     for (const key of affected) {
       const [table, pk] = key.split(":", 2);
+      this.persistDocument(table, pk);
       this.notifyListeners(table, pk);
     }
   }
@@ -278,6 +303,7 @@ export class CRDTStore {
   /** Clear pending changes after a successful push. */
   clearPendingChanges(): void {
     this.pending = [];
+    this.persistPending();
   }
 
   /** Get the number of pending changes. */
@@ -342,6 +368,55 @@ export class CRDTStore {
   }
 
   // --- Internals ---
+
+  /**
+   * Hydrate state from the storage adapter.
+   * Loads persisted state and pending changes, merging them into
+   * the in-memory maps (preferring any mutations that happened
+   * between construction and hydration completion).
+   */
+  private async hydrate(): Promise<void> {
+    const [loadedState, loadedPending] = await Promise.all([
+      this.storage.loadState(),
+      this.storage.loadPendingChanges(),
+    ]);
+
+    // Merge loaded state into in-memory maps.
+    for (const [table, docs] of loadedState) {
+      let tableMap = this.state.get(table);
+      if (!tableMap) {
+        tableMap = new Map();
+        this.state.set(table, tableMap);
+      }
+      for (const [pk, doc] of docs) {
+        // Only set if no in-memory mutation happened during hydration.
+        if (!tableMap.has(pk)) {
+          tableMap.set(pk, doc);
+        }
+      }
+    }
+
+    // Prepend loaded pending changes (before any new ones added during hydration).
+    if (loadedPending.length > 0) {
+      this.pending = [...loadedPending, ...this.pending];
+    }
+
+    // Notify all listeners that state may have changed.
+    for (const listener of this.globalListeners) listener();
+  }
+
+  /** Fire-and-forget: persist a document to storage. */
+  private persistDocument(table: string, pk: string): void {
+    const doc = this.state.get(table)?.get(pk);
+    if (doc) {
+      this.storage.saveDocument(table, pk, doc).catch(() => {});
+    }
+  }
+
+  /** Fire-and-forget: persist pending changes to storage. */
+  private persistPending(): void {
+    this.storage.savePendingChanges([...this.pending]).catch(() => {});
+  }
 
   private applyChangeInternal(change: ChangeRecord): void {
     if (change.tombstone) {

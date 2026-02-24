@@ -36,11 +36,10 @@ import type { ReactNode } from "react";
 
 import { CRDTClient } from "./client.js";
 import { CRDTStore } from "./store.js";
-import { CRDTStream } from "./stream.js";
-import { HybridClock } from "./hlc.js";
 import type {
   CRDTClientConfig,
   StreamConfig,
+  StreamSubscription,
   ChangeRecord,
   SyncStatus,
   HLC,
@@ -52,7 +51,7 @@ import type {
 interface CRDTContextValue {
   client: CRDTClient;
   store: CRDTStore;
-  stream: CRDTStream | null;
+  stream: StreamSubscription | null;
   sync: () => Promise<void>;
   status: SyncStatus;
   lastSyncTime: number | null;
@@ -88,7 +87,7 @@ export interface UseCRDTReturn {
   store: CRDTStore;
   client: CRDTClient;
   sync: () => Promise<void>;
-  stream: CRDTStream | null;
+  stream: StreamSubscription | null;
   status: SyncStatus;
   lastSyncTime: number | null;
   pendingCount: number;
@@ -107,13 +106,13 @@ export function useCRDT(config: UseCRDTConfig): UseCRDTReturn {
   // Stable references for client and store.
   const clientRef = useRef<CRDTClient | null>(null);
   const storeRef = useRef<CRDTStore | null>(null);
-  const streamRef = useRef<CRDTStream | null>(null);
+  const streamRef = useRef<StreamSubscription | null>(null);
 
   if (!clientRef.current) {
     clientRef.current = new CRDTClient(config);
   }
   if (!storeRef.current) {
-    storeRef.current = new CRDTStore(config.nodeID, clientRef.current.clock);
+    storeRef.current = new CRDTStore(config.nodeID, clientRef.current.clock, config.storage);
   }
 
   const client = clientRef.current;
@@ -179,12 +178,12 @@ export function useCRDT(config: UseCRDTConfig): UseCRDTReturn {
     };
   }, [client, store, config.streaming, config.streamConfig]);
 
-  // Auto-sync on mount.
+  // Auto-sync on mount (after storage hydration completes).
   useEffect(() => {
     if (config.autoSync !== false) {
-      sync();
+      store.ready.then(() => sync());
     }
-  }, [config.autoSync, sync]);
+  }, [config.autoSync, sync, store]);
 
   // Track pending count changes.
   useEffect(() => {

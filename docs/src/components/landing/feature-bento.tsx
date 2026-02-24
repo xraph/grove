@@ -11,14 +11,14 @@ interface FeatureCard {
   icon: React.ReactNode;
   code: string;
   filename: string;
-  colSpan?: number;
 }
 
-const features: FeatureCard[] = [
+// ─── Tier 1: Hero capability cards ──────────────────────────
+const heroFeatures: FeatureCard[] = [
   {
-    title: "Native Query Syntax",
+    title: "Polyglot ORM",
     description:
-      "Each driver exposes its database's native idioms. PostgreSQL queries use $1 placeholders, MySQL uses backticks, MongoDB uses native BSON. No unified DSL — maximum performance and syntax fidelity.",
+      "Native query syntax per database with dual grove/bun tag system. Zero-reflection hot path, cached field offsets, and pooled buffers for near-raw performance.",
     icon: (
       <svg
         className="size-5"
@@ -35,34 +35,6 @@ const features: FeatureCard[] = [
         <path d="M3 12v7c0 1.66 4.03 3 9 3s9-1.34 9-3v-7" />
       </svg>
     ),
-    code: `// PostgreSQL — native syntax
-db.NewSelect(&users).
-    Where("email ILIKE $1", "%@example.com").
-    Where("metadata->>'tier' = $2", "premium").
-    DistinctOn("email").
-    Limit(50).
-    Scan(ctx)`,
-    filename: "pg_query.go",
-  },
-  {
-    title: "Dual Tag System",
-    description:
-      'Define models with grove:"..." tags or use existing bun:"..." tags as fallback. When both are present, grove wins. Zero-cost migration from bun — existing models work unchanged.',
-    icon: (
-      <svg
-        className="size-5"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z" />
-        <line x1="7" y1="7" x2="7.01" y2="7" />
-      </svg>
-    ),
     code: `type User struct {
     grove.BaseModel \`grove:"table:users,alias:u"\`
 
@@ -74,9 +46,9 @@ db.NewSelect(&users).
     filename: "model.go",
   },
   {
-    title: "Zero-Reflection Queries",
+    title: "Offline-First CRDT",
     description:
-      "Reflection happens once at model registration. The hot path — query building, execution, and scanning — uses cached field offsets and pooled buffers. Target: \u22645% overhead vs raw driver.",
+      "LWW-Register, PN-Counter, and OR-Set types with automatic conflict resolution. Distributed nodes modify data independently and converge without coordination.",
     icon: (
       <svg
         className="size-5"
@@ -88,23 +60,144 @@ db.NewSelect(&users).
         strokeLinejoin="round"
         aria-hidden="true"
       >
-        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+        <path d="M4 12h4M16 12h4M12 4v4M12 16v4" />
+        <circle cx="12" cy="12" r="4" />
       </svg>
     ),
-    code: `// Reflect once at startup
-db.RegisterModel((*User)(nil))
+    code: `plugin := crdt.NewPlugin(crdt.PluginConfig{
+    NodeID:    "node-1",
+    Tombstone: true,
+})
+plugin.Register("documents", crdt.LWWRegister)
+plugin.Register("likes",     crdt.PNCounter)
+plugin.Register("tags",      crdt.ORSet)`,
+    filename: "crdt.go",
+  },
+  {
+    title: "Universal KV Store",
+    description:
+      "5 backends — Redis, Memcached, DynamoDB, BoltDB, and Badger. Keyspaces for logical separation, composable middleware for logging, metrics, and circuit breakers.",
+    icon: (
+      <svg
+        className="size-5"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M7 7h10M7 12h10M7 17h6" />
+        <circle cx="4" cy="7" r="1.5" fill="currentColor" stroke="none" />
+        <circle cx="4" cy="12" r="1.5" fill="currentColor" stroke="none" />
+        <circle cx="4" cy="17" r="1.5" fill="currentColor" stroke="none" />
+      </svg>
+    ),
+    code: `store := redis.New(redis.Config{Addr: ":6379"})
+cache := kv.WithKeyspace(store, "cache:")
+sessions := kv.WithKeyspace(store, "session:")
 
-// Hot path: zero reflection, pooled buffers
-var users []User
-err := pgdb.NewSelect(&users).
-    Where("active = $1", true).
-    Scan(ctx)`,
-    filename: "performance.go",
+cache.Set(ctx, "user:123", data, 5*time.Minute)
+val, _ := cache.Get(ctx, "user:123")`,
+    filename: "kv.go",
+  },
+];
+
+// ─── Tier 2: Secondary feature cards ────────────────────────
+const secondaryFeatures: FeatureCard[] = [
+  {
+    title: "Multi-Database",
+    description:
+      "Named database connections with DBManager and vessel DI. Connect PostgreSQL, ClickHouse, and SQLite in a single app with per-DB hooks and migrations.",
+    icon: (
+      <svg
+        className="size-5"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <rect x="3" y="3" width="7" height="7" rx="1" />
+        <rect x="14" y="3" width="7" height="7" rx="1" />
+        <rect x="3" y="14" width="7" height="7" rx="1" />
+        <rect x="14" y="14" width="7" height="7" rx="1" />
+      </svg>
+    ),
+    code: `ext := extension.New(
+    extension.WithDatabase("primary", pgDrv),
+    extension.WithDatabase("analytics", chDrv),
+    extension.WithDefaultDatabase("primary"),
+)`,
+    filename: "multi_db.go",
+  },
+  {
+    title: "Privacy Hooks",
+    description:
+      "Hook interfaces run before every query and mutation. Inject tenant isolation, redact PII fields, or log to audit trails without authorization logic in the ORM.",
+    icon: (
+      <svg
+        className="size-5"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+      </svg>
+    ),
+    code: `func (t *TenantIsolation) BeforeQuery(
+    ctx context.Context, qc *hook.QueryContext,
+) (*hook.HookResult, error) {
+    return &hook.HookResult{
+        Decision: hook.Modify,
+        Filters: []hook.ExtraFilter{
+            {Clause: "tenant_id = $1", Args: []any{tid}},
+        },
+    }, nil
+}`,
+    filename: "hooks.go",
+  },
+  {
+    title: "Streaming & CDC",
+    description:
+      "Stream[T] is a lazy, pull-based generic iterator. Composable pipeline transforms (Map, Filter, Chunk, Reduce) and Go 1.23+ range-over-func. ChangeStream adds CDC.",
+    icon: (
+      <svg
+        className="size-5"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+      </svg>
+    ),
+    code: `s, _ := pgdb.NewSelect(&User{}).
+    Where("active = $1", true).Stream(ctx)
+defer s.Close()
+
+active := stream.Filter(s, func(u User) bool {
+    return u.Email != ""
+})
+names := stream.Map(active, func(u User) (string, error) {
+    return u.Name, nil
+})`,
+    filename: "streaming.go",
   },
   {
     title: "Modular Migrations",
     description:
-      "Migrations are Go code, not SQL files. Any Go module can register migrations with dependency-aware ordering. Forge extensions ship their own migrations that compose automatically.",
+      "Go-code migrations with dependency-aware ordering. Forge extensions ship their own migrations that compose automatically across modules.",
     icon: (
       <svg
         className="size-5"
@@ -131,9 +224,9 @@ Migrations.MustRegister(&migrate.Migration{
     filename: "migrations.go",
   },
   {
-    title: "Privacy Hooks",
+    title: "7 Database Drivers",
     description:
-      "Hook interfaces run before every query and mutation. Inject tenant isolation filters, redact PII fields, or log to audit trails — without implementing authorization logic in the ORM.",
+      "PostgreSQL, MySQL, SQLite, MongoDB, Turso, ClickHouse, and Elasticsearch. Each generates native syntax while sharing the model registry and hook engine.",
     icon: (
       <svg
         className="size-5"
@@ -145,89 +238,48 @@ Migrations.MustRegister(&migrate.Migration{
         strokeLinejoin="round"
         aria-hidden="true"
       >
-        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        <path d="M12 2L2 7l10 5 10-5-10-5z" />
+        <path d="M2 17l10 5 10-5" />
+        <path d="M2 12l10 5 10-5" />
       </svg>
     ),
-    code: `func (t *TenantIsolation) BeforeQuery(
-    ctx context.Context, qc *hook.QueryContext,
-) (*hook.HookResult, error) {
-    return &hook.HookResult{
-        Decision: hook.Modify,
-        Filters: []hook.ExtraFilter{
-            {Clause: "tenant_id = $1", Args: []any{tenantID}},
-        },
-    }, nil
-}`,
-    filename: "hooks.go",
-  },
-  {
-    title: "Streaming & CDC",
-    description:
-      "Stream[T] is a lazy, pull-based generic iterator for database results. Supports composable pipeline transforms (Map, Filter, Chunk, Reduce) and Go 1.23+ range-over-func. ChangeStream[T] adds CDC support.",
-    icon: (
-      <svg
-        className="size-5"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
-      </svg>
-    ),
-    code: `// Lazy stream with per-row hooks
-s, _ := pgdb.NewSelect(&User{}).
-    Where("active = $1", true).
-    Stream(ctx)
-defer s.Close()
-
-// Pipeline transforms
-active := stream.Filter(s, func(u User) bool {
-    return u.Email != ""
-})
-names := stream.Map(active, func(u User) (string, error) {
-    return u.Name, nil
-})`,
-    filename: "streaming.go",
-  },
-  {
-    title: "Multi-Driver Support",
-    description:
-      "One set of models works across PostgreSQL, MySQL, SQLite, and MongoDB. Each driver generates native syntax for its database while sharing the model registry, migration system, and hook engine.",
-    icon: (
-      <svg
-        className="size-5"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <rect x="3" y="3" width="7" height="7" rx="1" />
-        <rect x="14" y="3" width="7" height="7" rx="1" />
-        <rect x="3" y="14" width="7" height="7" rx="1" />
-        <rect x="14" y="14" width="7" height="7" rx="1" />
-      </svg>
-    ),
-    code: `// Each driver opens its own connection
-pgdrv := pgdriver.New()
+    code: `pgdrv := pgdriver.New()
 pgdrv.Open(ctx, pgDSN)
 pgDB, _ := grove.Open(pgdrv)
 
-mydrv := mysqldriver.New()
-mydrv.Open(ctx, myDSN)
-myDB, _ := grove.Open(mydrv)
-
 // Each generates native syntax
-pgdriver.Unwrap(pgDB).NewSelect(&users).Where("email ILIKE $1", p)
-mysqldriver.Unwrap(myDB).NewSelect(&users).Where("email LIKE ?", p)`,
+pg := pgdriver.Unwrap(pgDB)
+pg.NewSelect(&users).Where("email ILIKE $1", p)`,
     filename: "drivers.go",
-    colSpan: 2,
+  },
+  {
+    title: "Observability",
+    description:
+      "Prometheus metrics, distributed tracing, and audit trail hooks. Track query latency, row counts, and log every mutation for compliance.",
+    icon: (
+      <svg
+        className="size-5"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M18 20V10M12 20V4M6 20v-6" />
+      </svg>
+    ),
+    code: `func (a *AuditHook) AfterMutation(
+    ctx context.Context, model any,
+    oldVal, newVal any,
+) error {
+    return a.chronicle.Log(ctx, chronicle.Entry{
+        Action: "update", Table: "users",
+        UserID: auth.UserID(ctx),
+    })
+}`,
+    filename: "audit.go",
   },
 ];
 
@@ -249,55 +301,100 @@ const itemVariants = {
   },
 };
 
+// ─── Card Component ─────────────────────────────────────────
+function FeatureCardView({
+  feature,
+  tier,
+}: {
+  feature: FeatureCard;
+  tier: "hero" | "secondary";
+}) {
+  return (
+    <motion.div
+      variants={itemVariants}
+      className={cn(
+        "group relative rounded-xl border border-fd-border bg-fd-card/50 backdrop-blur-sm p-6 hover:border-blue-500/20 hover:bg-fd-card/80 transition-all duration-300",
+        tier === "hero" && "ring-1 ring-blue-500/5",
+      )}
+    >
+      {/* Header */}
+      <div className="flex items-start gap-3 mb-4">
+        <div
+          className={cn(
+            "flex items-center justify-center shrink-0 rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400",
+            tier === "hero" ? "size-10" : "size-9",
+          )}
+        >
+          {feature.icon}
+        </div>
+        <div>
+          <h3
+            className={cn(
+              "font-semibold text-fd-foreground",
+              tier === "hero" ? "text-base" : "text-sm",
+            )}
+          >
+            {feature.title}
+          </h3>
+          <p className="text-xs text-fd-muted-foreground mt-1 leading-relaxed">
+            {feature.description}
+          </p>
+        </div>
+      </div>
+
+      {/* Code snippet */}
+      <CodeBlock
+        code={feature.code}
+        filename={feature.filename}
+        showLineNumbers={false}
+        className="text-xs"
+      />
+    </motion.div>
+  );
+}
+
+// ─── Feature Bento Section ──────────────────────────────────
 export function FeatureBento() {
   return (
     <section className="relative w-full py-20 sm:py-28">
       <div className="container max-w-(--fd-layout-width) mx-auto px-4 sm:px-6">
         <SectionHeader
-          badge="Features"
-          title="Everything you need for data access"
-          description="Grove handles the hard parts — tag parsing, query building, result scanning, migrations, and privacy hooks — so you can focus on your application."
+          badge="Capabilities"
+          title="Everything you need for data"
+          description="ORM, CRDT, key-value store, streaming, hooks, and migrations — Grove is a complete data toolkit for Go applications."
         />
 
+        {/* Tier 1: Hero capability cards */}
         <motion.div
           variants={containerVariants}
           initial="hidden"
           whileInView="visible"
           viewport={{ once: true, margin: "-50px" }}
-          className="mt-14 grid grid-cols-1 md:grid-cols-2 gap-4"
+          className="mt-14 grid grid-cols-1 md:grid-cols-3 gap-4"
         >
-          {features.map((feature) => (
-            <motion.div
+          {heroFeatures.map((feature) => (
+            <FeatureCardView
               key={feature.title}
-              variants={itemVariants}
-              className={cn(
-                "group relative rounded-xl border border-fd-border bg-fd-card/50 backdrop-blur-sm p-6 hover:border-blue-500/20 hover:bg-fd-card/80 transition-all duration-300",
-                feature.colSpan === 2 && "md:col-span-2",
-              )}
-            >
-              {/* Header */}
-              <div className="flex items-start gap-3 mb-4">
-                <div className="flex items-center justify-center size-9 rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400 shrink-0">
-                  {feature.icon}
-                </div>
-                <div>
-                  <h3 className="text-sm font-semibold text-fd-foreground">
-                    {feature.title}
-                  </h3>
-                  <p className="text-xs text-fd-muted-foreground mt-1 leading-relaxed">
-                    {feature.description}
-                  </p>
-                </div>
-              </div>
+              feature={feature}
+              tier="hero"
+            />
+          ))}
+        </motion.div>
 
-              {/* Code snippet */}
-              <CodeBlock
-                code={feature.code}
-                filename={feature.filename}
-                showLineNumbers={false}
-                className="text-xs"
-              />
-            </motion.div>
+        {/* Tier 2: Secondary feature cards */}
+        <motion.div
+          variants={containerVariants}
+          initial="hidden"
+          whileInView="visible"
+          viewport={{ once: true, margin: "-50px" }}
+          className="mt-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
+        >
+          {secondaryFeatures.map((feature) => (
+            <FeatureCardView
+              key={feature.title}
+              feature={feature}
+              tier="secondary"
+            />
           ))}
         </motion.div>
       </div>

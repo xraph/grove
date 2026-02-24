@@ -1,53 +1,70 @@
 /**
- * HTTP client for CRDT sync operations (pull/push).
+ * CRDT client for sync operations (pull/push/stream).
+ *
+ * Delegates transport to pluggable Transport/StreamTransport implementations.
+ * Defaults to HTTP transport when baseURL is provided.
  */
 
 import type {
   CRDTClientConfig,
   StreamConfig,
+  Transport,
+  StreamTransport,
+  StreamSubscription,
   PullRequest,
   PullResponse,
-  PushRequest,
   PushResponse,
   ChangeRecord,
   HLC,
 } from "./types.js";
 import { HybridClock } from "./hlc.js";
-import { CRDTStream } from "./stream.js";
+import { HttpStreamTransport, isStreamTransport } from "./transport.js";
 
-/** Error thrown by CRDT client operations. */
-export class CRDTError extends Error {
-  constructor(
-    message: string,
-    public readonly statusCode?: number
-  ) {
-    super(message);
-    this.name = "CRDTError";
-  }
-}
+// Re-export CRDTError for backward compatibility.
+export { CRDTError } from "./errors.js";
 
 /**
- * HTTP client for Grove CRDT sync operations.
+ * CRDT client for Grove sync operations.
  *
- * Provides typed methods for pull/push sync and SSE stream creation.
+ * Provides typed methods for pull/push sync and stream creation.
  * Maintains an internal HLC clock that stays synchronized with the server.
+ * Supports pluggable transports — defaults to HTTP when baseURL is provided.
  */
 export class CRDTClient {
   readonly nodeID: string;
   readonly clock: HybridClock;
 
-  private baseURL: string;
   private tables: string[];
-  private fetchImpl: typeof fetch;
-  private headers: Record<string, string>;
+  private transport: Transport;
+  private streamTransport: StreamTransport | null;
 
   constructor(config: CRDTClientConfig) {
     this.nodeID = config.nodeID;
-    this.baseURL = config.baseURL.replace(/\/+$/, ""); // Strip trailing slashes
     this.tables = config.tables ?? [];
-    this.fetchImpl = config.fetch ?? globalThis.fetch.bind(globalThis);
-    this.headers = config.headers ?? {};
     this.clock = new HybridClock(config.nodeID);
+
+    // Resolve transport.
+    if (config.transport) {
+      this.transport = config.transport;
+    } else if (config.baseURL) {
+      this.transport = new HttpStreamTransport({
+        baseURL: config.baseURL,
+        fetch: config.fetch,
+        headers: config.headers,
+        auth: config.auth,
+      });
+    } else {
+      throw new Error("CRDTClient requires either `baseURL` or `transport`.");
+    }
+
+    // Resolve stream transport.
+    if (config.streamTransport) {
+      this.streamTransport = config.streamTransport;
+    } else if (isStreamTransport(this.transport)) {
+      this.streamTransport = this.transport;
+    } else {
+      this.streamTransport = null;
+    }
   }
 
   /**
@@ -64,7 +81,7 @@ export class CRDTClient {
       ...(since && { since }),
     };
 
-    const response = await this.request<PullResponse>("/pull", req);
+    const response = await this.transport.pull(req);
 
     // Update local clock with server's latest HLC.
     if (response.latest_hlc) {
@@ -85,12 +102,10 @@ export class CRDTClient {
       return { merged: 0, latest_hlc: this.clock.now() };
     }
 
-    const req: PushRequest = {
+    const response = await this.transport.push({
       changes,
       node_id: this.nodeID,
-    };
-
-    const response = await this.request<PushResponse>("/push", req);
+    });
 
     // Update local clock with server's latest HLC.
     if (response.latest_hlc) {
@@ -101,42 +116,23 @@ export class CRDTClient {
   }
 
   /**
-   * Create an SSE stream connection for real-time changes.
+   * Create a stream subscription for real-time changes.
    *
    * @param config - Stream configuration (tables, reconnect delay, since HLC).
-   * @returns A CRDTStream instance (call .connect() to start).
+   * @returns A StreamSubscription instance (call .connect() to start).
+   * @throws Error if no stream transport is available.
    */
-  stream(config?: StreamConfig): CRDTStream {
-    return new CRDTStream(
-      this.baseURL,
-      {
-        tables: config?.tables ?? this.tables,
-        reconnectDelay: config?.reconnectDelay,
-        since: config?.since,
-      },
-      this.headers,
-      this.fetchImpl
-    );
-  }
-
-  private async request<T>(path: string, body: unknown): Promise<T> {
-    const response = await this.fetchImpl(`${this.baseURL}${path}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...this.headers,
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new CRDTError(
-        `CRDT ${path} returned ${response.status}: ${text}`,
-        response.status
+  stream(config?: StreamConfig): StreamSubscription {
+    if (!this.streamTransport) {
+      throw new Error(
+        "No stream transport available. Provide a `streamTransport` or use a transport that supports streaming."
       );
     }
 
-    return (await response.json()) as T;
+    return this.streamTransport.subscribe({
+      tables: config?.tables ?? this.tables,
+      reconnectDelay: config?.reconnectDelay,
+      since: config?.since,
+    });
   }
 }

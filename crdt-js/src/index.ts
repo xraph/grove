@@ -57,6 +57,17 @@ export type {
   SyncReport,
 } from "./types.js";
 
+// Plugin interfaces
+export type {
+  Transport,
+  StreamTransport,
+  StreamSubscription,
+  StreamEvent,
+  StreamEventHandler,
+  StorageAdapter,
+  AuthProvider,
+} from "./types.js";
+
 // HLC clock
 export {
   HLC_ZERO,
@@ -82,12 +93,20 @@ export {
   mergeFieldState,
 } from "./merge.js";
 
-// HTTP client
-export { CRDTClient, CRDTError } from "./client.js";
+// Errors
+export { CRDTError, TransportError } from "./errors.js";
+
+// Client
+export { CRDTClient } from "./client.js";
 
 // SSE streaming
-export type { CRDTStreamEvent, StreamEventHandler } from "./stream.js";
+export type { CRDTStreamEvent } from "./stream.js";
 export { CRDTStream } from "./stream.js";
 
 // State store
 export { CRDTStore } from "./store.js";
+
+// Default implementations
+export { HttpTransport, HttpStreamTransport, isStreamTransport } from "./transport.js";
+export { MemoryStorage } from "./storage.js";
+export { StaticAuthProvider } from "./auth.js";

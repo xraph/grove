@@ -80,16 +80,24 @@ export type SyncStatus = "connected" | "disconnected" | "syncing" | "error";
 
 /** Configuration for the CRDT client. */
 export interface CRDTClientConfig {
-  /** Base URL of the CRDT sync server (e.g., "https://api.example.com/sync"). */
-  baseURL: string;
+  /** Base URL of the CRDT sync server. Required when no custom transport is provided. */
+  baseURL?: string;
   /** Unique node ID for this client. */
   nodeID: string;
   /** Tables to sync. */
   tables?: string[];
-  /** Custom fetch implementation (default: globalThis.fetch). */
+  /** Custom fetch implementation (default: globalThis.fetch). Only used by built-in HttpTransport. */
   fetch?: typeof fetch;
   /** Custom headers to include in all requests. */
   headers?: Record<string, string>;
+  /** Custom transport for pull/push operations. When provided, baseURL is not required. */
+  transport?: Transport;
+  /** Custom stream transport for real-time subscriptions. */
+  streamTransport?: StreamTransport;
+  /** Auth provider for dynamic header injection (e.g., JWT refresh). */
+  auth?: AuthProvider;
+  /** Storage adapter for persistence (passed through to CRDTStore). */
+  storage?: StorageAdapter;
 }
 
 /** Configuration for SSE streaming. */
@@ -149,4 +157,75 @@ export interface SyncReport {
   pushed: number;
   merged: number;
   conflicts: number;
+}
+
+// --- Plugin Interfaces ---
+
+/** Stream event handler callback type (re-exported from stream.ts for interface use). */
+export type StreamEventHandler = (event: StreamEvent) => void;
+
+/** Stream event types (mirrors CRDTStreamEvent in stream.ts). */
+export type StreamEvent =
+  | { type: "change"; data: ChangeRecord }
+  | { type: "changes"; data: ChangeRecord[] }
+  | { type: "error"; error: Error }
+  | { type: "connected" }
+  | { type: "disconnected" };
+
+/**
+ * Transport interface for CRDT sync operations.
+ *
+ * Implement this to use custom transports (WebSocket, gRPC, etc.)
+ * instead of the built-in HTTP transport.
+ */
+export interface Transport {
+  pull(req: PullRequest): Promise<PullResponse>;
+  push(req: PushRequest): Promise<PushResponse>;
+}
+
+/**
+ * Subscription handle returned by StreamTransport.subscribe().
+ *
+ * CRDTStream already satisfies this interface, so existing code is compatible.
+ */
+export interface StreamSubscription {
+  on(handler: StreamEventHandler): () => void;
+  connect(): void;
+  disconnect(): void;
+  readonly connected: boolean;
+  readonly lastHLC: HLC | null;
+}
+
+/**
+ * Transport that also supports real-time streaming subscriptions.
+ *
+ * Extends Transport with a subscribe() method for SSE, WebSocket, or
+ * other push-based change propagation.
+ */
+export interface StreamTransport extends Transport {
+  subscribe(config: StreamConfig): StreamSubscription;
+}
+
+/**
+ * Persistence adapter for CRDTStore state.
+ *
+ * All methods are async to support IndexedDB, localStorage, remote storage, etc.
+ * The built-in MemoryStorage is a no-op implementation.
+ */
+export interface StorageAdapter {
+  loadState(): Promise<Map<string, Map<string, DocumentState>>>;
+  saveDocument(table: string, pk: string, doc: DocumentState): Promise<void>;
+  deleteDocument(table: string, pk: string): Promise<void>;
+  loadPendingChanges(): Promise<ChangeRecord[]>;
+  savePendingChanges(changes: ChangeRecord[]): Promise<void>;
+}
+
+/**
+ * Auth provider for dynamic header injection.
+ *
+ * Called before every request. Supports both sync and async implementations
+ * (e.g., static API keys vs. JWT token refresh).
+ */
+export interface AuthProvider {
+  getHeaders(): Record<string, string> | Promise<Record<string, string>>;
 }

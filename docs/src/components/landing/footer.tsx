@@ -8,19 +8,23 @@ const footerLinks = {
     { label: "Introduction", href: "/docs" },
     { label: "Quick Start", href: "/docs/getting-started" },
     { label: "Architecture", href: "/docs/architecture" },
-    { label: "Dual Tags", href: "/docs/concepts/dual-tags" },
+    { label: "Forge Extension", href: "/docs/integration/forge-extension" },
   ],
   Drivers: [
     { label: "PostgreSQL", href: "/docs/drivers/postgres" },
     { label: "MySQL", href: "/docs/drivers/mysql" },
     { label: "SQLite", href: "/docs/drivers/sqlite" },
     { label: "MongoDB", href: "/docs/drivers/mongodb" },
+    { label: "Turso", href: "/docs/drivers/turso" },
+    { label: "ClickHouse", href: "/docs/drivers/clickhouse" },
+    { label: "Elasticsearch", href: "/docs/drivers/elasticsearch" },
   ],
   Features: [
+    { label: "CRDT", href: "/docs/crdt/overview" },
+    { label: "Key-Value Store", href: "/docs/kv/overview" },
     { label: "Migrations", href: "/docs/migrations/overview" },
     { label: "Privacy Hooks", href: "/docs/hooks/overview" },
-    { label: "Forge Integration", href: "/docs/integration/forge-extension" },
-    { label: "Basic CRUD", href: "/docs/guides/basic-crud" },
+    { label: "Streaming", href: "/docs/streaming/overview" },
   ],
   Community: [
     {
@@ -59,9 +63,8 @@ export function Footer() {
               <span className="font-bold text-lg">Grove</span>
             </Link>
             <p className="text-sm text-fd-muted-foreground leading-relaxed max-w-xs">
-              A polyglot Go ORM with native query syntax per database. Near-raw
-              performance, modular migrations, and privacy hooks — part of the
-              Forge ecosystem.
+              A complete Go data toolkit — polyglot ORM, CRDT sync, key-value
+              store, streaming, and privacy hooks across 7 database drivers.
             </p>
             {/* Social links */}
             <div className="flex items-center gap-3 mt-6">
