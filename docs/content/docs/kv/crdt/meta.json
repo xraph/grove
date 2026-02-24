@@ -1,8 +1,4 @@
 {
   "title": "CRDT Integration",
-  "pages": [
-    "overview",
-    "types",
-    "sync-engine"
-  ]
+  "pages": ["overview", "types", "sync-engine"]
 }

@@ -1,4 +1,12 @@
 {
   "title": "Drivers",
-  "pages": ["postgres", "mysql", "sqlite", "mongodb", "turso", "clickhouse", "elasticsearch"]
+  "pages": [
+    "postgres",
+    "mysql",
+    "sqlite",
+    "mongodb",
+    "turso",
+    "clickhouse",
+    "elasticsearch"
+  ]
 }

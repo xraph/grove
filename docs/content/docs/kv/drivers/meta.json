@@ -1,10 +1,4 @@
 {
   "title": "KV Drivers",
-  "pages": [
-    "redis",
-    "memcached",
-    "dynamodb",
-    "boltdb",
-    "badger"
-  ]
+  "pages": ["redis", "memcached", "dynamodb", "boltdb", "badger"]
 }

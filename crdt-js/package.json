@@ -1,6 +1,6 @@
 {
   "name": "@grove-js/crdt",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "TypeScript client for Grove CRDT sync — pull/push, SSE streaming, merge, and React hooks",
   "type": "module",
   "main": "dist/index.js",
