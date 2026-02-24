@@ -1,0 +1,438 @@
+---
+title: TypeScript Client
+description: Using @grove-js/crdt for browser-based CRDT sync with HTTP pull/push, SSE streaming, client-side merge, and React hooks.
+---
+
+The `@grove-js/crdt` TypeScript package provides a full CRDT client for browser and Node.js applications. It mirrors the Go wire format exactly, enabling cross-language sync between Go servers and JavaScript clients.
+
+## Installation
+
+```bash
+npm install @grove-js/crdt
+```
+
+React hooks require React 18+ as a peer dependency:
+
+```bash
+npm install react
+```
+
+## Core Modules
+
+The package exports from two entry points:
+
+```typescript
+// Core: client, store, merge, clock, stream
+import { CRDTClient, CRDTStore, HybridClock } from "@grove-js/crdt";
+
+// React hooks
+import { CRDTProvider, useDocument, useCollection } from "@grove-js/crdt/react";
+```
+
+## CRDTClient
+
+The HTTP client for pull/push sync with the Go server:
+
+```typescript
+import { CRDTClient } from "@grove-js/crdt";
+
+const client = new CRDTClient({
+    baseURL: "https://api.example.com/sync",
+    nodeID: "browser-1",
+    tables: ["documents", "comments"],
+    headers: {
+        Authorization: "Bearer <token>",
+    },
+});
+
+// Pull changes from the server.
+const { changes, latestHLC } = await client.pull();
+
+// Push local changes to the server.
+const pushResult = await client.push(pendingChanges);
+
+// Create an SSE stream instance.
+const stream = client.stream({ reconnectDelay: 5000 });
+```
+
+### Configuration
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `baseURL` | `string` | Sync server URL (e.g., `"https://api.example.com/sync"`) |
+| `nodeID` | `string` | Unique client identifier |
+| `tables` | `string[]` | Tables to sync |
+| `headers` | `Record<string, string>` | Custom headers (auth tokens, etc.) |
+| `fetchImpl` | `typeof fetch` | Custom fetch implementation |
+
+## CRDTStore
+
+In-memory state management with dirty tracking and subscriptions:
+
+```typescript
+import { CRDTStore, HybridClock } from "@grove-js/crdt";
+
+const clock = new HybridClock("browser-1");
+const store = new CRDTStore("browser-1", clock);
+
+// Apply remote changes from a pull.
+store.applyChanges(changes);
+
+// Read a document.
+const doc = store.getDocument<Document>("documents", "doc-1");
+// { id: "doc-1", title: "Hello", viewCount: 42, tags: ["go", "crdt"] }
+
+// Read a collection.
+const docs = store.getCollection<Document>("documents");
+
+// Make local changes.
+store.setField("documents", "doc-1", "title", "Updated Title");
+store.incrementCounter("documents", "doc-1", "viewCount", 1);
+store.addToSet("documents", "doc-1", "tags", "typescript");
+
+// Get pending changes for push.
+const pending = store.getPendingChanges();
+await client.push(pending);
+store.clearPendingChanges();
+```
+
+### Mutations
+
+| Method | Description |
+|--------|-------------|
+| `setField(table, pk, field, value)` | Set a LWW field value |
+| `incrementCounter(table, pk, field, delta)` | Increment a counter |
+| `decrementCounter(table, pk, field, delta)` | Decrement a counter |
+| `addToSet(table, pk, field, ...elements)` | Add elements to a set |
+| `removeFromSet(table, pk, field, ...elements)` | Remove elements from a set |
+| `deleteDocument(table, pk)` | Tombstone a document |
+
+### Subscriptions
+
+The store supports fine-grained subscriptions compatible with React's `useSyncExternalStore`:
+
+```typescript
+// Subscribe to all changes.
+const unsub = store.subscribe(() => {
+    console.log("State changed");
+});
+
+// Subscribe to a specific document.
+const unsub = store.subscribeDocument("documents", "doc-1", () => {
+    console.log("Document changed");
+});
+
+// Subscribe to an entire table.
+const unsub = store.subscribeCollection("documents", () => {
+    console.log("Collection changed");
+});
+```
+
+## Client-Side Merge
+
+The package includes pure functions matching the Go merge algorithms:
+
+```typescript
+import { mergeLWW, mergeCounter, counterValue, mergeSet, setElements } from "@grove-js/crdt";
+
+// LWW merge: higher HLC wins.
+const winner = mergeLWW(localValue, remoteValue);
+
+// Counter merge: per-node max.
+const merged = mergeCounter(localCounter, remoteCounter);
+const value = counterValue(merged); // sum(inc) - sum(dec)
+
+// Set merge: add-wins union.
+const mergedSet = mergeSet(localSet, remoteSet);
+const elements = setElements(mergedSet); // active elements
+```
+
+## HybridClock
+
+The TypeScript HLC uses `Date.now() * 1_000_000` to produce nanosecond timestamps compatible with Go:
+
+```typescript
+import { HybridClock, hlcCompare, hlcAfter } from "@grove-js/crdt";
+
+const clock = new HybridClock("browser-1");
+
+// Generate a new HLC.
+const hlc = clock.now();
+// { ts: 1706000000000000000, c: 0, node: "browser-1" }
+
+// Update from a remote HLC.
+clock.update(remoteHLC);
+
+// Compare two HLCs.
+const cmp = hlcCompare(a, b); // -1, 0, or 1
+const isAfter = hlcAfter(a, b); // boolean
+```
+
+## SSE Stream
+
+The `CRDTStream` class uses `fetch()` + `ReadableStream` instead of `EventSource` to support custom headers:
+
+```typescript
+import { CRDTStream } from "@grove-js/crdt";
+
+const stream = new CRDTStream(
+    "https://api.example.com/sync",
+    { tables: ["documents"], reconnectDelay: 5000 },
+    { Authorization: "Bearer <token>" }
+);
+
+stream.on((event) => {
+    if (event.type === "change") {
+        store.applyChanges([event.data]);
+    } else if (event.type === "changes") {
+        store.applyChanges(event.data);
+    }
+});
+
+stream.connect();
+```
+
+## React Hooks
+
+Import from the `./react` sub-export:
+
+```typescript
+import {
+    CRDTProvider,
+    useDocument,
+    useCollection,
+    useLWW,
+    useCounter,
+    useSet,
+    useSyncStatus,
+    useStream,
+} from "@grove-js/crdt/react";
+```
+
+### CRDTProvider
+
+Wraps your app with the CRDT context:
+
+```tsx
+function App() {
+    return (
+        <CRDTProvider config={{
+            baseURL: "https://api.example.com/sync",
+            nodeID: "browser-1",
+            tables: ["documents"],
+            headers: { Authorization: "Bearer <token>" },
+        }}>
+            <DocumentList />
+        </CRDTProvider>
+    );
+}
+```
+
+The provider automatically:
+- Creates a `HybridClock`, `CRDTClient`, and `CRDTStore`
+- Pulls initial data on mount
+- Connects the SSE stream for real-time updates
+- Provides a `sync()` function for manual sync
+
+### useDocument
+
+Subscribe to a single document with update and delete operations:
+
+```tsx
+function DocumentEditor({ id }: { id: string }) {
+    const { data, loading, update, remove } = useDocument<Document>("documents", id);
+
+    if (loading) return <div>Loading...</div>;
+    if (!data) return <div>Not found</div>;
+
+    return (
+        <div>
+            <input
+                value={data.title}
+                onChange={(e) => update("title", e.target.value)}
+            />
+            <button onClick={remove}>Delete</button>
+        </div>
+    );
+}
+```
+
+### useCollection
+
+Subscribe to an entire table:
+
+```tsx
+function DocumentList() {
+    const { items, loading, create } = useCollection<Document>("documents");
+
+    return (
+        <div>
+            {items.map((doc) => (
+                <DocumentEditor key={doc.id} id={doc.id} />
+            ))}
+            <button onClick={() => create("new-id", { title: "Untitled" })}>
+                New Document
+            </button>
+        </div>
+    );
+}
+```
+
+### useLWW
+
+Subscribe to a single LWW field:
+
+```tsx
+function TitleEditor({ docId }: { docId: string }) {
+    const { value, set } = useLWW<string>("documents", docId, "title");
+
+    return (
+        <input value={value ?? ""} onChange={(e) => set(e.target.value)} />
+    );
+}
+```
+
+### useCounter
+
+Subscribe to a counter field:
+
+```tsx
+function ViewCounter({ docId }: { docId: string }) {
+    const { value, increment } = useCounter("documents", docId, "viewCount");
+
+    return (
+        <div>
+            <span>Views: {value}</span>
+            <button onClick={() => increment(1)}>+1</button>
+        </div>
+    );
+}
+```
+
+### useSet
+
+Subscribe to a set field:
+
+```tsx
+function TagEditor({ docId }: { docId: string }) {
+    const { elements, add, remove, has } = useSet<string>("documents", docId, "tags");
+
+    return (
+        <div>
+            {elements.map((tag) => (
+                <span key={tag}>
+                    {tag} <button onClick={() => remove(tag)}>x</button>
+                </span>
+            ))}
+            <button onClick={() => add("new-tag")}>Add Tag</button>
+        </div>
+    );
+}
+```
+
+### useSyncStatus
+
+Monitor sync state:
+
+```tsx
+function SyncIndicator() {
+    const { status, lastSyncTime, pendingCount, sync } = useSyncStatus();
+
+    return (
+        <div>
+            <span>Status: {status}</span>
+            <span>Pending: {pendingCount}</span>
+            <button onClick={sync} disabled={status === "syncing"}>
+                Sync Now
+            </button>
+        </div>
+    );
+}
+```
+
+### useStream
+
+Control the SSE stream connection:
+
+```tsx
+function StreamControl() {
+    const { connected, disconnect, reconnect } = useStream();
+
+    return (
+        <div>
+            <span>{connected ? "Connected" : "Disconnected"}</span>
+            <button onClick={connected ? disconnect : reconnect}>
+                {connected ? "Disconnect" : "Reconnect"}
+            </button>
+        </div>
+    );
+}
+```
+
+## Full Example
+
+A collaborative document editor with real-time CRDT sync:
+
+```tsx
+import { CRDTProvider, useDocument, useCollection, useSyncStatus } from "@grove-js/crdt/react";
+
+interface Document {
+    id: string;
+    title: string;
+    viewCount: number;
+    tags: string[];
+}
+
+function App() {
+    return (
+        <CRDTProvider config={{
+            baseURL: "/api/sync",
+            nodeID: `browser-${crypto.randomUUID()}`,
+            tables: ["documents"],
+        }}>
+            <SyncBar />
+            <DocumentList />
+        </CRDTProvider>
+    );
+}
+
+function SyncBar() {
+    const { status, pendingCount, sync } = useSyncStatus();
+    return (
+        <header>
+            <span>{status} | {pendingCount} pending</span>
+            <button onClick={sync}>Sync</button>
+        </header>
+    );
+}
+
+function DocumentList() {
+    const { items, create } = useCollection<Document>("documents");
+    return (
+        <div>
+            {items.map((doc) => (
+                <DocumentCard key={doc.id} id={doc.id} />
+            ))}
+            <button onClick={() => create(crypto.randomUUID(), { title: "Untitled" })}>
+                New
+            </button>
+        </div>
+    );
+}
+
+function DocumentCard({ id }: { id: string }) {
+    const { data, update, remove } = useDocument<Document>("documents", id);
+    if (!data) return null;
+
+    return (
+        <div>
+            <input
+                value={data.title}
+                onChange={(e) => update("title", e.target.value)}
+            />
+            <span>Views: {data.viewCount}</span>
+            <button onClick={remove}>Delete</button>
+        </div>
+    );
+}
+```

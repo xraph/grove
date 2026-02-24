@@ -193,7 +193,7 @@ func TestBufferStringBuilding(t *testing.T) {
 	}
 }
 
-func TestPutBufferNil(t *testing.T) {
+func TestPutBufferNil(_ *testing.T) {
 	// Should not panic.
 	PutBuffer(nil)
 }

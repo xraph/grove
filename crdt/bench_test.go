@@ -261,7 +261,12 @@ func BenchmarkHandlePull(b *testing.B) {
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				resp, err := http.Post(server.URL+"/pull", "application/json", bytes.NewReader(reqBody))
+				req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL+"/pull", bytes.NewReader(reqBody))
+				if err != nil {
+					b.Fatal(err)
+				}
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := http.DefaultClient.Do(req)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -298,7 +303,12 @@ func BenchmarkHandlePush(b *testing.B) {
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				resp, err := http.Post(server.URL+"/push", "application/json", bytes.NewReader(reqBody))
+				req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL+"/push", bytes.NewReader(reqBody))
+				if err != nil {
+					b.Fatal(err)
+				}
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := http.DefaultClient.Do(req)
 				if err != nil {
 					b.Fatal(err)
 				}

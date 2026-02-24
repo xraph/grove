@@ -55,9 +55,8 @@ func (d *MockDialect) GoToDBType(goType reflect.Type, opts schema.FieldOptions) 
 	}
 }
 
-func (d *MockDialect) AppendBytes(b []byte, v []byte) []byte {
-	b = append(b, '\'')
-	b = append(b, '\\', 'x')
+func (d *MockDialect) AppendBytes(b, v []byte) []byte {
+	b = append(b, '\'', '\\', 'x')
 	dst := make([]byte, hex.EncodedLen(len(v)))
 	hex.Encode(dst, v)
 	b = append(b, dst...)

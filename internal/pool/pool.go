@@ -21,7 +21,7 @@ var bufferPool = sync.Pool{
 // GetBuffer returns a Buffer from the pool. The returned buffer is empty but
 // may have pre-allocated capacity from a previous use.
 func GetBuffer() *Buffer {
-	return bufferPool.Get().(*Buffer)
+	return bufferPool.Get().(*Buffer) //nolint:errcheck // sync.Pool.New always returns *Buffer
 }
 
 // PutBuffer returns a Buffer to the pool after resetting it. The buffer must

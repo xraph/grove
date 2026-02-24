@@ -20,7 +20,7 @@ import (
     "log"
 
     "github.com/xraph/grove"
-    "github.com/xraph/grove/mongodriver"
+    "github.com/xraph/grove/drivers/mongodriver"
 )
 
 ctx := context.Background()
@@ -78,7 +78,7 @@ coll := mdb.Collection("users") // *mongo.Collection
 The `mongodriver` package re-exports common BSON types so you can avoid importing the `bson` package directly if you prefer:
 
 ```go
-import "github.com/xraph/grove/mongodriver"
+import "github.com/xraph/grove/drivers/mongodriver"
 
 filter := mongodriver.M{"status": "active"}  // = bson.M
 sort := mongodriver.D{{"name", 1}}           // = bson.D
@@ -466,8 +466,8 @@ The `mongomigrate` package provides a MongoDB-specific migration executor that i
 ```go
 import (
     "github.com/xraph/grove/migrate"
-    "github.com/xraph/grove/mongodriver"
-    "github.com/xraph/grove/mongodriver/mongomigrate"
+    "github.com/xraph/grove/drivers/mongodriver"
+    "github.com/xraph/grove/drivers/mongodriver/mongomigrate"
 )
 
 mdb := mongodriver.Unwrap(db)

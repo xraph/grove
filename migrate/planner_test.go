@@ -9,7 +9,7 @@ import (
 )
 
 // noopFn is a no-op migration function for planner tests.
-var noopFn MigrateFunc = func(ctx context.Context, exec Executor) error { return nil }
+var noopFn MigrateFunc = func(_ context.Context, _ Executor) error { return nil }
 
 // newTestMigration creates a migration with the given name and version, using no-op functions.
 func newTestMigration(name, version string) *Migration {

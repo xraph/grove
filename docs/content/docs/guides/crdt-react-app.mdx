@@ -1,0 +1,497 @@
+---
+title: "CRDT: React App"
+description: Build a collaborative React application with real-time CRDT sync using @grove-js/crdt and Grove.
+---
+
+This guide builds a complete collaborative document editor using the `@grove-js/crdt` TypeScript client with React hooks, connected to a Grove Go backend.
+
+## Prerequisites
+
+- A Grove Go server with CRDT sync endpoints (see [Getting Started](/docs/crdt/getting-started))
+- Node.js 18+ and React 18+
+
+## Project Setup
+
+### Go Server
+
+Set up the backend with Forge and CRDT sync:
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "time"
+
+    "github.com/xraph/forge"
+    "github.com/xraph/grove/crdt"
+    "github.com/xraph/grove/hook"
+    "github.com/xraph/grove/drivers/pgdriver"
+    groveext "github.com/xraph/grove/extension"
+)
+
+type Document struct {
+    grove.BaseModel `grove:"table:documents,alias:d"`
+    ID        string   `grove:"id,pk"`
+    Title     string   `grove:"title,crdt:lww"`
+    Body      string   `grove:"body,crdt:lww"`
+    ViewCount int64    `grove:"view_count,crdt:counter"`
+    Tags      []string `grove:"tags,type:jsonb,crdt:set"`
+}
+
+func main() {
+    ctx := context.Background()
+
+    pgdb := pgdriver.New()
+    pgdb.Open(ctx, "postgres://user:pass@localhost:5432/mydb")
+
+    plugin := crdt.New(crdt.WithNodeID("server-1"))
+
+    app := forge.New()
+    app.Use(groveext.New(
+        groveext.WithDriver(pgdb),
+        groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents"}}),
+        groveext.WithSyncController(
+            crdt.WithStreamPollInterval(500 * time.Millisecond),
+            crdt.WithStreamKeepAlive(15 * time.Second),
+        ),
+        groveext.WithMigrations(crdt.Migrations),
+        groveext.WithBasePath("/api/sync"),
+    ))
+
+    app.Start(ctx) // Sync at /api/sync/pull, /api/sync/push, /api/sync/stream
+}
+```
+
+### React Client
+
+Install the TypeScript CRDT package:
+
+```bash
+npm install @grove-js/crdt react
+```
+
+## Application Root
+
+Wrap your app with `CRDTProvider`:
+
+```tsx
+// src/App.tsx
+import { CRDTProvider } from "@grove-js/crdt/react";
+import { DocumentList } from "./DocumentList";
+import { SyncBar } from "./SyncBar";
+
+export function App() {
+    return (
+        <CRDTProvider config={{
+            baseURL: "/api/sync",
+            nodeID: `browser-${crypto.randomUUID().slice(0, 8)}`,
+            tables: ["documents"],
+        }}>
+            <div className="app">
+                <SyncBar />
+                <DocumentList />
+            </div>
+        </CRDTProvider>
+    );
+}
+```
+
+The provider automatically:
+- Creates a `HybridClock`, `CRDTClient`, and `CRDTStore`
+- Pulls initial data on mount
+- Connects to the SSE stream for real-time updates
+
+## Sync Status Bar
+
+Show sync state and provide a manual sync button:
+
+```tsx
+// src/SyncBar.tsx
+import { useSyncStatus, useStream } from "@grove-js/crdt/react";
+
+export function SyncBar() {
+    const { status, pendingCount, lastSyncTime, sync } = useSyncStatus();
+    const { connected } = useStream();
+
+    return (
+        <header className="sync-bar">
+            <div className="sync-info">
+                <span className={`status ${connected ? "online" : "offline"}`}>
+                    {connected ? "Live" : "Offline"}
+                </span>
+                {pendingCount > 0 && (
+                    <span className="pending">{pendingCount} pending</span>
+                )}
+                {lastSyncTime && (
+                    <span className="last-sync">
+                        Last sync: {new Date(lastSyncTime).toLocaleTimeString()}
+                    </span>
+                )}
+            </div>
+            <button
+                onClick={sync}
+                disabled={status === "syncing"}
+                className="sync-button"
+            >
+                {status === "syncing" ? "Syncing..." : "Sync Now"}
+            </button>
+        </header>
+    );
+}
+```
+
+## Document List
+
+Display all documents with create functionality:
+
+```tsx
+// src/DocumentList.tsx
+import { useCollection } from "@grove-js/crdt/react";
+import { DocumentCard } from "./DocumentCard";
+
+interface Document {
+    id: string;
+    title: string;
+    body: string;
+    viewCount: number;
+    tags: string[];
+}
+
+export function DocumentList() {
+    const { items, loading, create } = useCollection<Document>("documents");
+
+    const handleCreate = () => {
+        const id = crypto.randomUUID();
+        create(id, {
+            title: "Untitled Document",
+            body: "",
+        });
+    };
+
+    if (loading) {
+        return <div className="loading">Loading documents...</div>;
+    }
+
+    return (
+        <div className="document-list">
+            <div className="list-header">
+                <h2>Documents ({items.length})</h2>
+                <button onClick={handleCreate} className="create-button">
+                    New Document
+                </button>
+            </div>
+            <div className="list-grid">
+                {items.map((doc) => (
+                    <DocumentCard key={doc.id} id={doc.id} />
+                ))}
+            </div>
+            {items.length === 0 && (
+                <p className="empty">No documents yet. Create one to get started.</p>
+            )}
+        </div>
+    );
+}
+```
+
+## Document Card
+
+Edit a single document with LWW fields:
+
+```tsx
+// src/DocumentCard.tsx
+import { useState } from "react";
+import { useDocument } from "@grove-js/crdt/react";
+import { TagEditor } from "./TagEditor";
+import { ViewCounter } from "./ViewCounter";
+
+interface Document {
+    id: string;
+    title: string;
+    body: string;
+    viewCount: number;
+    tags: string[];
+}
+
+export function DocumentCard({ id }: { id: string }) {
+    const { data, loading, update, remove } = useDocument<Document>("documents", id);
+    const [expanded, setExpanded] = useState(false);
+
+    if (loading) return <div className="card loading">Loading...</div>;
+    if (!data) return null;
+
+    return (
+        <div className="card">
+            <div className="card-header">
+                <input
+                    className="title-input"
+                    value={data.title}
+                    onChange={(e) => update("title", e.target.value)}
+                    placeholder="Document title..."
+                />
+                <button onClick={() => setExpanded(!expanded)} className="toggle">
+                    {expanded ? "Collapse" : "Expand"}
+                </button>
+            </div>
+
+            {expanded && (
+                <div className="card-body">
+                    <textarea
+                        className="body-editor"
+                        value={data.body}
+                        onChange={(e) => update("body", e.target.value)}
+                        placeholder="Write something..."
+                        rows={6}
+                    />
+                </div>
+            )}
+
+            <div className="card-footer">
+                <ViewCounter docId={id} />
+                <TagEditor docId={id} />
+                <button onClick={remove} className="delete-button">
+                    Delete
+                </button>
+            </div>
+        </div>
+    );
+}
+```
+
+## Counter: View Tracker
+
+Use the `useCounter` hook for the view count:
+
+```tsx
+// src/ViewCounter.tsx
+import { useCounter } from "@grove-js/crdt/react";
+
+export function ViewCounter({ docId }: { docId: string }) {
+    const { value, increment } = useCounter("documents", docId, "viewCount");
+
+    return (
+        <div className="view-counter">
+            <span className="count">{value} views</span>
+            <button onClick={() => increment(1)} className="view-button">
+                +1
+            </button>
+        </div>
+    );
+}
+```
+
+## Set: Tag Editor
+
+Use the `useSet` hook for tags:
+
+```tsx
+// src/TagEditor.tsx
+import { useState } from "react";
+import { useSet } from "@grove-js/crdt/react";
+
+export function TagEditor({ docId }: { docId: string }) {
+    const { elements, add, remove, has } = useSet<string>("documents", docId, "tags");
+    const [input, setInput] = useState("");
+
+    const handleAdd = () => {
+        const tag = input.trim();
+        if (tag && !has(tag)) {
+            add(tag);
+            setInput("");
+        }
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent) => {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            handleAdd();
+        }
+    };
+
+    return (
+        <div className="tag-editor">
+            <div className="tag-list">
+                {elements.map((tag) => (
+                    <span key={tag} className="tag">
+                        {tag}
+                        <button onClick={() => remove(tag)} className="tag-remove">
+                            x
+                        </button>
+                    </span>
+                ))}
+            </div>
+            <div className="tag-input-group">
+                <input
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="Add tag..."
+                    className="tag-input"
+                />
+                <button onClick={handleAdd} className="tag-add">
+                    Add
+                </button>
+            </div>
+        </div>
+    );
+}
+```
+
+## LWW Field: Inline Editor
+
+Use `useLWW` for fine-grained field subscriptions:
+
+```tsx
+// src/InlineEditor.tsx
+import { useLWW } from "@grove-js/crdt/react";
+
+export function InlineEditor({
+    table,
+    pk,
+    field,
+    placeholder,
+}: {
+    table: string;
+    pk: string;
+    field: string;
+    placeholder?: string;
+}) {
+    const { value, set } = useLWW<string>(table, pk, field);
+
+    return (
+        <input
+            value={value ?? ""}
+            onChange={(e) => set(e.target.value)}
+            placeholder={placeholder}
+            className="inline-editor"
+        />
+    );
+}
+```
+
+## How Sync Works End-to-End
+
+Here is what happens when User A edits a title and User B sees the update:
+
+1. **User A** types in the title input
+2. `update("title", "New Title")` calls `store.setField()`, creating a change with a new HLC
+3. The store notifies subscribers, React re-renders the component
+4. The provider periodically calls `client.push(store.getPendingChanges())`
+5. The Go server receives the push, merges via `SyncController.HandlePush()`
+6. The SSE stream detects the new change and sends an event
+7. **User B's** `CRDTStream` receives the event, calls `store.applyChanges()`
+8. `useSyncExternalStore` triggers React re-render on User B's screen
+9. User B sees the updated title
+
+The entire flow happens in sub-second latency with SSE streaming. If the SSE connection drops, the periodic pull/push sync catches up on the next interval.
+
+## Handling Offline
+
+The CRDT store works entirely in-memory on the client. When the network is unavailable:
+
+- Local mutations still work (stored in the `CRDTStore`)
+- Pending changes accumulate in `getPendingChanges()`
+- When connectivity returns, the SSE stream reconnects automatically
+- The next sync pushes all pending changes and pulls missed remote changes
+- The merge engine resolves any conflicts deterministically
+
+```tsx
+function OfflineIndicator() {
+    const { connected } = useStream();
+    const { pendingCount } = useSyncStatus();
+
+    if (connected) return null;
+
+    return (
+        <div className="offline-banner">
+            You are offline. {pendingCount} changes will sync when reconnected.
+        </div>
+    );
+}
+```
+
+## Production Considerations
+
+### Authentication
+
+Pass auth headers through the CRDT config:
+
+```tsx
+<CRDTProvider config={{
+    baseURL: "/api/sync",
+    nodeID: userId,
+    tables: ["documents"],
+    headers: {
+        Authorization: `Bearer ${authToken}`,
+    },
+}}>
+```
+
+### Node ID Strategy
+
+Use a stable, unique identifier per browser session:
+
+```typescript
+// Generate once per session, store in sessionStorage.
+function getNodeID(): string {
+    let id = sessionStorage.getItem("crdt-node-id");
+    if (!id) {
+        id = `browser-${crypto.randomUUID().slice(0, 8)}`;
+        sessionStorage.setItem("crdt-node-id", id);
+    }
+    return id;
+}
+```
+
+### Debouncing Updates
+
+For text inputs, debounce updates to avoid pushing every keystroke:
+
+```tsx
+import { useMemo } from "react";
+import { useLWW } from "@grove-js/crdt/react";
+
+function DebouncedEditor({ table, pk, field }: { table: string; pk: string; field: string }) {
+    const { value, set } = useLWW<string>(table, pk, field);
+    const [local, setLocal] = useState(value ?? "");
+
+    const debouncedSet = useMemo(() => {
+        let timer: ReturnType<typeof setTimeout>;
+        return (val: string) => {
+            clearTimeout(timer);
+            timer = setTimeout(() => set(val), 300);
+        };
+    }, [set]);
+
+    const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        setLocal(e.target.value);
+        debouncedSet(e.target.value);
+    };
+
+    // Sync remote changes to local state.
+    useEffect(() => {
+        if (value !== undefined) setLocal(value);
+    }, [value]);
+
+    return <input value={local} onChange={handleChange} />;
+}
+```
+
+### Error Boundaries
+
+Wrap CRDT components in error boundaries to handle sync failures gracefully:
+
+```tsx
+import { ErrorBoundary } from "react-error-boundary";
+
+function App() {
+    return (
+        <CRDTProvider config={config}>
+            <ErrorBoundary fallback={<div>Sync error. Please refresh.</div>}>
+                <DocumentList />
+            </ErrorBoundary>
+        </CRDTProvider>
+    );
+}
+```

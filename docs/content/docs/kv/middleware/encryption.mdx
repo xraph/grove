@@ -1,0 +1,148 @@
+---
+title: Encryption Middleware
+description: Transparent AES-GCM encryption for KV values at rest.
+---
+
+The encryption middleware transparently encrypts all values before they are stored and decrypts them when they are read. It uses AES-GCM (Galois/Counter Mode), which provides both confidentiality and integrity for stored data.
+
+## Installation
+
+```go
+import "github.com/xraph/grove/kv/middleware"
+```
+
+## Usage
+
+```go
+import (
+    "crypto/rand"
+
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/middleware"
+)
+
+// Generate a 32-byte key for AES-256
+key := make([]byte, 32)
+if _, err := rand.Read(key); err != nil {
+    log.Fatal(err)
+}
+
+encryptHook, err := middleware.NewEncrypt(key)
+if err != nil {
+    log.Fatal(err)
+}
+
+store, err := kv.Open(drv,
+    kv.WithHook(encryptHook),
+)
+```
+
+### Constructor
+
+```go
+func NewEncrypt(key []byte) (*EncryptHook, error)
+```
+
+| Parameter | Description |
+|---|---|
+| `key` | AES key -- must be 16 bytes (AES-128), 24 bytes (AES-192), or 32 bytes (AES-256) |
+
+The constructor returns an error if the key length is invalid.
+
+## How It Works
+
+The encryption middleware uses AES-GCM, an authenticated encryption mode that provides:
+
+- **Confidentiality** -- values are encrypted and unreadable without the key
+- **Integrity** -- any tampering with the ciphertext is detected on decryption
+- **Unique nonce per value** -- a cryptographically random nonce is generated for each encryption operation, ensuring that encrypting the same value twice produces different ciphertext
+
+### Write Path (Encrypt)
+
+```
+SET "user:123" = {"name": "Alice", "ssn": "123-45-6789"}
+  |
+  v
+[Generate random nonce] --> [AES-GCM Seal(nonce, plaintext)] --> [nonce || ciphertext]
+  |
+  v
+Driver stores encrypted bytes
+```
+
+### Read Path (Decrypt)
+
+```
+GET "user:123"
+  |
+  v
+Driver returns [nonce || ciphertext]
+  |
+  v
+[Split nonce from ciphertext] --> [AES-GCM Open(nonce, ciphertext)] --> plaintext
+  |
+  v
+Return decrypted value
+```
+
+The nonce is prepended to the ciphertext during encryption and stripped during decryption. This is handled automatically -- the application sees only plaintext values.
+
+## Key Sizes
+
+| Key Length | Algorithm | Security Level |
+|---|---|---|
+| 16 bytes | AES-128 | Good for most use cases |
+| 24 bytes | AES-192 | Higher security margin |
+| 32 bytes | AES-256 | Recommended for sensitive data |
+
+AES-256 (32-byte key) is recommended for production use.
+
+## Use Cases
+
+- **Sensitive data at rest** -- encrypt PII, credentials, tokens, or financial data stored in the KV store
+- **Compliance requirements** -- meet encryption-at-rest requirements for regulations like GDPR, HIPAA, or PCI-DSS
+- **Shared infrastructure** -- protect data when the backing store is shared or managed by a third party
+
+## Key Management Considerations
+
+The encryption middleware requires you to provide the key. How you manage that key is critical to the security of your data:
+
+- **Do not hard-code keys** in source code or configuration files checked into version control.
+- **Use a secrets manager** such as AWS Secrets Manager, HashiCorp Vault, or GCP Secret Manager to store and rotate keys.
+- **Key rotation:** The current middleware does not support automatic key rotation. To rotate keys, you must re-encrypt existing data with the new key. A common approach is to read all values, decrypt with the old key, and re-encrypt with the new key during a migration.
+- **Key loss:** If you lose the encryption key, all encrypted data becomes permanently unrecoverable. Ensure your key management system has appropriate backup and recovery procedures.
+
+## Encrypt and Decrypt Directly
+
+The `EncryptHook` exposes `Encrypt` and `Decrypt` methods for direct use outside the middleware pipeline:
+
+```go
+encryptHook, err := middleware.NewEncrypt(key)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Encrypt
+ciphertext, err := encryptHook.Encrypt([]byte("sensitive data"))
+
+// Decrypt
+plaintext, err := encryptHook.Decrypt(ciphertext)
+```
+
+## Combining with Compression
+
+When using both compression and encryption, register the compression hook **before** the encryption hook. Encrypted data has high entropy and does not compress effectively:
+
+```go
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewCompress(middleware.Gzip)),
+    kv.WithHook(encryptHook),
+)
+```
+
+## API Reference
+
+| Method | Description |
+|---|---|
+| `NewEncrypt(key)` | Create a new encryption hook (returns error if key length is invalid) |
+| `Encrypt(plaintext)` | Encrypt a byte slice, returning `nonce \|\| ciphertext` |
+| `Decrypt(ciphertext)` | Decrypt a byte slice, stripping the prepended nonce |

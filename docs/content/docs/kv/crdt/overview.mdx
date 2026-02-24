@@ -1,0 +1,163 @@
+---
+title: CRDT Integration
+description: Overview of CRDT support in Grove KV for distributed, eventually-consistent key-value storage.
+---
+
+The `kvcrdt` package bridges Grove's core CRDT engine (`github.com/xraph/grove/crdt`) into the KV store, enabling distributed, eventually-consistent state without a relational database. It provides CRDT-backed counters, registers, sets, and maps that persist to any KV backend and can be synchronized across stores.
+
+## What Are CRDTs?
+
+Conflict-Free Replicated Data Types (CRDTs) are data structures that can be replicated across multiple nodes and updated independently without coordination. Any two nodes that have seen the same set of updates will converge to the same state, regardless of the order updates arrive. This makes CRDTs ideal for systems that must tolerate network partitions, offline operation, or concurrent writes.
+
+Grove KV CRDTs are useful for:
+
+- **Multi-region replication** where edge nodes write to local KV stores and sync periodically
+- **Offline-first applications** that queue changes locally and merge when connectivity returns
+- **Collaborative editing** where multiple users or services update shared configuration or state
+- **Event aggregation** where counters and sets collect data from distributed sources
+
+## How KV Integrates with grove/crdt
+
+The `kvcrdt` package uses an adapter pattern. Each CRDT type wraps a core `grove/crdt` state struct and persists it as a serialized value in a KV store key. Every mutation follows a read-modify-write cycle:
+
+1. **Load** the serialized CRDT state from the KV store (or initialize a zero state if the key does not exist)
+2. **Apply** the operation (increment, set, add, etc.) to the in-memory state using core `grove/crdt` logic
+3. **Save** the updated state back to the KV store
+
+This means any KV backend that supports `GetRaw` and `SetRaw` can host CRDT state. The merge functions from `grove/crdt` handle convergence, while `kvcrdt` handles persistence.
+
+```
+  kvcrdt.Counter / Register / Set / Map
+       |
+  crdtBase (adapter)
+       |
+  loadState / saveState (codec.Encode/Decode)
+       |
+  kv.Store.GetRaw / SetRaw
+       |
+  Any KV backend (memory, Redis, BadgerDB, ...)
+```
+
+## Available Types
+
+Grove KV provides four CRDT types, each backed by a core `grove/crdt` state struct:
+
+| Type | Wraps | Merge Strategy | Use Case |
+|------|-------|---------------|----------|
+| **Counter** | `crdt.PNCounterState` | Per-node max of increments/decrements | View counts, scores, distributed counters |
+| **Register[T]** | `crdt.LWWRegister` | Highest HLC timestamp wins | User profiles, configuration values, scalar fields |
+| **Set[T]** | `crdt.ORSetState` | Add-wins observed-remove | Tags, member lists, distributed collections |
+| **Map** | `crdt.State` (per-field LWW) | Per-field highest HLC wins | Configuration maps, structured documents |
+
+See [CRDT Types](/docs/kv/crdt/types) for full API documentation and examples of each type.
+
+## Node Identity and Logical Clocks
+
+Every CRDT operation requires two pieces of context:
+
+### Node ID
+
+A unique string identifying the current node in the distributed system. Each node must have a distinct ID so that per-node counters, timestamps, and set tags are correctly attributed. Set it with `WithNodeID`:
+
+```go
+counter := kvcrdt.NewCounter(store, "page:views", kvcrdt.WithNodeID("node-us-east-1"))
+```
+
+If no node ID is provided, the default value `"default"` is used. In production, always set an explicit node ID.
+
+### Hybrid Logical Clock (HLC)
+
+CRDTs need causally-ordered timestamps to determine which write happened "later." Grove uses a Hybrid Logical Clock that combines wall-clock time with a logical counter and node ID. This produces totally-ordered timestamps without requiring clock synchronization between nodes.
+
+By default, `kvcrdt` creates a `crdt.NewHybridClock` using the configured node ID. You can supply a custom clock for testing or shared clock scenarios:
+
+```go
+clock := crdt.NewHybridClock("node-1")
+register := kvcrdt.NewRegister[string](store, "user:name",
+    kvcrdt.WithNodeID("node-1"),
+    kvcrdt.WithClock(clock),
+)
+```
+
+## Cross-Store Sync
+
+The `kvcrdt.Syncer` synchronizes CRDT state bidirectionally between two KV stores. It scans for keys matching a pattern, loads the CRDT state from both stores, merges them, and writes the merged result back to both.
+
+```go
+syncer := kvcrdt.NewSyncer(primaryStore, replicaStore,
+    kvcrdt.WithSyncInterval(10 * time.Second),
+    kvcrdt.WithKeyPattern("crdt:*"),
+)
+
+// One-shot sync.
+report, err := syncer.Sync(ctx)
+
+// Or run a background sync loop.
+syncer.Start(ctx)
+defer syncer.Stop()
+```
+
+See [Sync Engine](/docs/kv/crdt/sync-engine) for full details on sync configuration and behavior.
+
+## Use Cases
+
+### Multi-Region Replication
+
+Deploy KV stores at each region. Each region writes to its local store using CRDT types. A `Syncer` running between regions merges state periodically, guaranteeing convergence without distributed locks or leader election.
+
+### Offline-First Applications
+
+An embedded KV store (e.g., BadgerDB) on the client accumulates CRDT operations while offline. When connectivity returns, a single `Sync` call merges all changes with the server, resolving any conflicts automatically.
+
+### Collaborative Editing
+
+Multiple services or users update the same Map or Register concurrently. LWW semantics on registers and per-field LWW on maps ensure that the latest write wins deterministically, while counters and sets merge additively.
+
+### Distributed Feature Flags
+
+Use a CRDT Map to store feature flag configuration. Each edge node reads flags from its local KV store for zero-latency lookups while the `Syncer` propagates flag changes from the control plane.
+
+## Quick Example
+
+Create a distributed page view counter and increment it from two different nodes:
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+
+    "github.com/xraph/grove/kv"
+    kvcrdt "github.com/xraph/grove/kv/crdt"
+)
+
+func main() {
+    ctx := context.Background()
+
+    // Create two KV stores (simulating two nodes).
+    storeA := kv.NewMemoryStore()
+    storeB := kv.NewMemoryStore()
+
+    // Node A increments the counter.
+    counterA := kvcrdt.NewCounter(storeA, "crdt:page:views", kvcrdt.WithNodeID("node-a"))
+    _ = counterA.Increment(ctx, 5)
+
+    // Node B increments the counter independently.
+    counterB := kvcrdt.NewCounter(storeB, "crdt:page:views", kvcrdt.WithNodeID("node-b"))
+    _ = counterB.Increment(ctx, 3)
+
+    // Sync the two stores.
+    syncer := kvcrdt.NewSyncer(storeA, storeB)
+    _, _ = syncer.Sync(ctx)
+
+    // Both nodes now see the merged value.
+    val, _ := counterA.Value(ctx)
+    fmt.Println("Total views:", val) // Total views: 8
+}
+```
+
+## Next Steps
+
+- [CRDT Types](/docs/kv/crdt/types) for detailed API documentation on Counter, Register, Set, and Map
+- [Sync Engine](/docs/kv/crdt/sync-engine) for cross-store synchronization configuration and patterns

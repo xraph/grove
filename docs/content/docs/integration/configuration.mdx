@@ -1,0 +1,125 @@
+---
+title: Configuration
+description: Configure Grove via YAML files, environment variables, or programmatic options.
+---
+
+The Grove Forge extension supports multiple configuration sources with automatic merging. YAML configuration takes precedence, with programmatic options filling in gaps.
+
+## YAML Configuration
+
+Add a `grove` key under `extensions` in your Forge config file:
+
+```yaml
+# config.yaml
+extensions:
+  grove:
+    driver: postgres
+    dsn: "postgres://user:pass@localhost:5432/mydb"
+    disable_migrate: false
+    disable_routes: false
+    base_path: "/sync"
+```
+
+The extension also supports a top-level `grove` key for backward compatibility:
+
+```yaml
+# Legacy format
+grove:
+  driver: postgres
+  dsn: "postgres://user:pass@localhost:5432/mydb"
+```
+
+The namespaced `extensions.grove` key is checked first, then the top-level `grove` key.
+
+## Config Fields
+
+| Field | YAML Key | Type | Default | Description |
+|-------|----------|------|---------|-------------|
+| Driver | `driver` | `string` | `""` | Database driver name |
+| DSN | `dsn` | `string` | `""` | Connection string |
+| DisableRoutes | `disable_routes` | `bool` | `false` | Skip CRDT sync route registration |
+| DisableMigrate | `disable_migrate` | `bool` | `false` | Skip automatic migrations |
+| BasePath | `base_path` | `string` | `"/sync"` | URL prefix for CRDT sync routes |
+
+## Supported Driver Names
+
+| Name | Driver Module | Database |
+|------|--------------|----------|
+| `postgres` | `github.com/xraph/grove/drivers/pgdriver` | PostgreSQL, CockroachDB, Neon, Supabase |
+| `sqlite` | `github.com/xraph/grove/drivers/sqlitedriver` | SQLite |
+| `mysql` | `github.com/xraph/grove/drivers/mysqldriver` | MySQL, MariaDB |
+| `mongodb` | `github.com/xraph/grove/drivers/mongodriver` | MongoDB |
+| `turso` | `github.com/xraph/grove/drivers/tursodriver` | Turso (LibSQL) |
+| `clickhouse` | `github.com/xraph/grove/drivers/clickhousedriver` | ClickHouse |
+
+## Programmatic Options
+
+Options set via `ExtOption` functions are merged with YAML configuration:
+
+```go
+groveext.New(
+    groveext.WithDSN("postgres", dsn),     // Driver + DSN
+    groveext.WithDriver(pgdb),              // Pre-configured driver (takes precedence)
+    groveext.WithDisableMigrate(),          // Disable auto-migration
+    groveext.WithDisableRoutes(),           // Disable CRDT route registration
+    groveext.WithBasePath("/api/sync"),     // Custom sync route prefix
+    groveext.WithRequireConfig(true),       // Require YAML config
+)
+```
+
+## Merge Behavior
+
+When both YAML and programmatic options are provided:
+
+1. **Driver/DSN**: YAML takes precedence. If YAML has no driver, programmatic values are used.
+2. **Boolean flags**: Programmatic `true` values are additive — if either source sets a flag to `true`, it stays `true`.
+3. **BasePath**: YAML takes precedence. Programmatic fills in if YAML is empty.
+4. **WithDriver()**: A pre-configured driver instance always takes precedence over YAML `driver`+`dsn`.
+
+### Example: YAML + Programmatic
+
+```yaml
+# config.yaml
+extensions:
+  grove:
+    driver: postgres
+    dsn: "postgres://prod:secret@db.example.com/myapp"
+```
+
+```go
+// Programmatic options
+app.Use(groveext.New(
+    groveext.WithDSN("sqlite", "file::memory:"),  // Ignored — YAML takes precedence
+    groveext.WithDisableMigrate(),                  // Applied — YAML didn't set this
+    groveext.WithMigrations(appMigrations),          // Applied — not a config field
+    groveext.WithHook(&auditHook),                   // Applied — not a config field
+))
+
+// Result: postgres driver from YAML + disable_migrate from programmatic
+```
+
+## Require Config
+
+Use `WithRequireConfig(true)` to fail fast when no YAML config is found:
+
+```go
+app.Use(groveext.New(
+    groveext.WithRequireConfig(true), // Error if no YAML config
+))
+```
+
+This is useful in production to ensure the application doesn't fall back to defaults.
+
+## Config Lookup Order
+
+The extension resolves configuration in this order:
+
+1. **YAML config**: `extensions.grove` key → `grove` key
+2. **Programmatic options**: Values set via `ExtOption` functions
+3. **Defaults**: Empty config (no driver, no DSN)
+
+If no config is found and no programmatic driver is set, the extension returns a clear error:
+
+```
+grove: no driver configured; use WithDriver() or set driver/dsn in config
+```

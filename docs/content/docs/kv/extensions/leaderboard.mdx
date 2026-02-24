@@ -1,0 +1,235 @@
+---
+title: "Leaderboard"
+description: "Sorted leaderboard with ranked member/score entries, top-N queries, and rank lookups backed by Grove KV."
+---
+
+The `Leaderboard` extension provides a sorted leaderboard that stores member/score pairs in a KV-backed map. Scores are sorted on read, giving you top-N queries, rank lookups, and member management through a simple API.
+
+## Installation
+
+```go
+import "github.com/xraph/grove/kv/extension"
+```
+
+## Creating a Leaderboard
+
+```go
+board := extension.NewLeaderboard(store, "scores")
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `store` | `*kv.Store` | The backing KV store |
+| `key` | `string` | Logical name for the leaderboard (auto-prefixed with `lb:`) |
+
+The entire leaderboard is stored as a single serialized `map[string]float64` at `lb:<key>`.
+
+## API Reference
+
+### Add
+
+Adds a member with a score, or updates the score if the member already exists.
+
+```go
+func (lb *Leaderboard) Add(ctx context.Context, member string, score float64) error
+```
+
+```go
+err := board.Add(ctx, "alice", 2500)
+err = board.Add(ctx, "bob", 3100)
+err = board.Add(ctx, "carol", 1800)
+
+// Update alice's score.
+err = board.Add(ctx, "alice", 2750)
+```
+
+### Score
+
+Returns the score for a specific member. Returns `kv.ErrNotFound` if the member is not on the leaderboard.
+
+```go
+func (lb *Leaderboard) Score(ctx context.Context, member string) (float64, error)
+```
+
+```go
+score, err := board.Score(ctx, "alice")
+// score = 2750.0
+```
+
+### TopN
+
+Returns the top N entries sorted by score in **descending order** (highest first).
+
+```go
+func (lb *Leaderboard) TopN(ctx context.Context, n int) ([]LeaderboardEntry, error)
+```
+
+```go
+top, err := board.TopN(ctx, 10)
+for _, entry := range top {
+    fmt.Printf("#%d %s: %.0f\n", i+1, entry.Member, entry.Score)
+}
+// #1 bob: 3100
+// #2 alice: 2750
+// #3 carol: 1800
+```
+
+If `n` is greater than the number of members, all members are returned.
+
+### Rank
+
+Returns the **1-based rank** of a member (1 = highest score). Returns `kv.ErrNotFound` if the member is not on the leaderboard.
+
+```go
+func (lb *Leaderboard) Rank(ctx context.Context, member string) (int, error)
+```
+
+```go
+rank, err := board.Rank(ctx, "alice")
+// rank = 2 (bob has a higher score)
+```
+
+### Remove
+
+Removes a member from the leaderboard.
+
+```go
+func (lb *Leaderboard) Remove(ctx context.Context, member string) error
+```
+
+```go
+err := board.Remove(ctx, "carol")
+```
+
+### Size
+
+Returns the number of members on the leaderboard.
+
+```go
+func (lb *Leaderboard) Size(ctx context.Context) (int, error)
+```
+
+```go
+n, err := board.Size(ctx)
+// n = 2
+```
+
+## LeaderboardEntry
+
+The `TopN` method returns a slice of `LeaderboardEntry` values:
+
+```go
+type LeaderboardEntry struct {
+    Member string  `json:"member"`
+    Score  float64 `json:"score"`
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Member` | `string` | The member identifier |
+| `Score` | `float64` | The member's score |
+
+## Example: Game Leaderboard
+
+```go
+package main
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    "net/http"
+
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/extension"
+    "github.com/xraph/grove/kv/drivers/redisdriver"
+)
+
+func main() {
+    ctx := context.Background()
+
+    rdb := redisdriver.New()
+    rdb.Open(ctx, "redis://localhost:6379/0")
+
+    store, _ := kv.Open(rdb)
+    defer store.Close()
+
+    board := extension.NewLeaderboard(store, "game-highscores")
+
+    mux := http.NewServeMux()
+
+    // Submit a score.
+    mux.HandleFunc("POST /score", func(w http.ResponseWriter, r *http.Request) {
+        var req struct {
+            Player string  `json:"player"`
+            Score  float64 `json:"score"`
+        }
+        json.NewDecoder(r.Body).Decode(&req)
+
+        if err := board.Add(r.Context(), req.Player, req.Score); err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+
+        rank, _ := board.Rank(r.Context(), req.Player)
+
+        json.NewEncoder(w).Encode(map[string]any{
+            "player": req.Player,
+            "score":  req.Score,
+            "rank":   rank,
+        })
+    })
+
+    // Get the top 10.
+    mux.HandleFunc("GET /leaderboard", func(w http.ResponseWriter, r *http.Request) {
+        top, err := board.TopN(r.Context(), 10)
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+
+        type entry struct {
+            Rank   int     `json:"rank"`
+            Player string  `json:"player"`
+            Score  float64 `json:"score"`
+        }
+
+        results := make([]entry, len(top))
+        for i, e := range top {
+            results[i] = entry{Rank: i + 1, Player: e.Member, Score: e.Score}
+        }
+
+        json.NewEncoder(w).Encode(results)
+    })
+
+    fmt.Println("listening on :8080")
+    http.ListenAndServe(":8080", mux)
+}
+```
+
+## Key Layout
+
+The leaderboard is stored as a single key:
+
+```
+lb:<key>
+```
+
+For example:
+
+```
+lb:game-highscores
+lb:scores
+```
+
+The value is a serialized `map[string]float64` containing all member/score pairs.
+
+## Implementation Notes
+
+- **Sorting happens on read.** Each call to `TopN` or `Rank` loads the full score map and sorts it. This is efficient for leaderboards with up to tens of thousands of members.
+- **For very large leaderboards** (100K+ members) backed by Redis, consider using Redis sorted sets directly via `store.Unwrap()` for O(log N) rank lookups.
+- **Scores are `float64`**, supporting both integer and fractional scoring systems.
+- **Rank ties** are not explicitly handled -- members with the same score may appear in any order relative to each other, but they will share the same rank value from the `Rank` method.

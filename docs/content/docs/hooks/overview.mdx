@@ -228,6 +228,12 @@ func (h *PIIRedactor) AfterQuery(ctx context.Context, qc *hook.QueryContext, res
 db.Hooks().AddHook(&PIIRedactor{})
 ```
 
+## KV Store Hooks
+
+The Key-Value store module (`grove/kv`) reuses the same hook system. KV operations are mapped to extended `hook.Operation` constants at offset 100 (`OpGet = 100`, `OpSet = 101`, etc.). All KV middleware (logging, namespace, stampede, compression, encryption, cache, retry, circuit breaker) implements `PreQueryHook` and/or `PostQueryHook`.
+
+KV-specific metadata is stored in `QueryContext.Values["_kv_keys"]` and the primary key in `QueryContext.RawQuery`. See the [KV Middleware Overview](/docs/kv/middleware/overview) for details.
+
 ## Performance
 
 Target: **< 1 microsecond per hook** in the chain. Hooks are called via direct interface dispatch (type assertion), not reflection.

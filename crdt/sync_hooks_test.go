@@ -108,7 +108,7 @@ func TestBaseSyncHook_NoOpDefaults(t *testing.T) {
 	}
 
 	// AfterInboundChange should return nil.
-	if err := h.AfterInboundChange(ctx, change); err != nil {
+	if err = h.AfterInboundChange(ctx, change); err != nil {
 		t.Errorf("AfterInboundChange error: %v", err)
 	}
 
@@ -306,7 +306,7 @@ func TestSyncHookChain_EmptyChain_PassesThrough(t *testing.T) {
 		t.Error("empty chain should pass through BeforeInboundChange")
 	}
 
-	if err := chain.AfterInboundChange(ctx, change); err != nil {
+	if err = chain.AfterInboundChange(ctx, change); err != nil {
 		t.Error("empty chain should pass through AfterInboundChange")
 	}
 
@@ -332,7 +332,7 @@ func TestSyncHookChain_NilChain_PassesThrough(t *testing.T) {
 		t.Error("nil chain should pass through BeforeInboundChange")
 	}
 
-	if err := chain.AfterInboundChange(ctx, change); err != nil {
+	if err = chain.AfterInboundChange(ctx, change); err != nil {
 		t.Error("nil chain should pass through AfterInboundChange")
 	}
 

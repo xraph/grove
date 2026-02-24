@@ -1,0 +1,341 @@
+---
+title: "Store Interface"
+description: "Complete API reference for the Grove KV Store: core commands, raw access, multi-key operations, TTL, scanning, options, hooks, and the batch builder."
+---
+
+The `Store` is the top-level KV handle. It manages the driver connection, hook engine, default codec, and provides entry points for all KV operations.
+
+## Creating a Store
+
+Use `kv.Open` to create a Store with a connected driver:
+
+```go
+import (
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/codec"
+    "github.com/xraph/grove/kv/drivers/redisdriver"
+)
+
+rdb := redisdriver.New()
+rdb.Open(ctx, "redis://localhost:6379/0")
+
+store, err := kv.Open(rdb,
+    kv.WithCodec(codec.MsgPack()),   // optional: override default JSON codec
+    kv.WithHook(&myLoggingHook{}),   // optional: register hooks at creation
+)
+```
+
+The driver must be connected before passing it to `kv.Open`. The Store takes ownership of the driver and will close it when `store.Close()` is called.
+
+## Store Options
+
+| Option | Description |
+|--------|-------------|
+| `kv.WithCodec(c)` | Set the default codec for the store (default: JSON) |
+| `kv.WithHook(h, scope...)` | Register a hook with optional scope at store creation |
+
+## Core Methods
+
+### Get
+
+Retrieves the value for `key` and decodes it into `dest` using the store's codec.
+
+```go
+func (s *Store) Get(ctx context.Context, key string, dest any) error
+```
+
+```go
+var user User
+err := store.Get(ctx, "user:1", &user)
+if errors.Is(err, kv.ErrNotFound) {
+    // key does not exist
+}
+```
+
+### Set
+
+Encodes `value` using the store's codec and stores it under `key`. Accepts optional `SetOption` values for TTL and conditional writes.
+
+```go
+func (s *Store) Set(ctx context.Context, key string, value any, opts ...SetOption) error
+```
+
+```go
+err := store.Set(ctx, "user:1", &user, kv.WithTTL(time.Hour))
+```
+
+### Delete
+
+Removes one or more keys.
+
+```go
+func (s *Store) Delete(ctx context.Context, keys ...string) error
+```
+
+```go
+err := store.Delete(ctx, "user:1", "user:2", "user:3")
+```
+
+### Exists
+
+Returns the count of keys that exist.
+
+```go
+func (s *Store) Exists(ctx context.Context, keys ...string) (int64, error)
+```
+
+```go
+count, err := store.Exists(ctx, "user:1", "user:2")
+fmt.Printf("%d keys exist\n", count)
+```
+
+### Ping
+
+Verifies the store is reachable.
+
+```go
+func (s *Store) Ping(ctx context.Context) error
+```
+
+### Close
+
+Closes the store and releases all resources, including the underlying driver connection.
+
+```go
+func (s *Store) Close() error
+```
+
+## Raw Methods
+
+Raw methods bypass the store-level codec. They are used internally by `Keyspace[T]` to apply its own codec, and can be used directly when you manage serialization yourself.
+
+### GetRaw
+
+Retrieves the raw bytes for a key without codec decoding.
+
+```go
+func (s *Store) GetRaw(ctx context.Context, key string) ([]byte, error)
+```
+
+### SetRaw
+
+Stores raw bytes under a key without codec encoding.
+
+```go
+func (s *Store) SetRaw(ctx context.Context, key string, value []byte, opts ...SetOption) error
+```
+
+## Multi-Key Operations
+
+Multi-key methods require the driver to implement `driver.BatchDriver`. All built-in drivers except BoltDB support batch operations.
+
+### MGet
+
+Retrieves multiple keys. Values are decoded through the store's codec into a `map[string]any`.
+
+```go
+func (s *Store) MGet(ctx context.Context, keys []string, dest map[string]any) error
+```
+
+```go
+dest := make(map[string]any)
+err := store.MGet(ctx, []string{"user:1", "user:2", "user:3"}, dest)
+for key, val := range dest {
+    fmt.Printf("%s => %v\n", key, val)
+}
+```
+
+### MSet
+
+Sets multiple key-value pairs. Values are encoded through the store's codec.
+
+```go
+func (s *Store) MSet(ctx context.Context, pairs map[string]any, opts ...SetOption) error
+```
+
+```go
+pairs := map[string]any{
+    "config:theme":    "dark",
+    "config:language": "en",
+    "config:timezone": "UTC",
+}
+err := store.MSet(ctx, pairs, kv.WithTTL(24*time.Hour))
+```
+
+## TTL Operations
+
+TTL methods require the driver to implement `driver.TTLDriver`. Redis, Memcached, DynamoDB, and Badger all support TTL.
+
+### TTL
+
+Returns the remaining time-to-live for a key.
+
+```go
+func (s *Store) TTL(ctx context.Context, key string) (time.Duration, error)
+```
+
+```go
+ttl, err := store.TTL(ctx, "session:abc")
+if ttl == -1 {
+    fmt.Println("key has no expiry")
+}
+```
+
+### Expire
+
+Sets or updates the TTL on an existing key.
+
+```go
+func (s *Store) Expire(ctx context.Context, key string, ttl time.Duration) error
+```
+
+```go
+err := store.Expire(ctx, "session:abc", 30*time.Minute)
+```
+
+## Scan
+
+Iterates over keys matching a glob pattern. Requires the driver to implement `driver.ScanDriver`. The callback `fn` is called for each matching key.
+
+```go
+func (s *Store) Scan(ctx context.Context, pattern string, fn func(key string) error) error
+```
+
+```go
+err := store.Scan(ctx, "user:*", func(key string) error {
+    fmt.Println("found key:", key)
+    return nil
+})
+```
+
+Return a non-nil error from the callback to stop iteration early.
+
+## Set Options
+
+`SetOption` values configure individual `Set` and `SetRaw` calls:
+
+| Option | Description |
+|--------|-------------|
+| `kv.WithTTL(d)` | Set the TTL for this key. Zero means no expiry. |
+| `kv.WithNX()` | Only set the key if it does **not** already exist. Returns `kv.ErrConflict` if the key exists. |
+| `kv.WithXX()` | Only set the key if it **already** exists. Returns `kv.ErrNotFound` if the key is missing. |
+| `kv.WithCAS(version)` | Compare-and-swap: only set if the stored version matches. |
+
+`WithNX` and `WithXX` require the driver to implement `driver.CASDriver`.
+
+```go
+// Set only if key does not exist (distributed lock pattern).
+err := store.Set(ctx, "lock:resource", &lockData, kv.WithNX(), kv.WithTTL(30*time.Second))
+
+// Update only if key already exists.
+err = store.Set(ctx, "user:1", &updatedUser, kv.WithXX())
+```
+
+## Accessor Methods
+
+### Driver
+
+Returns the underlying KV driver. Use this with typed Unwrap functions to access driver-specific features.
+
+```go
+func (s *Store) Driver() driver.Driver
+```
+
+```go
+// Access Redis-specific features.
+rdb := redisdriver.Unwrap(store)
+rdb.Client().HSet(ctx, "hash:1", "field", "value")
+```
+
+### Hooks
+
+Returns the hook engine for registering additional hooks after store creation.
+
+```go
+func (s *Store) Hooks() *hook.Engine
+```
+
+```go
+store.Hooks().AddHook(&AuditLogger{}, hook.Scope{
+    Priority: 1,
+})
+```
+
+### Codec
+
+Returns the store's default codec.
+
+```go
+func (s *Store) Codec() codec.Codec
+```
+
+## Batch Builder
+
+The `Batch` provides a fluent builder API for composing multi-key operations (gets, sets, and deletes) into a single execution. The driver must implement `driver.BatchDriver`.
+
+### Creating a Batch
+
+```go
+batch := kv.NewBatch(store)
+```
+
+### Building Operations
+
+```go
+result, err := kv.NewBatch(store).
+    Set("user:1", &alice).
+    Set("user:2", &bob).
+    Get("config:theme", "config:language").
+    Delete("temp:session").
+    WithOptions(kv.WithTTL(time.Hour)).
+    Exec(ctx)
+```
+
+### BatchResult
+
+`Exec` returns a `BatchResult` containing retrieved values and operation counts:
+
+```go
+type BatchResult struct {
+    Values  map[string][]byte  // Raw bytes from Get operations
+    Written int64              // Number of keys written
+    Deleted int64              // Number of keys deleted
+}
+```
+
+Decode individual values from the result:
+
+```go
+var theme string
+err := result.Decode("config:theme", &theme, store.Codec())
+```
+
+## Sentinel Errors
+
+| Error | Description |
+|-------|-------------|
+| `kv.ErrNotFound` | Key does not exist |
+| `kv.ErrConflict` | CAS version mismatch or NX conflict |
+| `kv.ErrStoreClosed` | Operation on a closed store |
+| `kv.ErrNotSupported` | Driver does not support the operation |
+| `kv.ErrHookDenied` | A hook denied the operation |
+| `kv.ErrCodecEncode` | Value encoding failed |
+| `kv.ErrCodecDecode` | Value decoding failed |
+| `kv.ErrKeyEmpty` | Empty key provided |
+| `kv.ErrNilValue` | Nil value provided to Set |
+
+## KV Operations
+
+Every command passes through the hook engine as an `Operation`. These are the KV-specific operations:
+
+| Operation | Command | Description |
+|-----------|---------|-------------|
+| `kv.OpGet` | GET | Retrieve a single key |
+| `kv.OpSet` | SET | Store a value under a key |
+| `kv.OpDelete` | DEL | Remove one or more keys |
+| `kv.OpExists` | EXISTS | Check key existence |
+| `kv.OpMGet` | MGET | Retrieve multiple keys |
+| `kv.OpMSet` | MSET | Store multiple key-value pairs |
+| `kv.OpTTL` | TTL | Get remaining TTL |
+| `kv.OpExpire` | EXPIRE | Set TTL on existing key |
+| `kv.OpScan` | SCAN | Iterate over matching keys |

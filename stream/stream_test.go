@@ -213,7 +213,7 @@ func TestStream_ForEach_CallbackError(t *testing.T) {
 	callbackErr := errors.New("callback failed")
 
 	count := 0
-	err := ForEach[int](s, func(v int) error {
+	err := ForEach[int](s, func(_ int) error {
 		count++
 		if count == 2 {
 			return callbackErr
@@ -366,7 +366,7 @@ func (m *batchMockCursor) Err() error {
 // from a pre-defined set of batches. Each batch is a slice of int rows.
 func makeBatchFetcher(batches [][]int) func(offset, limit int) (Cursor, error) {
 	batchIdx := 0
-	return func(offset, limit int) (Cursor, error) {
+	return func(_, _ int) (Cursor, error) {
 		if batchIdx >= len(batches) {
 			// Return empty cursor to signal end.
 			return &batchMockCursor{cols: []string{"value"}}, nil
@@ -422,7 +422,7 @@ func TestBatchCursor_EmptyBatch(t *testing.T) {
 func TestBatchCursor_FirstBatchEmpty(t *testing.T) {
 	// The very first fetch returns no rows.
 	calls := 0
-	fetcher := func(offset, limit int) (Cursor, error) {
+	fetcher := func(_, _ int) (Cursor, error) {
 		calls++
 		return &batchMockCursor{cols: []string{"value"}}, nil
 	}
@@ -435,7 +435,7 @@ func TestBatchCursor_FirstBatchEmpty(t *testing.T) {
 
 func TestBatchCursor_FetchError(t *testing.T) {
 	fetchErr := errors.New("database connection lost")
-	fetcher := func(offset, limit int) (Cursor, error) {
+	fetcher := func(_, _ int) (Cursor, error) {
 		return nil, fetchErr
 	}
 	bc := NewBatchCursor(fetcher, 10)
@@ -447,7 +447,7 @@ func TestBatchCursor_FetchError(t *testing.T) {
 func TestBatchCursor_FetchErrorOnSecondBatch(t *testing.T) {
 	fetchErr := errors.New("timeout on second batch")
 	call := 0
-	fetcher := func(offset, limit int) (Cursor, error) {
+	fetcher := func(_, _ int) (Cursor, error) {
 		call++
 		if call == 1 {
 			rows := [][]any{{1}, {2}}
@@ -527,7 +527,7 @@ func TestBatchCursor_Err_NoError(t *testing.T) {
 
 func TestBatchCursor_CursorIterError(t *testing.T) {
 	iterErr := errors.New("cursor iteration error")
-	fetcher := func(offset, limit int) (Cursor, error) {
+	fetcher := func(_, _ int) (Cursor, error) {
 		return &batchMockCursor{
 			rows:    [][]any{{1}},
 			cols:    []string{"value"},

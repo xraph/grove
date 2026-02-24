@@ -48,7 +48,7 @@ type Driver interface {
 type Option func(*DriverOptions)
 
 // DriverOptions holds driver-level configuration.
-type DriverOptions struct {
+type DriverOptions struct { //nolint:revive // DriverOptions is the established public API name
 	PoolSize     int
 	QueryTimeout time.Duration
 	Logger       *slog.Logger

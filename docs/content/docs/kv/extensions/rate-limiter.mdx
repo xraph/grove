@@ -1,0 +1,189 @@
+---
+title: "Rate Limiter"
+description: "Distributed rate limiting with a sliding window counter approach, backed by any Grove KV store."
+---
+
+The `RateLimiter` extension provides distributed rate limiting using a sliding window counter. It tracks request counts per key and enforces a maximum number of requests within a configurable time window.
+
+## Installation
+
+```go
+import "github.com/xraph/grove/kv/extension"
+```
+
+## Creating a Rate Limiter
+
+```go
+limiter := extension.NewRateLimiter(store, "api", 100, time.Minute)
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `store` | `*kv.Store` | The backing KV store |
+| `prefix` | `string` | Key prefix for rate limit counters |
+| `rate` | `int` | Maximum number of allowed requests per window |
+| `window` | `time.Duration` | Duration of the sliding window |
+
+The limiter stores counters at keys formatted as `<prefix>:<key>`, with a TTL equal to the window duration. When the window expires, the counter resets automatically.
+
+## API Reference
+
+### Allow
+
+Checks whether a request identified by `key` is within the rate limit. If allowed, the counter is incremented.
+
+```go
+func (rl *RateLimiter) Allow(ctx context.Context, key string) (*RateLimitResult, error)
+```
+
+```go
+result, err := limiter.Allow(ctx, "user:u_123")
+if err != nil {
+    // handle error
+}
+
+if !result.Allowed {
+    // rate limit exceeded
+}
+```
+
+### Reset
+
+Clears the rate limit counter for a given key, allowing the full rate again immediately.
+
+```go
+func (rl *RateLimiter) Reset(ctx context.Context, key string) error
+```
+
+```go
+err := limiter.Reset(ctx, "user:u_123")
+```
+
+## RateLimitResult
+
+The `Allow` method returns a `*RateLimitResult` struct with the following fields:
+
+```go
+type RateLimitResult struct {
+    Allowed   bool      // Whether the request is allowed
+    Remaining int       // Number of requests remaining in the current window
+    ResetAt   time.Time // When the current window resets
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Allowed` | `bool` | `true` if the request is within the rate limit |
+| `Remaining` | `int` | Number of requests remaining before the limit is reached (0 when exceeded) |
+| `ResetAt` | `time.Time` | Timestamp when the current window expires and the counter resets |
+
+## How It Works
+
+The rate limiter uses a **sliding window counter** approach:
+
+1. On each `Allow` call, the current count for the key is read from the store.
+2. If the count is at or above the configured `rate`, the request is denied (`Allowed = false`).
+3. Otherwise, the counter is incremented and written back with a TTL equal to the `window` duration.
+4. When the TTL expires, the key is automatically removed and the counter resets to zero.
+
+## Example: API Rate Limiting per User
+
+```go
+package main
+
+import (
+    "encoding/json"
+    "net/http"
+    "strconv"
+    "time"
+
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/extension"
+    "github.com/xraph/grove/kv/drivers/redisdriver"
+)
+
+func main() {
+    ctx := context.Background()
+
+    rdb := redisdriver.New()
+    rdb.Open(ctx, "redis://localhost:6379/0")
+
+    store, _ := kv.Open(rdb)
+    defer store.Close()
+
+    // 100 requests per minute per user.
+    limiter := extension.NewRateLimiter(store, "api", 100, time.Minute)
+
+    mux := http.NewServeMux()
+    mux.HandleFunc("/api/data", RateLimitMiddleware(limiter, handleData))
+
+    http.ListenAndServe(":8080", mux)
+}
+
+func RateLimitMiddleware(limiter *extension.RateLimiter, next http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        // Use the client IP as the rate limit key.
+        key := r.RemoteAddr
+
+        result, err := limiter.Allow(r.Context(), key)
+        if err != nil {
+            http.Error(w, "internal error", http.StatusInternalServerError)
+            return
+        }
+
+        // Set standard rate limit headers.
+        w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(result.Remaining))
+        w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(result.ResetAt.Unix(), 10))
+
+        if !result.Allowed {
+            w.Header().Set("Retry-After", strconv.FormatInt(int64(time.Until(result.ResetAt).Seconds()), 10))
+            http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+            return
+        }
+
+        next(w, r)
+    }
+}
+
+func handleData(w http.ResponseWriter, r *http.Request) {
+    json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+```
+
+## Example: Per-Endpoint Rate Limiting
+
+You can create separate limiters for different endpoints or combine the endpoint path into the key:
+
+```go
+// Strict limit on auth endpoints.
+authLimiter := extension.NewRateLimiter(store, "auth", 5, time.Minute)
+
+// Generous limit on read endpoints.
+readLimiter := extension.NewRateLimiter(store, "read", 1000, time.Minute)
+
+// Or use a single limiter with composite keys.
+limiter := extension.NewRateLimiter(store, "rl", 100, time.Minute)
+
+// Key includes both user and endpoint.
+result, _ := limiter.Allow(ctx, "user:u_123:/api/orders")
+```
+
+## Key Layout
+
+Rate limit counters are stored with the following key pattern:
+
+```
+<prefix>:<key>
+```
+
+For example:
+
+```
+api:user:u_123
+auth:192.168.1.1
+rl:user:u_123:/api/orders
+```
+
+Each key has a TTL equal to the configured window, so counters are automatically cleaned up when the window expires.

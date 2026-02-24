@@ -28,7 +28,7 @@ func (r *Registry) Register(model any) (*Table, error) {
 
 	// Fast path: return cached table.
 	if v, ok := r.tables.Load(typ); ok {
-		return v.(*Table), nil
+		return v.(*Table), nil //nolint:errcheck // sync.Map always stores *Table
 	}
 
 	// Slow path: build the table metadata.
@@ -39,7 +39,7 @@ func (r *Registry) Register(model any) (*Table, error) {
 
 	// Store or load the existing value in case of a concurrent registration.
 	actual, _ := r.tables.LoadOrStore(typ, table)
-	return actual.(*Table), nil
+	return actual.(*Table), nil //nolint:errcheck // sync.Map always stores *Table
 }
 
 // Get returns the Table for a registered model type.
@@ -54,7 +54,7 @@ func (r *Registry) Get(model any) *Table {
 	if !ok {
 		return nil
 	}
-	return v.(*Table)
+	return v.(*Table) //nolint:errcheck // sync.Map always stores *Table
 }
 
 // MustGet is like Get but panics if the model is not registered.

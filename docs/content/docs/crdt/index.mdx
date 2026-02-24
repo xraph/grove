@@ -1,0 +1,121 @@
+---
+title: CRDT Overview
+description: Conflict-Free Replicated Data Types for offline-first, multi-node, and eventually-consistent applications with Grove.
+---
+
+Grove includes an optional CRDT (Conflict-Free Replicated Data Type) layer that enables offline-first, multi-node, and eventually-consistent use cases. It tracks field-level changes with Hybrid Logical Clocks and merges them automatically during sync.
+
+## Why CRDTs?
+
+Traditional databases rely on a single source of truth. When multiple nodes make concurrent edits, you need conflict resolution. CRDTs solve this mathematically: any two nodes that have seen the same set of updates will converge to the same state, regardless of the order updates arrive.
+
+Grove CRDTs are useful for:
+
+- **Offline-first apps** that queue changes locally and sync when connectivity returns
+- **Multi-node deployments** where edge servers process writes independently
+- **Real-time collaboration** where multiple users edit the same document
+- **Event sourcing** with guaranteed convergence across replicas
+
+## Three CRDT Types
+
+Grove supports three field-level CRDT types. Tag struct fields to opt in:
+
+| Type | Tag | Merge Strategy | Use Case |
+|------|-----|---------------|----------|
+| **LWW-Register** | `crdt:lww` | Highest HLC timestamp wins | Strings, booleans, JSON objects |
+| **PN-Counter** | `crdt:counter` | Per-node max of increments/decrements | View counts, scores, balances |
+| **OR-Set** | `crdt:set` | Add-wins union with observed-remove | Tags, categories, member lists |
+
+Fields without `crdt:` tags work normally with zero overhead.
+
+## How It Works
+
+```
+  Model (struct tags)
+       |
+  Plugin (Grove hook)
+       |
+  Shadow Table (_<table>_crdt)
+       |
+  HLC Clock (Hybrid Logical Clock)
+       |
+  Syncer (pull/push protocol)
+       |
+  Transport (HTTP / SSE / custom)
+       |
+  Remote Node
+```
+
+1. **Struct tags** declare which fields are CRDT-enabled and their type
+2. **Plugin** intercepts mutations (insert/update/delete) via Grove hooks and records changes in shadow tables
+3. **Shadow tables** store per-field CRDT state alongside the primary table without modifying its schema
+4. **HLC clock** generates causally-ordered timestamps without coordination between nodes
+5. **Syncer** orchestrates two-phase sync: pull remote changes and merge, then push local changes
+6. **Transport** handles the network layer (HTTP, SSE streaming, or custom protocols)
+
+## Architecture
+
+```
+grove/crdt/
+  crdt.go          Core types: CRDTType, State, FieldState, ChangeRecord
+  clock.go         HLC implementation
+  register.go      LWW-Register merge
+  counter.go       PN-Counter merge
+  set.go           OR-Set merge (add-wins)
+  merge.go         MergeEngine: field + state merging
+  plugin.go        Plugin (Grove hook integration)
+  hooks.go         PostMutation/PreQuery hooks
+  metadata.go      Shadow table read/write
+  sync.go          Syncer: push/pull orchestration + StreamSync
+  sync_hooks.go    SyncHook interface for intercepting sync data
+  transport.go     Transport interface, HTTPClient, StreamingTransport
+  server.go        SyncController + HTTPHandler (standalone)
+  options.go       Functional options
+  inspect.go       Debug/inspect utilities
+  migrations.go    Shadow table DDL
+```
+
+## Key Concepts
+
+- **HLC (Hybrid Logical Clock)** combines wall-clock time with a logical counter and node ID for total ordering without coordination
+- **Shadow tables** (`_<table>_crdt`) store CRDT metadata alongside primary data; your primary table schema is never modified
+- **Tombstones** mark deleted records so deletions propagate during sync; they expire after a configurable TTL (default: 7 days)
+- **Sync hooks** intercept changes flowing between nodes for validation, filtering, transformation, or audit logging
+- **Transport** is pluggable: use HTTP, SSE streaming, or implement your own for WebSocket, gRPC, NATS, etc.
+
+## Quick Example
+
+```go
+import (
+    "github.com/xraph/grove/crdt"
+    "github.com/xraph/grove/hook"
+)
+
+// 1. Define a CRDT-enabled model
+type Document struct {
+    grove.BaseModel `grove:"table:documents,alias:d"`
+    ID        string   `grove:"id,pk"`
+    Title     string   `grove:"title,crdt:lww"`
+    ViewCount int64    `grove:"view_count,crdt:counter"`
+    Tags      []string `grove:"tags,type:jsonb,crdt:set"`
+}
+
+// 2. Create plugin and attach to DB
+plugin := crdt.New(crdt.WithNodeID("node-1"))
+db.Hooks().AddHook(plugin, hook.Scope{Tables: []string{"documents"}})
+
+// 3. Sync with a remote node
+syncer := crdt.NewSyncer(plugin,
+    crdt.WithTransport(crdt.HTTPTransport("https://cloud.example.com/sync")),
+    crdt.WithSyncTables("documents"),
+)
+report, err := syncer.Sync(ctx)
+```
+
+## Next Steps
+
+- [Getting Started](/docs/crdt/getting-started) for a complete setup walkthrough
+- [CRDT Types](/docs/crdt/types) for deep dives into LWW, Counter, and Set semantics
+- [Sync Protocol](/docs/crdt/sync) for transport, syncer, and hook details
+- [SSE Streaming](/docs/crdt/streaming) for real-time change propagation
+- [TypeScript Client](/docs/crdt/typescript-client) for browser and React integration

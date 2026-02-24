@@ -13,10 +13,13 @@ GOFLAGS=-v
 LDFLAGS=-ldflags "-s -w"
 
 # Driver sub-modules (each has its own go.mod)
-DRIVER_MODULES=pgdriver mysqldriver sqlitedriver mongodriver tursodriver clickhousedriver
+DRIVER_MODULES=drivers/pgdriver drivers/mysqldriver drivers/sqlitedriver drivers/mongodriver drivers/tursodriver drivers/clickhousedriver drivers/esdriver
 
-# All sub-modules (drivers + extension + bench)
-ALL_SUBMODULES=$(DRIVER_MODULES) extension bench
+# KV driver sub-modules (each has its own go.mod)
+KV_DRIVER_MODULES=kv/drivers/badgerdriver kv/drivers/boltdriver kv/drivers/dynamodriver kv/drivers/memcacheddriver kv/drivers/redisdriver
+
+# All sub-modules (drivers + kv drivers + extension + bench + kv)
+ALL_SUBMODULES=$(DRIVER_MODULES) $(KV_DRIVER_MODULES) extension bench kv
 
 # Colors for output
 RED=\033[0;31m
@@ -87,10 +90,15 @@ build-all: build
 	@echo "$(BLUE)Building all driver sub-modules...$(NC)"
 	@for mod in $(DRIVER_MODULES); do \
 		echo "$(BLUE)  Building $$mod...$(NC)"; \
-		cd $$mod && $(GO) build ./... && cd .. || exit 1; \
+		(cd $$mod && $(GO) build ./...) || exit 1; \
+	done
+	@echo "$(BLUE)Building KV driver sub-modules...$(NC)"
+	@for mod in $(KV_DRIVER_MODULES); do \
+		echo "$(BLUE)  Building $$mod...$(NC)"; \
+		(cd $$mod && $(GO) build ./...) || exit 1; \
 	done
 	@echo "$(BLUE)  Building extension...$(NC)"
-	@cd extension && $(GO) build ./... && cd ..
+	@(cd extension && $(GO) build ./...)
 	@echo "$(GREEN)✓ All modules built$(NC)"
 
 ## run (r): Run the application
@@ -150,9 +158,9 @@ lint l:
 
 ## lint-all: Run linter across all modules
 lint-all: lint
-	@for mod in $(DRIVER_MODULES) extension; do \
+	@for mod in $(DRIVER_MODULES) $(KV_DRIVER_MODULES) extension kv; do \
 		echo "$(BLUE)  Linting $$mod...$(NC)"; \
-		cd $$mod && golangci-lint run ./... && cd .. || exit 1; \
+		(cd $$mod && golangci-lint run ./...) || exit 1; \
 	done
 	@echo "$(GREEN)✓ All modules linted$(NC)"
 
@@ -173,7 +181,7 @@ vet v:
 vet-all: vet
 	@for mod in $(ALL_SUBMODULES); do \
 		echo "$(BLUE)  Vetting $$mod...$(NC)"; \
-		cd $$mod && $(GO) vet ./... && cd .. || exit 1; \
+		(cd $$mod && $(GO) vet ./...) || exit 1; \
 	done
 	@echo "$(GREEN)✓ All modules vetted$(NC)"
 
@@ -201,9 +209,9 @@ test t:
 
 ## test-all: Run tests across all modules
 test-all: test
-	@for mod in $(DRIVER_MODULES) extension; do \
+	@for mod in $(DRIVER_MODULES) $(KV_DRIVER_MODULES) extension kv; do \
 		echo "$(BLUE)  Testing $$mod...$(NC)"; \
-		cd $$mod && $(GO) test -v ./... && cd .. || exit 1; \
+		(cd $$mod && $(GO) test -v ./...) || exit 1; \
 	done
 	@echo "$(GREEN)✓ All module tests complete$(NC)"
 
@@ -261,7 +269,7 @@ tidy:
 tidy-all: tidy
 	@for mod in $(ALL_SUBMODULES); do \
 		echo "$(BLUE)  Tidying $$mod...$(NC)"; \
-		cd $$mod && $(GO) mod tidy && cd .. || exit 1; \
+		(cd $$mod && $(GO) mod tidy) || exit 1; \
 	done
 	@echo "$(GREEN)✓ All modules tidied$(NC)"
 
@@ -293,7 +301,7 @@ mod-download:
 mod-download-all: mod-download
 	@for mod in $(ALL_SUBMODULES); do \
 		echo "$(BLUE)  Downloading $$mod modules...$(NC)"; \
-		cd $$mod && $(GO) mod download && cd .. || exit 1; \
+		(cd $$mod && $(GO) mod download) || exit 1; \
 	done
 	@echo "$(GREEN)✓ All modules downloaded$(NC)"
 

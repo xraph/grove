@@ -29,8 +29,8 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	"github.com/xraph/grove/drivers/sqlitedriver"
 	"github.com/xraph/grove/schema"
-	"github.com/xraph/grove/sqlitedriver"
 )
 
 // ---------------------------------------------------------------------------

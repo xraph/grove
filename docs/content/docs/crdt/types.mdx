@@ -1,0 +1,275 @@
+---
+title: CRDT Types
+description: Deep dive into LWW-Register, PN-Counter, and OR-Set merge semantics, algorithms, and use cases.
+---
+
+Grove supports three field-level CRDT types. Each has different merge semantics optimized for specific use cases. This page covers the algorithms, concurrent update behavior, and practical guidance for each type.
+
+## LWW-Register (Last-Writer-Wins)
+
+**Tag:** `crdt:lww`
+
+The simplest CRDT: when two nodes write to the same field concurrently, the write with the higher HLC timestamp wins.
+
+### Merge Algorithm
+
+```
+MergeLWW(local, remote):
+  if remote.HLC > local.HLC:
+    return remote   // Remote wins
+  if local.HLC > remote.HLC:
+    return local    // Local wins
+  // Tie: compare NodeIDs lexicographically
+  if remote.NodeID > local.NodeID:
+    return remote
+  return local
+```
+
+The HLC comparison is: timestamp first, then counter, then node ID. This guarantees total ordering with no ambiguity.
+
+### Concurrent Update Example
+
+```
+Node A (ts=100): Title = "Draft"
+Node B (ts=105): Title = "Final"
+
+After sync: Title = "Final" (Node B wins, higher timestamp)
+```
+
+```
+Node A (ts=100, c=1): Title = "Draft"
+Node B (ts=100, c=1): Title = "Final"
+
+After sync: Title depends on NodeID comparison (deterministic tiebreak)
+```
+
+### Usage
+
+```go
+type Document struct {
+    grove.BaseModel `grove:"table:documents,alias:d"`
+    ID      string `grove:"id,pk"`
+    Title   string `grove:"title,crdt:lww"`
+    Body    string `grove:"body,crdt:lww"`
+    Status  string `grove:"status,crdt:lww"`
+}
+```
+
+### Best For
+
+- Scalar values: strings, booleans, numbers, JSON objects
+- Fields where "last write" is the desired resolution
+- Configuration values, status fields, free-text content
+
+### Go API
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `MergeLWW` | `(local, remote *LWWRegister) *LWWRegister` | Returns the register with the higher HLC |
+
+## PN-Counter (Positive-Negative Counter)
+
+**Tag:** `crdt:counter`
+
+A counter that supports both increment and decrement operations across multiple nodes without conflicts. Each node tracks its own increments and decrements independently.
+
+### Merge Algorithm
+
+```
+MergeCounter(local, remote):
+  for each nodeID in union(local.nodes, remote.nodes):
+    merged.Increments[nodeID] = max(local.Increments[nodeID], remote.Increments[nodeID])
+    merged.Decrements[nodeID] = max(local.Decrements[nodeID], remote.Decrements[nodeID])
+  return merged
+
+Value(state):
+  return sum(Increments) - sum(Decrements)
+```
+
+Taking the per-node max ensures that updates are idempotent and order-independent.
+
+### Concurrent Update Example
+
+```
+Node A: Increment(+5)  -> Increments{"A": 5}
+Node B: Increment(+3)  -> Increments{"B": 3}
+
+After sync both nodes:
+  Increments{"A": 5, "B": 3}
+  Value = 5 + 3 = 8
+
+Node A: Decrement(-2)  -> Decrements{"A": 2}
+After sync:
+  Increments{"A": 5, "B": 3}, Decrements{"A": 2}
+  Value = (5 + 3) - 2 = 6
+```
+
+### State Structure
+
+```go
+type PNCounterState struct {
+    Increments map[string]int64 `json:"inc"` // nodeID -> cumulative increment
+    Decrements map[string]int64 `json:"dec"` // nodeID -> cumulative decrement
+}
+```
+
+### Usage
+
+```go
+type Article struct {
+    grove.BaseModel `grove:"table:articles,alias:a"`
+    ID        string `grove:"id,pk"`
+    Title     string `grove:"title,crdt:lww"`
+    ViewCount int64  `grove:"view_count,crdt:counter"`
+    Likes     int64  `grove:"likes,crdt:counter"`
+}
+```
+
+### Best For
+
+- View counts, like counts, vote tallies
+- Inventory quantities across warehouses
+- Any numeric value that multiple nodes increment/decrement concurrently
+
+### Go API
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `NewPNCounterState` | `() *PNCounterState` | Creates an empty counter state |
+| `MergeCounter` | `(local, remote *PNCounterState) *PNCounterState` | Per-node max merge |
+| `Value` | `(s *PNCounterState) int64` | Returns sum(increments) - sum(decrements) |
+| `CounterFromFieldState` | `(fs *FieldState) *PNCounterState` | Extracts counter state from a field |
+
+## OR-Set (Observed-Remove Set)
+
+**Tag:** `crdt:set`
+
+An add-wins observed-remove set. When one node adds an element and another concurrently removes it, the add wins. Removals only affect elements that were observed at the time of removal.
+
+### Merge Algorithm
+
+```
+MergeSet(local, remote):
+  // Union all entries (element -> tags)
+  for each element in union(local.Entries, remote.Entries):
+    merged.Entries[element] = union(local.tags, remote.tags)
+
+  // Union removed tags
+  merged.Removed = union(local.Removed, remote.Removed)
+
+  return merged
+
+Elements(state):
+  result = []
+  for each element in state.Entries:
+    if any tag for this element is NOT in state.Removed:
+      result.add(element)
+  return result
+```
+
+Each add operation creates a unique tag (`nodeID:HLC`). Removes mark specific tags as removed. If a new add happens concurrently with a remove, the new add's tag is not in the removed set, so the element survives.
+
+### Concurrent Update Example
+
+```
+Initial state: Tags = {"go", "api"}
+
+Node A: Remove("api")
+  -> Removes the tag for "api" that existed at time of observation
+
+Node B: Add("api")
+  -> Creates a new tag for "api" with a new HLC
+
+After sync:
+  "api" has Node B's new tag, which is NOT in the removed set
+  -> Tags = {"go", "api"}  (add wins!)
+```
+
+### State Structure
+
+```go
+type ORSetState struct {
+    // Entries maps element (JSON string) -> list of tags (add operations).
+    Entries map[string][]Tag `json:"entries"`
+
+    // Removed maps tag keys to true for removed tags.
+    Removed map[string]bool `json:"removed"`
+}
+
+type Tag struct {
+    NodeID string `json:"node_id"`
+    HLC    HLC    `json:"hlc"`
+}
+```
+
+### Tag Key Format
+
+Tags are uniquely identified by the string `nodeID:HLC{ts:<ts> c:<c> node:<node>}`. This format must match across all language implementations for cross-platform sync.
+
+### Usage
+
+```go
+type Project struct {
+    grove.BaseModel `grove:"table:projects,alias:p"`
+    ID       string   `grove:"id,pk"`
+    Name     string   `grove:"name,crdt:lww"`
+    Tags     []string `grove:"tags,type:jsonb,crdt:set"`
+    Members  []string `grove:"members,type:jsonb,crdt:set"`
+}
+```
+
+### Best For
+
+- Tags, labels, categories
+- Member lists, collaborator lists
+- Any collection where concurrent add/remove must converge
+
+### Go API
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `NewORSetState` | `() *ORSetState` | Creates an empty set state |
+| `MergeSet` | `(local, remote *ORSetState) *ORSetState` | Union merge with add-wins |
+| `Elements` | `(s *ORSetState) []json.RawMessage` | Returns elements with at least one non-removed tag |
+| `SetFromFieldState` | `(fs *FieldState) *ORSetState` | Extracts set state from a field |
+
+## MergeEngine
+
+The `MergeEngine` dispatches to the correct merge function based on the CRDT type of each field. It handles full-state merging for records with multiple fields.
+
+### Field-Level Merge
+
+```go
+engine := crdt.NewMergeEngine()
+
+// Merge a single field.
+merged, err := engine.MergeField(localFieldState, remoteFieldState)
+```
+
+`MergeField` dispatches based on `FieldState.Type`:
+- `TypeLWW` calls `MergeLWW`
+- `TypeCounter` calls `MergeCounter`
+- `TypeSet` calls `MergeSet`
+
+If the local state is `nil`, the remote state is accepted directly.
+
+### Record-Level Merge
+
+```go
+// Merge all fields of a record at once.
+merged, err := engine.MergeState(localState, remoteState)
+```
+
+`MergeState` iterates over all fields in both states and merges each one. It also handles tombstone propagation: if either state is tombstoned with a higher HLC, the merged result is tombstoned.
+
+## Choosing the Right Type
+
+| Scenario | Recommended Type | Why |
+|----------|-----------------|-----|
+| User edits a title | `crdt:lww` | Last edit should win |
+| Page view counter | `crdt:counter` | Multiple nodes increment independently |
+| Adding tags to a post | `crdt:set` | Concurrent add/remove should converge |
+| JSON config object | `crdt:lww` | Treat the whole object as one value |
+| Shopping cart items | `crdt:set` | Add-wins prevents lost items |
+| Score in a game | `crdt:counter` | Multiple score sources merge correctly |
+| Status field (draft/published) | `crdt:lww` | Last status change wins |

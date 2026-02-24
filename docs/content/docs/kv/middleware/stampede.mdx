@@ -1,0 +1,125 @@
+---
+title: Stampede Protection Middleware
+description: Singleflight-based cache stampede prevention for concurrent KV reads.
+---
+
+The stampede protection middleware prevents cache stampede (thundering herd) problems by deduplicating concurrent GET requests for the same key. When multiple goroutines request the same key simultaneously, only one performs the actual backend fetch while the others wait and share the result.
+
+## Installation
+
+```go
+import "github.com/xraph/grove/kv/middleware"
+```
+
+## Usage
+
+```go
+import (
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/middleware"
+)
+
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewStampede()),
+)
+```
+
+### Constructor
+
+```go
+func NewStampede() *StampedeHook
+```
+
+No configuration is required. The middleware tracks in-flight requests internally.
+
+## The Cache Stampede Problem
+
+A cache stampede occurs when a popular key expires or is missing from the cache and many goroutines simultaneously attempt to fetch it from the backend:
+
+```
+Without stampede protection:
+
+Goroutine 1 ---> Cache MISS ---> Backend GET "popular-key"
+Goroutine 2 ---> Cache MISS ---> Backend GET "popular-key"  (duplicate)
+Goroutine 3 ---> Cache MISS ---> Backend GET "popular-key"  (duplicate)
+Goroutine 4 ---> Cache MISS ---> Backend GET "popular-key"  (duplicate)
+...
+Goroutine N ---> Cache MISS ---> Backend GET "popular-key"  (duplicate)
+```
+
+This can overwhelm the backend with N identical requests when only one is needed.
+
+## How It Works
+
+The stampede hook implements `PreQueryHook` and only applies to GET operations. It uses an internal map of in-flight requests, similar to `golang.org/x/sync/singleflight`:
+
+```
+With stampede protection:
+
+Goroutine 1 ---> [First request for "popular-key"] ---> Backend GET
+Goroutine 2 ---> [Key in-flight, wait...]          ---> (shares result)
+Goroutine 3 ---> [Key in-flight, wait...]          ---> (shares result)
+Goroutine 4 ---> [Key in-flight, wait...]          ---> (shares result)
+```
+
+1. The first goroutine to request a key proceeds normally to the backend.
+2. Subsequent goroutines requesting the same key while the first is still in-flight are blocked (via `sync.WaitGroup`).
+3. When the first request completes, all waiting goroutines are unblocked and share the result.
+4. The key is removed from the in-flight map, so the next request starts a fresh fetch.
+
+### Completing Requests
+
+After the backend operation finishes, call `Complete` to unblock waiting goroutines and remove the key from the in-flight map:
+
+```go
+stampede := middleware.NewStampede()
+
+// The store calls Complete after each GET finishes
+stampede.Complete("popular-key")
+```
+
+## Scope
+
+The stampede hook is scoped to **GET operations only**. Write operations (SET, DELETE, MSET) pass through unchanged since deduplicating writes would cause data loss.
+
+## Combining with L1 Cache
+
+Stampede protection works best when placed **after** the [L1 cache](/docs/kv/middleware/cache) in the middleware chain. This way, cache hits are served immediately without entering the stampede layer, and only cache misses are deduplicated:
+
+```go
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewCache(10000, 5*time.Minute)),
+    kv.WithHook(middleware.NewStampede()),
+)
+```
+
+The flow becomes:
+
+```
+GET "popular-key"
+  |
+  v
+[L1 Cache Hit?] --yes--> Return immediately
+  |
+  no (cache miss)
+  v
+[Stampede: first request?] --yes--> Backend GET --> Cache result --> Return
+  |
+  no (in-flight)
+  v
+[Wait for first request] --> Share result --> Return
+```
+
+## Use Cases
+
+- **High-traffic keys** -- popular configuration values, feature flags, or session data that many goroutines read concurrently
+- **Expensive backend queries** -- keys whose values are costly to fetch (e.g., aggregated data, remote API calls)
+- **Cache warmup** -- during application startup when many goroutines may request the same uncached keys simultaneously
+- **TTL expiry storms** -- when cached keys with the same TTL expire simultaneously, causing a burst of backend requests
+
+## API Reference
+
+| Method | Description |
+|---|---|
+| `NewStampede()` | Create a new stampede protection hook |
+| `Complete(key)` | Signal that the GET for a key has finished, unblocking waiters |

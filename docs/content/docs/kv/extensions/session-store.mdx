@@ -1,0 +1,222 @@
+---
+title: "Session Store"
+description: "HTTP session storage backed by Grove KV with auto-generated cryptographic IDs, configurable TTL, and touch-to-refresh support."
+---
+
+The `SessionStore` extension provides HTTP session management on top of any Grove KV backend. Sessions are stored as serialized values with automatic TTL expiry, and each session receives a cryptographically random 64-character hex ID.
+
+## Installation
+
+```go
+import "github.com/xraph/grove/kv/extension"
+```
+
+## Creating a Session Store
+
+```go
+sessions := extension.NewSessionStore(store)
+```
+
+By default, sessions use the key prefix `"sess"` and a TTL of **30 minutes**. Both are configurable via options:
+
+```go
+sessions := extension.NewSessionStore(store,
+    extension.WithSessionPrefix("mysess"),         // keys become "mysess:<id>"
+    extension.WithSessionTTL(2 * time.Hour),       // sessions expire after 2 hours
+)
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `WithSessionPrefix(prefix)` | `"sess"` | Key prefix for all session keys |
+| `WithSessionTTL(ttl)` | `30m` | Time-to-live for each session |
+
+## API Reference
+
+### Create
+
+Creates a new session with the given data and returns the session ID.
+
+```go
+func (ss *SessionStore) Create(ctx context.Context, data any) (string, error)
+```
+
+The returned ID is a **32-byte cryptographically random value** encoded as 64 hex characters. The session is stored at `<prefix>:<id>` with the configured TTL.
+
+```go
+type SessionData struct {
+    UserID   string `json:"user_id"`
+    Username string `json:"username"`
+    Role     string `json:"role"`
+}
+
+id, err := sessions.Create(ctx, &SessionData{
+    UserID:   "u_123",
+    Username: "alice",
+    Role:     "admin",
+})
+// id = "a3f8c1e9b2d7..."  (64 hex chars)
+```
+
+### Get
+
+Retrieves session data by ID. The destination must be a pointer to the expected type.
+
+```go
+func (ss *SessionStore) Get(ctx context.Context, id string, dest any) error
+```
+
+```go
+var data SessionData
+err := sessions.Get(ctx, id, &data)
+if err != nil {
+    // kv.ErrNotFound if the session expired or does not exist
+}
+```
+
+### Update
+
+Replaces the session data and **resets the TTL**.
+
+```go
+func (ss *SessionStore) Update(ctx context.Context, id string, data any) error
+```
+
+```go
+data.Role = "superadmin"
+err := sessions.Update(ctx, id, &data)
+```
+
+### Delete
+
+Removes a session immediately.
+
+```go
+func (ss *SessionStore) Delete(ctx context.Context, id string) error
+```
+
+```go
+err := sessions.Delete(ctx, id)
+```
+
+### Touch
+
+Refreshes the session TTL without changing the stored data. Useful for keeping active sessions alive.
+
+```go
+func (ss *SessionStore) Touch(ctx context.Context, id string) error
+```
+
+```go
+err := sessions.Touch(ctx, id)
+```
+
+### Exists
+
+Checks whether a session exists without retrieving its data.
+
+```go
+func (ss *SessionStore) Exists(ctx context.Context, id string) (bool, error)
+```
+
+```go
+exists, err := sessions.Exists(ctx, id)
+```
+
+## Example: HTTP Middleware
+
+A common pattern is to wrap the session store in HTTP middleware that loads the session on every request and provides it through the request context.
+
+```go
+package middleware
+
+import (
+    "context"
+    "net/http"
+
+    "github.com/xraph/grove/kv/extension"
+)
+
+type contextKey string
+const sessionKey contextKey = "session"
+
+type SessionData struct {
+    UserID   string `json:"user_id"`
+    Username string `json:"username"`
+    Role     string `json:"role"`
+}
+
+func SessionMiddleware(sessions *extension.SessionStore) func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            cookie, err := r.Cookie("session_id")
+            if err != nil {
+                next.ServeHTTP(w, r)
+                return
+            }
+
+            var data SessionData
+            if err := sessions.Get(r.Context(), cookie.Value, &data); err != nil {
+                next.ServeHTTP(w, r)
+                return
+            }
+
+            // Refresh the session TTL on every request.
+            _ = sessions.Touch(r.Context(), cookie.Value)
+
+            ctx := context.WithValue(r.Context(), sessionKey, &data)
+            next.ServeHTTP(w, r.WithContext(ctx))
+        })
+    }
+}
+
+// Login handler that creates a new session.
+func LoginHandler(sessions *extension.SessionStore) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        // ... authenticate user ...
+
+        id, err := sessions.Create(r.Context(), &SessionData{
+            UserID:   "u_123",
+            Username: "alice",
+            Role:     "admin",
+        })
+        if err != nil {
+            http.Error(w, "session error", http.StatusInternalServerError)
+            return
+        }
+
+        http.SetCookie(w, &http.Cookie{
+            Name:     "session_id",
+            Value:    id,
+            Path:     "/",
+            HttpOnly: true,
+            Secure:   true,
+            SameSite: http.SameSiteStrictMode,
+        })
+
+        w.WriteHeader(http.StatusOK)
+    }
+}
+```
+
+## Key Layout
+
+Sessions are stored with the following key pattern:
+
+```
+<prefix>:<session_id>
+```
+
+For example, with the default prefix:
+
+```
+sess:a3f8c1e9b2d74f6a8e1c3d5b7a9f2e4d6c8a0b1e3f5d7a9c2b4e6f8a0d1c3e
+```
+
+## Security Notes
+
+- Session IDs are generated using `crypto/rand` (32 bytes, 256 bits of entropy), making them resistant to brute-force guessing.
+- Always transmit session IDs over HTTPS and set cookies with `HttpOnly`, `Secure`, and `SameSite` flags.
+- Use a short TTL and call `Touch` on active requests rather than setting a long TTL.

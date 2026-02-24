@@ -253,7 +253,7 @@ func (s *Syncer) mergeRemoteChange(ctx context.Context, change ChangeRecord) err
 		}
 		// Run AfterInboundChange hook.
 		if s.plugin.syncHooks != nil {
-			_ = s.plugin.syncHooks.AfterInboundChange(ctx, processedChange)
+			s.plugin.syncHooks.AfterInboundChange(ctx, processedChange) //nolint:errcheck // fire-and-forget post-hook
 		}
 		return nil
 	}
@@ -295,7 +295,7 @@ func (s *Syncer) mergeRemoteChange(ctx context.Context, change ChangeRecord) err
 
 	// Run AfterInboundChange hook.
 	if s.plugin.syncHooks != nil {
-		_ = s.plugin.syncHooks.AfterInboundChange(ctx, processedChange)
+		s.plugin.syncHooks.AfterInboundChange(ctx, processedChange) //nolint:errcheck // fire-and-forget post-hook
 	}
 
 	return nil

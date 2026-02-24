@@ -10,7 +10,7 @@ import "context"
 
 // MigrateFunc is a function that performs a migration step.
 // It receives a context and an Executor for running DDL/DML statements.
-type MigrateFunc func(ctx context.Context, exec Executor) error
+type MigrateFunc func(ctx context.Context, exec Executor) error //nolint:revive // MigrateFunc is the established public API name
 
 // Migration represents a single versioned migration.
 type Migration struct {

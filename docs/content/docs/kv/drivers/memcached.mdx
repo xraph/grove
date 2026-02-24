@@ -1,0 +1,137 @@
+---
+title: Memcached Driver
+description: Memcached driver for Grove KV with CAS (Compare-And-Swap) support.
+---
+
+The Memcached driver connects Grove KV to [Memcached](https://memcached.org/) using [gomemcache](https://github.com/bradfitz/gomemcache). It provides basic key-value operations and Compare-And-Swap (CAS) for optimistic concurrency control.
+
+## Installation
+
+```bash
+go get github.com/xraph/grove/kv
+go get github.com/xraph/grove/kv/drivers/memcacheddriver
+```
+
+## Connection
+
+```go
+import (
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/drivers/memcacheddriver"
+)
+
+store, err := kv.Open(memcacheddriver.New(), "localhost:11211")
+if err != nil {
+    log.Fatal(err)
+}
+defer store.Close()
+```
+
+The DSN is a comma-separated list of server addresses. For multiple servers:
+
+```go
+store, err := kv.Open(memcacheddriver.New(), "mc1:11211,mc2:11211,mc3:11211")
+```
+
+## Capabilities
+
+| Capability | Supported |
+|------------|-----------|
+| TTL | Set only (via expiration on write) |
+| CAS (SetNX/SetXX) | Yes |
+| Scan | No |
+| Batch | Yes |
+| PubSub | No |
+| Transactions | No |
+| Streams | No |
+
+## Basic Usage
+
+```go
+ctx := context.Background()
+
+// Set with TTL
+err := store.Set(ctx, "session:abc", sessionData, 30*time.Minute)
+
+// Get
+var session Session
+err = store.Get(ctx, "session:abc", &session)
+
+// Delete
+err = store.Delete(ctx, "session:abc")
+
+// Set only if key does not exist
+err = store.Set(ctx, "lock:resource", value, 10*time.Second, kv.NX())
+
+// Set only if key already exists
+err = store.Set(ctx, "session:abc", updatedData, 30*time.Minute, kv.XX())
+```
+
+## CompareAndSwap Operation
+
+The Memcached driver exposes a `CompareAndSwap` method for atomic read-modify-write operations. This uses Memcached's native CAS protocol to detect concurrent modifications:
+
+```go
+mdb := memcacheddriver.Unwrap(store)
+
+err := mdb.CompareAndSwap(ctx, "counter", func(current []byte) ([]byte, error) {
+    // Parse the current value
+    count, _ := strconv.Atoi(string(current))
+    // Modify and return the new value
+    return []byte(strconv.Itoa(count + 1)), nil
+})
+if err != nil {
+    // Error may indicate a CAS conflict if another client modified the value
+    log.Printf("CAS failed: %v", err)
+}
+```
+
+If another client modifies the key between the `Get` and the `CompareAndSwap`, the operation returns a version conflict error. Retry the operation in a loop for contended keys.
+
+## Options
+
+Pass driver options when opening the connection:
+
+```go
+import "github.com/xraph/grove/kv/driver"
+
+store, err := kv.Open(memcacheddriver.New(), "localhost:11211",
+    memcacheddriver.WithTimeout(2 * time.Second),
+    memcacheddriver.WithMaxIdleConns(10),
+)
+```
+
+| Option | Description |
+|--------|-------------|
+| `memcacheddriver.WithTimeout(d)` | Socket read/write timeout for Memcached operations |
+| `memcacheddriver.WithMaxIdleConns(n)` | Maximum number of idle connections per server |
+
+## Unwrap for Native Client
+
+Access the underlying gomemcache `Client` for operations not exposed by the Grove KV interface:
+
+```go
+// Get the MemcachedDB driver
+mdb := memcacheddriver.Unwrap(store)
+
+// Get the raw gomemcache client
+client := memcacheddriver.UnwrapClient(store)
+
+// Use native memcache operations
+err := client.Increment("page-views", 1)
+err = client.Append("log-key", []byte("new entry\n"))
+```
+
+## Limitations
+
+Memcached is a simple caching layer with several constraints compared to other KV backends:
+
+- **No key scanning** -- Memcached does not support iterating or listing keys. The `store.Scan()` method returns `kv.ErrNotSupported`.
+- **No TTL query** -- You cannot retrieve the remaining TTL of a key. The `store.TTL()` method returns `kv.ErrNotSupported`.
+- **No persistence** -- Data is lost when the server restarts. Memcached is a cache, not a durable store.
+- **No transactions** -- There is no multi-key atomic operation beyond CAS on a single key.
+- **Key size limit** -- Keys are limited to 250 bytes.
+- **Value size limit** -- Values are limited to 1 MB by default (configurable on the server).
+- **No native Pub/Sub** -- Use Redis if you need messaging capabilities.
+
+Memcached is best suited for caching hot data where speed is the primary concern and durability is not required.

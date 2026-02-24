@@ -166,7 +166,10 @@ func marshalElement(element any) (string, error) {
 // ToFieldState converts to the generic FieldState representation.
 func (s *ORSetState) ToFieldState(clock HLC, nodeID string) *FieldState {
 	elements := s.Elements()
-	raw, _ := json.Marshal(elements)
+	raw, err := json.Marshal(elements)
+	if err != nil {
+		return nil
+	}
 	return &FieldState{
 		Type:     TypeSet,
 		HLC:      clock,

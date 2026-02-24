@@ -263,7 +263,10 @@ func extractSetOp(fs *FieldState) *SetOperation {
 	if len(elements) == 0 {
 		return nil
 	}
-	raw, _ := json.Marshal(elements)
+	raw, err := json.Marshal(elements)
+	if err != nil {
+		return nil
+	}
 	return &SetOperation{
 		Op:       SetOpAdd,
 		Elements: raw,

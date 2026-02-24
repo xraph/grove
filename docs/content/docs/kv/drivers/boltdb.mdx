@@ -1,0 +1,177 @@
+---
+title: BoltDB Driver
+description: BoltDB (bbolt) embedded driver for Grove KV with emulated TTL, Scan, Batch, CAS, and Transaction support.
+---
+
+The BoltDB driver connects Grove KV to [bbolt](https://github.com/etcd-io/bbolt), a fast pure-Go B+ tree key-value store. bbolt provides ACID transactions, bucket-based namespacing, and crash safety via memory-mapped I/O. No network setup is required -- the database is a single file on disk.
+
+## Installation
+
+```bash
+go get github.com/xraph/grove/kv
+go get github.com/xraph/grove/kv/drivers/boltdriver
+```
+
+## Connection
+
+```go
+import (
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/drivers/boltdriver"
+)
+
+store, err := kv.Open(boltdriver.New(), "/path/to/data.db")
+if err != nil {
+    log.Fatal(err)
+}
+defer store.Close()
+```
+
+The DSN is the file path to the database file. The file is created automatically if it does not exist.
+
+## Capabilities
+
+| Capability | Supported |
+|------------|-----------|
+| TTL | Yes (emulated via separate bucket) |
+| CAS (SetNX/SetXX) | Yes |
+| Scan | Yes (prefix + glob matching) |
+| Batch | Yes (MGet/MSet) |
+| PubSub | No |
+| Transactions | Yes (native bbolt transactions) |
+| Streams | No |
+
+## Embedded Database
+
+BoltDB is an embedded database that runs in-process. There is no separate server to install or manage:
+
+- **Single file** -- the entire database is stored in one file
+- **No network** -- zero latency from network hops
+- **ACID transactions** -- all writes are transactional with crash recovery
+- **Concurrent reads** -- multiple goroutines can read simultaneously
+- **Single writer** -- only one write transaction can run at a time (serialized via file lock)
+
+This makes BoltDB an excellent choice for CLI tools, embedded applications, local caches, and single-node services where simplicity and reliability matter more than horizontal scalability.
+
+## TTL (Emulated)
+
+BoltDB does not natively support key expiration. The driver emulates TTL by storing expiry timestamps in a separate `kv_ttl` bucket. On every read, the driver checks the TTL bucket and returns `kv.ErrNotFound` for expired keys:
+
+```go
+// Set with a TTL
+err := store.Set(ctx, "session:abc", data, 30*time.Minute)
+
+// Check remaining TTL
+remaining, err := store.TTL(ctx, "session:abc")
+
+// Update TTL on an existing key
+err = store.Expire(ctx, "session:abc", 1*time.Hour)
+```
+
+Expired keys are not automatically deleted from disk. They are filtered out on reads and scans. To reclaim space, delete expired keys periodically or use a background cleanup goroutine.
+
+## Options
+
+Configure the driver using `boltdriver.Option` values:
+
+```go
+store, err := kv.Open(boltdriver.New(), "/path/to/data.db",
+    boltdriver.WithTimeout(5 * time.Second),
+    boltdriver.WithFileMode(0600),
+    boltdriver.WithBucket("my-data"),
+    boltdriver.WithReadOnly(false),
+    boltdriver.WithNoGrowSync(false),
+)
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `boltdriver.WithTimeout(d)` | `1s` | Timeout for obtaining a file lock on the database |
+| `boltdriver.WithFileMode(mode)` | `0600` | File permissions for the database file |
+| `boltdriver.WithBucket(name)` | `"kv_data"` | Custom bucket name for storing key-value data |
+| `boltdriver.WithReadOnly(bool)` | `false` | Open the database in read-only mode |
+| `boltdriver.WithNoGrowSync(bool)` | `false` | Disable grow-sync for faster writes (reduced safety) |
+
+## Native Transactions
+
+For operations that require direct control over bbolt transactions, use the `ViewTxn`, `UpdateTxn`, and `Batch` methods:
+
+### Read-Only Transaction
+
+```go
+bdb := boltdriver.Unwrap(store)
+
+err := bdb.ViewTxn(func(tx *bbolt.Tx) error {
+    bkt := tx.Bucket([]byte("kv_data"))
+    val := bkt.Get([]byte("my-key"))
+    fmt.Println(string(val))
+    return nil
+})
+```
+
+### Read-Write Transaction
+
+```go
+bdb := boltdriver.Unwrap(store)
+
+err := bdb.UpdateTxn(func(tx *bbolt.Tx) error {
+    bkt := tx.Bucket([]byte("kv_data"))
+    if err := bkt.Put([]byte("key1"), []byte("val1")); err != nil {
+        return err
+    }
+    return bkt.Put([]byte("key2"), []byte("val2"))
+})
+```
+
+### Batch Writes
+
+For high-throughput writes, use `Batch` which combines multiple concurrent write transactions into fewer disk syncs:
+
+```go
+bdb := boltdriver.Unwrap(store)
+
+// Can be called concurrently from multiple goroutines
+err := bdb.Batch(func(tx *bbolt.Tx) error {
+    bkt := tx.Bucket([]byte("kv_data"))
+    return bkt.Put([]byte("key"), []byte("value"))
+})
+```
+
+## Scan
+
+BoltDB supports prefix-based key scanning with glob pattern matching:
+
+```go
+// Scan all keys with prefix "user:"
+err := store.Scan(ctx, "user:*", func(key string) error {
+    fmt.Println(key)
+    return nil
+})
+
+// Scan all keys
+err = store.Scan(ctx, "*", func(key string) error {
+    fmt.Println(key)
+    return nil
+})
+```
+
+## Unwrap for Direct Access
+
+Access the underlying `BoltDB` driver or `bbolt.DB` for operations not exposed by the Grove KV interface:
+
+```go
+// Get the BoltDB driver
+bdb := boltdriver.Unwrap(store)
+
+// Get the raw bbolt.DB handle
+db := boltdriver.UnwrapDB(store)
+
+// Access bbolt directly
+err := db.View(func(tx *bbolt.Tx) error {
+    // Iterate over all buckets, access stats, etc.
+    return tx.ForEach(func(name []byte, b *bbolt.Bucket) error {
+        fmt.Printf("bucket: %s (keys: %d)\n", name, b.Stats().KeyN)
+        return nil
+    })
+})
+```

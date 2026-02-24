@@ -9,23 +9,23 @@ import (
 // InspectResult is a human-readable representation of a record's CRDT state.
 // Useful for debugging and testing.
 type InspectResult struct {
-	Table     string                    `json:"table"`
-	PK        string                    `json:"pk"`
-	Tombstone bool                      `json:"tombstone"`
-	Fields    map[string]*InspectField  `json:"fields"`
+	Table     string                   `json:"table"`
+	PK        string                   `json:"pk"`
+	Tombstone bool                     `json:"tombstone"`
+	Fields    map[string]*InspectField `json:"fields"`
 }
 
 // InspectField is a human-readable representation of a single field's state.
 type InspectField struct {
-	Type       CRDTType `json:"type"`
-	NodeID     string   `json:"node_id"`
-	HLC        HLC      `json:"hlc"`
+	Type   CRDTType `json:"type"`
+	NodeID string   `json:"node_id"`
+	HLC    HLC      `json:"hlc"`
 
 	// LWW fields
 	Value any `json:"value,omitempty"`
 
 	// Counter fields
-	CounterValue int64              `json:"counter_value,omitempty"`
+	CounterValue int64               `json:"counter_value,omitempty"`
 	NodeCounters map[string][2]int64 `json:"node_counters,omitempty"` // nodeID → [inc, dec]
 
 	// Set fields
@@ -56,7 +56,7 @@ func InspectState(state *State) *InspectResult {
 		case TypeLWW:
 			if fs.Value != nil {
 				var v any
-				_ = json.Unmarshal(fs.Value, &v)
+				json.Unmarshal(fs.Value, &v) //nolint:errcheck // best-effort display value
 				field.Value = v
 			}
 
@@ -77,7 +77,7 @@ func InspectState(state *State) *InspectResult {
 			ss := SetFromFieldState(fs)
 			for _, elem := range ss.Elements() {
 				var v any
-				_ = json.Unmarshal(elem, &v)
+				json.Unmarshal(elem, &v) //nolint:errcheck // best-effort display value
 				field.Elements = append(field.Elements, v)
 			}
 		}

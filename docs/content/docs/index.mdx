@@ -21,6 +21,7 @@ Grove supports multiple database backends through dedicated drivers:
 - **Near-Raw Performance** — Zero reflection at query time, pooled buffers, cached metadata
 - **Modular Migrations** — Go-code migrations with multi-module dependency ordering
 - **Privacy Hooks** — Pre/post query hooks for tenant isolation, PII redaction, and audit logging
+- **Key-Value Store** — Command-oriented KV access layer with Redis, Memcached, DynamoDB, BoltDB, and Badger drivers
 - **Forge Integration** — First-class Forge extension with DI, migrations, and hook wiring
 
 ## Quick Example
@@ -49,4 +50,5 @@ err := pg.NewSelect(&users).
   <Card title="Architecture" href="/docs/architecture" description="Understand the package structure, driver interface, and query pipeline." />
   <Card title="Dual Tag System" href="/docs/concepts/dual-tags" description="Learn how grove and bun tags work together for zero-cost migration." />
   <Card title="PostgreSQL Driver" href="/docs/drivers/postgres" description="Get started with the PostgreSQL driver and native PG syntax." />
+  <Card title="Key-Value Store" href="/docs/kv/overview" description="Command-oriented KV access with Redis, Memcached, DynamoDB, BoltDB, and Badger." />
 </Cards>

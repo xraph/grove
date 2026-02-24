@@ -21,7 +21,7 @@ import (
 
     "github.com/xraph/grove"
     "github.com/xraph/grove/driver"
-    "github.com/xraph/grove/tursodriver"
+    "github.com/xraph/grove/drivers/tursodriver"
     _ "github.com/tursodatabase/go-libsql"
 )
 
@@ -248,8 +248,8 @@ The `tursomigrate` package provides a migration executor compatible with Grove's
 ```go
 import (
     "github.com/xraph/grove/migrate"
-    "github.com/xraph/grove/tursodriver"
-    "github.com/xraph/grove/tursodriver/tursomigrate"
+    "github.com/xraph/grove/drivers/tursodriver"
+    "github.com/xraph/grove/drivers/tursodriver/tursomigrate"
 )
 
 tdb := tursodriver.Unwrap(db)

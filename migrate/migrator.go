@@ -7,7 +7,7 @@ import (
 )
 
 // MigrateResult holds the result of a Migrate or Rollback operation.
-type MigrateResult struct {
+type MigrateResult struct { //nolint:revive // MigrateResult is the established public API name
 	Applied  []*Migration // Migrations that were applied
 	Rollback []*Migration // Migrations that were rolled back (for Rollback only)
 }
@@ -43,14 +43,14 @@ func (o *Orchestrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 		return nil, fmt.Errorf("migrate: ensure lock table: %w", err)
 	}
 
-	hostname, _ := os.Hostname()
+	hostname, _ := os.Hostname() //nolint:errcheck // hostname is best-effort for lock identifier
 	lockedBy := fmt.Sprintf("%s:%d", hostname, os.Getpid())
 
 	if err := o.executor.AcquireLock(ctx, lockedBy); err != nil {
 		return nil, fmt.Errorf("migrate: acquire lock: %w", err)
 	}
 	defer func() {
-		_ = o.executor.ReleaseLock(ctx)
+		o.executor.ReleaseLock(ctx) //nolint:errcheck // best-effort lock release in defer
 	}()
 
 	applied, err := o.executor.ListApplied(ctx)
@@ -105,14 +105,14 @@ func (o *Orchestrator) Rollback(ctx context.Context) (*MigrateResult, error) {
 		return nil, fmt.Errorf("migrate: ensure lock table: %w", err)
 	}
 
-	hostname, _ := os.Hostname()
+	hostname, _ := os.Hostname() //nolint:errcheck // hostname is best-effort for lock identifier
 	lockedBy := fmt.Sprintf("%s:%d", hostname, os.Getpid())
 
 	if err := o.executor.AcquireLock(ctx, lockedBy); err != nil {
 		return nil, fmt.Errorf("migrate: acquire lock: %w", err)
 	}
 	defer func() {
-		_ = o.executor.ReleaseLock(ctx)
+		o.executor.ReleaseLock(ctx) //nolint:errcheck // best-effort lock release in defer
 	}()
 
 	applied, err := o.executor.ListApplied(ctx)

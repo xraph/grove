@@ -1,0 +1,118 @@
+---
+title: L1 Cache Middleware
+description: In-memory read-through cache that reduces backend load for frequently accessed keys.
+---
+
+The L1 cache middleware places an in-memory cache in front of the backing KV store. GET operations are served from memory when the key is cached, avoiding a round-trip to the driver. Writes automatically invalidate the corresponding cache entry to keep data consistent.
+
+## Installation
+
+```go
+import "github.com/xraph/grove/kv/middleware"
+```
+
+## Usage
+
+```go
+import (
+    "time"
+
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/middleware"
+)
+
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewCache(10000, 5*time.Minute)),
+)
+```
+
+### Constructor
+
+```go
+func NewCache(maxEntries int, defaultTTL time.Duration) *CacheHook
+```
+
+| Parameter | Description |
+|---|---|
+| `maxEntries` | Maximum number of entries the cache will hold before evicting |
+| `defaultTTL` | Default time-to-live for cached entries; `0` means no expiry |
+
+## How It Works
+
+The cache hook implements both `PreQueryHook` and `PostQueryHook`:
+
+1. **On GET (PreQueryHook):** Checks the in-memory map for the requested key. If the entry exists and has not expired, the cached value is returned without hitting the backend driver.
+2. **On GET miss (PostQueryHook):** After the driver returns a value, the cache stores it for future reads.
+3. **On SET/DELETE:** The corresponding cache entry is evicted so subsequent reads fetch the fresh value from the backend.
+
+```
+GET "user:123"
+  |
+  v
+[Cache Hit?] --yes--> Return cached value
+  |
+  no
+  v
+[Driver GET] --> Store in cache --> Return value
+```
+
+## Invalidation
+
+Cache entries are automatically invalidated when:
+
+- A **SET** operation writes a new value for the key
+- A **DELETE** operation removes the key
+
+You can also manually manage the cache:
+
+```go
+cache := middleware.NewCache(10000, 5*time.Minute)
+
+// Manually evict specific keys
+cache.Evict("user:123", "user:456")
+
+// Flush the entire cache
+cache.Flush()
+
+// Check current cache size
+size := cache.Size()
+```
+
+## Size Limits and Eviction
+
+When the cache reaches `maxEntries`, it evicts entries to make room:
+
+1. **Expired entries** are evicted first -- if any entry has passed its TTL, it is removed immediately.
+2. If no expired entries exist, the entry with the **earliest expiry time** is evicted.
+
+This is a simple eviction strategy designed for low overhead. For workloads that need LRU or LFU semantics, consider using an external cache layer.
+
+## Use Cases
+
+- **Hot keys:** Reduce backend load for keys that are read far more often than they are written (e.g., configuration values, feature flags, session data).
+- **Read-heavy workloads:** Add a sub-millisecond cache layer without deploying a separate caching service.
+- **Cost reduction:** Minimize round-trips to remote KV stores like DynamoDB or Redis where each call has network latency and potentially cost implications.
+
+## Combining with Other Middleware
+
+The L1 cache works well in combination with other middleware. Place it after the namespace hook so that namespaced keys are cached correctly:
+
+```go
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewNamespace("tenant:acme")),
+    kv.WithHook(middleware.NewCache(10000, 5*time.Minute)),
+    kv.WithHook(middleware.NewStampede()),
+)
+```
+
+When combined with [stampede protection](/docs/kv/middleware/stampede), the stampede hook should come after the cache hook. This way, cache misses that reach the stampede layer are deduplicated before hitting the backend.
+
+## API Reference
+
+| Method | Description |
+|---|---|
+| `NewCache(maxEntries, defaultTTL)` | Create a new L1 cache hook |
+| `Put(key, value, ttl)` | Manually insert a value into the cache |
+| `Evict(keys...)` | Remove specific keys from the cache |
+| `Flush()` | Clear all cached entries |
+| `Size()` | Return the current number of cached entries |

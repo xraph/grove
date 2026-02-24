@@ -108,7 +108,7 @@ func (c *HTTPClient) Pull(ctx context.Context, req *PullRequest) (*PullResponse,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(resp.Body) //nolint:errcheck // best-effort error body read
 		return nil, fmt.Errorf("crdt: pull returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -139,7 +139,7 @@ func (c *HTTPClient) Push(ctx context.Context, req *PushRequest) (*PushResponse,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(resp.Body) //nolint:errcheck // best-effort error body read
 		return nil, fmt.Errorf("crdt: push returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -249,7 +249,7 @@ func (t *StreamingTransport) connectAndProcess(ctx context.Context, since HLC, h
 	// Build stream URL with query params.
 	url := t.buildStreamURL(since)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("crdt: create stream request: %w", err)
 	}
@@ -263,7 +263,7 @@ func (t *StreamingTransport) connectAndProcess(ctx context.Context, since HLC, h
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(resp.Body) //nolint:errcheck // best-effort error body read
 		return fmt.Errorf("crdt: stream returned %d: %s", resp.StatusCode, string(respBody))
 	}
 

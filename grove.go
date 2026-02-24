@@ -15,7 +15,7 @@ import (
 //
 // The full driver.Driver interface (in the driver package) extends this
 // with query execution methods.
-type GroveDriver interface {
+type GroveDriver interface { //nolint:revive // GroveDriver is the established public API name
 	// Name returns the driver identifier (e.g., "pg", "mysql", "mongo").
 	Name() string
 

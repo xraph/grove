@@ -23,7 +23,7 @@ import (
 
     "github.com/xraph/grove"
     "github.com/xraph/grove/driver"
-    "github.com/xraph/grove/clickhousedriver"
+    "github.com/xraph/grove/drivers/clickhousedriver"
     _ "github.com/ClickHouse/clickhouse-go/v2"
 )
 
@@ -342,8 +342,8 @@ The `clickhousemigrate` package provides a ClickHouse-specific migration executo
 ```go
 import (
     "github.com/xraph/grove/migrate"
-    "github.com/xraph/grove/clickhousedriver"
-    "github.com/xraph/grove/clickhousedriver/clickhousemigrate"
+    "github.com/xraph/grove/drivers/clickhousedriver"
+    "github.com/xraph/grove/drivers/clickhousedriver/clickhousemigrate"
 )
 
 chdb := clickhousedriver.Unwrap(db)

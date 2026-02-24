@@ -1,0 +1,14 @@
+{
+  "title": "Key-Value Store",
+  "pages": [
+    "overview",
+    "getting-started",
+    "store-interface",
+    "keyspaces",
+    "codecs",
+    "...drivers",
+    "...middleware",
+    "...crdt",
+    "...extensions"
+  ]
+}

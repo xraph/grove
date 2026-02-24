@@ -71,6 +71,7 @@ jobs:
           - mongodriver
           - tursodriver
           - clickhousedriver
+          - esdriver
 
     steps:
       - name: Checkout
@@ -81,24 +82,24 @@ jobs:
         with:
           go-version: "1.25.7"
           cache: true
-          cache-dependency-path: ${{ matrix.driver }}/go.sum
+          cache-dependency-path: drivers/${{ matrix.driver }}/go.sum
 
       - name: Download modules
-        working-directory: ${{ matrix.driver }}
+        working-directory: drivers/${{ matrix.driver }}
         run: go mod download
 
       - name: Verify module tidy
-        working-directory: ${{ matrix.driver }}
+        working-directory: drivers/${{ matrix.driver }}
         run: |
           go mod tidy
-          git diff --exit-code ${{ matrix.driver }}/go.mod ${{ matrix.driver }}/go.sum
+          git diff --exit-code drivers/${{ matrix.driver }}/go.mod drivers/${{ matrix.driver }}/go.sum
 
       - name: Build
-        working-directory: ${{ matrix.driver }}
+        working-directory: drivers/${{ matrix.driver }}
         run: go build ./...
 
       - name: Test
-        working-directory: ${{ matrix.driver }}
+        working-directory: drivers/${{ matrix.driver }}
         run: go test -race -count=1 ./...
 
   # ─── Extension Module ─────────────────────────────────────────────────
@@ -131,6 +132,94 @@ jobs:
       - name: Build
         working-directory: extension
         run: go build ./...
+
+  # ─── KV Module ──────────────────────────────────────────────────────
+  kv:
+    name: KV
+    runs-on: ubuntu-latest
+    needs: go
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.7"
+          cache: true
+          cache-dependency-path: kv/go.sum
+
+      - name: Download modules
+        working-directory: kv
+        run: go mod download
+
+      - name: Verify module tidy
+        working-directory: kv
+        run: |
+          go mod tidy
+          git diff --exit-code kv/go.mod kv/go.sum
+
+      - name: Build
+        working-directory: kv
+        run: go build ./...
+
+      - name: Test
+        working-directory: kv
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-kv
+          path: kv/coverage.out
+          retention-days: 7
+
+  # ─── KV Driver Sub-Modules ──────────────────────────────────────────
+  kv-drivers:
+    name: KV Driver (${{ matrix.driver }})
+    runs-on: ubuntu-latest
+    needs: [go, kv]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        driver:
+          - badgerdriver
+          - boltdriver
+          - dynamodriver
+          - memcacheddriver
+          - redisdriver
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.7"
+          cache: true
+          cache-dependency-path: kv/drivers/${{ matrix.driver }}/go.sum
+
+      - name: Download modules
+        working-directory: kv/drivers/${{ matrix.driver }}
+        run: go mod download
+
+      - name: Verify module tidy
+        working-directory: kv/drivers/${{ matrix.driver }}
+        run: |
+          go mod tidy
+          git diff --exit-code kv/drivers/${{ matrix.driver }}/go.mod kv/drivers/${{ matrix.driver }}/go.sum
+
+      - name: Build
+        working-directory: kv/drivers/${{ matrix.driver }}
+        run: go build ./...
+
+      - name: Test
+        working-directory: kv/drivers/${{ matrix.driver }}
+        run: go test -race -count=1 ./...
 
   # ─── Lint ───────────────────────────────────────────────────────────
   lint:

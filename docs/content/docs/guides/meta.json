@@ -1,4 +1,4 @@
 {
   "title": "Guides",
-  "pages": ["basic-crud", "bun-migration"]
+  "pages": ["basic-crud", "bun-migration", "crdt-offline-first", "crdt-multi-node", "crdt-react-app"]
 }

@@ -1,0 +1,230 @@
+---
+title: "Getting Started with KV"
+description: "Install Grove KV, connect to a backend, and run your first Get/Set operations in under 5 minutes."
+---
+
+import { Cards, Card } from "fumadocs-ui/components/card";
+
+## Installation
+
+Install the core KV package:
+
+```bash
+go get github.com/xraph/grove/kv
+```
+
+Then install the driver for your backend. This guide uses Redis:
+
+```bash
+go get github.com/xraph/grove/kv/drivers/redisdriver
+```
+
+Other drivers are available as separate packages:
+
+| Backend | Package |
+|---------|---------|
+| Redis | `github.com/xraph/grove/kv/drivers/redisdriver` |
+| Memcached | `github.com/xraph/grove/kv/drivers/memcacheddriver` |
+| DynamoDB | `github.com/xraph/grove/kv/drivers/dynamodriver` |
+| BoltDB | `github.com/xraph/grove/kv/drivers/boltdriver` |
+| Badger | `github.com/xraph/grove/kv/drivers/badgerdriver` |
+
+## Step 1: Connect and Open a Store
+
+Create a driver, connect it to the backend, and pass it to `kv.Open`:
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/drivers/redisdriver"
+)
+
+func main() {
+    ctx := context.Background()
+
+    // Create the Redis driver and connect.
+    rdb := redisdriver.New()
+    if err := rdb.Open(ctx, "redis://localhost:6379/0"); err != nil {
+        log.Fatal(err)
+    }
+
+    // Open a Store backed by the Redis driver.
+    store, err := kv.Open(rdb)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer store.Close()
+
+    // Verify the connection.
+    if err := store.Ping(ctx); err != nil {
+        log.Fatal("cannot reach Redis:", err)
+    }
+}
+```
+
+## Step 2: Basic Operations
+
+### Set a value
+
+```go
+type User struct {
+    Name  string `json:"name"`
+    Email string `json:"email"`
+}
+
+user := User{Name: "Alice", Email: "alice@example.com"}
+err := store.Set(ctx, "user:1", &user)
+```
+
+### Get a value
+
+```go
+var retrieved User
+err := store.Get(ctx, "user:1", &retrieved)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(retrieved.Name) // Alice
+```
+
+### Delete a key
+
+```go
+err := store.Delete(ctx, "user:1")
+```
+
+### Check if a key exists
+
+```go
+count, err := store.Exists(ctx, "user:1")
+if count > 0 {
+    fmt.Println("key exists")
+}
+```
+
+## Step 3: Using TTL
+
+Set a TTL (time-to-live) on a key to have it expire automatically:
+
+```go
+import "time"
+
+// Set with a 5-minute TTL.
+err := store.Set(ctx, "session:abc", &sessionData, kv.WithTTL(5*time.Minute))
+
+// Check remaining TTL.
+ttl, err := store.TTL(ctx, "session:abc")
+fmt.Println("expires in:", ttl)
+
+// Update the TTL on an existing key.
+err = store.Expire(ctx, "session:abc", 10*time.Minute)
+```
+
+## Step 4: Using Codecs
+
+By default, the Store uses JSON for serialization. You can switch to MsgPack for smaller payloads and faster encoding:
+
+```go
+import "github.com/xraph/grove/kv/codec"
+
+// Use MsgPack at the store level.
+store, err := kv.Open(rdb, kv.WithCodec(codec.MsgPack()))
+```
+
+The codec is applied transparently -- `Get` and `Set` calls work the same regardless of which codec is active. See the [Codecs](/docs/kv/codecs) page for all built-in options and how to implement custom codecs.
+
+## Step 5: Conditional Writes
+
+Use `WithNX` to set a key only if it does not already exist (useful for distributed locks):
+
+```go
+err := store.Set(ctx, "lock:resource", &lockData, kv.WithNX())
+if errors.Is(err, kv.ErrConflict) {
+    fmt.Println("lock already held")
+}
+```
+
+Use `WithXX` to set a key only if it already exists (useful for updates):
+
+```go
+err := store.Set(ctx, "user:1", &updatedUser, kv.WithXX())
+if errors.Is(err, kv.ErrNotFound) {
+    fmt.Println("user does not exist")
+}
+```
+
+## Complete Example
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "time"
+
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/codec"
+    "github.com/xraph/grove/kv/drivers/redisdriver"
+)
+
+type User struct {
+    Name  string `json:"name"`
+    Email string `json:"email"`
+    Role  string `json:"role"`
+}
+
+func main() {
+    ctx := context.Background()
+
+    // Connect to Redis.
+    rdb := redisdriver.New()
+    if err := rdb.Open(ctx, "redis://localhost:6379/0"); err != nil {
+        log.Fatal(err)
+    }
+
+    // Open store with MsgPack codec.
+    store, err := kv.Open(rdb, kv.WithCodec(codec.MsgPack()))
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer store.Close()
+
+    // Set with TTL.
+    user := User{Name: "Alice", Email: "alice@example.com", Role: "admin"}
+    if err := store.Set(ctx, "user:1", &user, kv.WithTTL(24*time.Hour)); err != nil {
+        log.Fatal(err)
+    }
+
+    // Get.
+    var retrieved User
+    if err := store.Get(ctx, "user:1", &retrieved); err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("Name: %s, Role: %s\n", retrieved.Name, retrieved.Role)
+
+    // Check TTL.
+    ttl, _ := store.TTL(ctx, "user:1")
+    fmt.Printf("Expires in: %s\n", ttl)
+
+    // Delete.
+    if err := store.Delete(ctx, "user:1"); err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
+## Next Steps
+
+<Cards>
+  <Card title="Store Interface" href="/docs/kv/store-interface" description="Full API reference for every Store method, including Batch, Scan, and Set options." />
+  <Card title="Keyspaces" href="/docs/kv/keyspaces" description="Type-safe, namespaced key partitions with automatic prefix and TTL management." />
+  <Card title="Codecs" href="/docs/kv/codecs" description="JSON, MsgPack, Protobuf, Gob, and custom codec implementation." />
+  <Card title="KV Overview" href="/docs/kv/overview" description="Architecture, supported backends, and the full feature set." />
+</Cards>

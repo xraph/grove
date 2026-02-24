@@ -21,7 +21,7 @@ import (
 
     "github.com/xraph/grove"
     "github.com/xraph/grove/driver"
-    "github.com/xraph/grove/sqlitedriver"
+    "github.com/xraph/grove/drivers/sqlitedriver"
 )
 
 // 1. Create and open the driver
@@ -387,8 +387,8 @@ The `sqlitemigrate` package provides a migration executor that uses table-based 
 ```go
 import (
     "github.com/xraph/grove/migrate"
-    "github.com/xraph/grove/sqlitedriver"
-    "github.com/xraph/grove/sqlitedriver/sqlitemigrate"
+    "github.com/xraph/grove/drivers/sqlitedriver"
+    "github.com/xraph/grove/drivers/sqlitedriver/sqlitemigrate"
 )
 
 // Define a migration group

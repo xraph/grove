@@ -98,7 +98,7 @@ func TestMockDriver_CustomExecFunc(t *testing.T) {
 	ctx := context.Background()
 
 	customResult := &MockResult{rowsAffected: 42, lastInsertID: 7}
-	d.ExecFunc = func(ctx context.Context, query string, args ...any) (driver.Result, error) {
+	d.ExecFunc = func(_ context.Context, _ string, _ ...any) (driver.Result, error) {
 		return customResult, nil
 	}
 
@@ -127,7 +127,7 @@ func TestMockDriver_CustomExecFunc_Error(t *testing.T) {
 	d := NewMockDriver()
 	ctx := context.Background()
 
-	d.ExecFunc = func(ctx context.Context, query string, args ...any) (driver.Result, error) {
+	d.ExecFunc = func(_ context.Context, _ string, _ ...any) (driver.Result, error) {
 		return nil, fmt.Errorf("exec failed")
 	}
 

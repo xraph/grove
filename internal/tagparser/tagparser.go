@@ -45,14 +45,15 @@ func Parse(tag string) Tag {
 
 		key, value, hasColon := parseToken(tok)
 
-		if hasColon {
+		switch {
+		case hasColon:
 			// Key:value option.
 			t.Options[key] = value
-		} else if i == 0 && !nameAssigned {
+		case i == 0 && !nameAssigned:
 			// First plain token is the column name.
 			t.Name = key
 			nameAssigned = true
-		} else {
+		default:
 			// Subsequent plain tokens are boolean options.
 			t.Options[key] = ""
 		}

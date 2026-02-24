@@ -13,7 +13,7 @@ import (
 )
 
 // AuditEntry represents a single audit log entry.
-type AuditEntry struct {
+type AuditEntry struct { //nolint:revive // AuditEntry is the established public API name
 	Timestamp time.Time `json:"timestamp"`
 	Table     string    `json:"table"`
 	Operation string    `json:"operation"`
@@ -66,7 +66,7 @@ func NewLogHook(logger *slog.Logger) *Hook {
 }
 
 // AfterMutation records the mutation in the audit trail.
-func (h *Hook) AfterMutation(ctx context.Context, qc *hook.QueryContext, data any, result any) error {
+func (h *Hook) AfterMutation(ctx context.Context, qc *hook.QueryContext, data, _ any) error {
 	entry := &AuditEntry{
 		Timestamp: time.Now(),
 		Table:     qc.Table,

@@ -12,7 +12,13 @@ go get github.com/xraph/grove
 For PostgreSQL support (the most common driver):
 
 ```bash
-go get github.com/xraph/grove/pgdriver
+go get github.com/xraph/grove/drivers/pgdriver
+```
+
+For use as a [Forge extension](/docs/integration/forge-extension):
+
+```bash
+go get github.com/xraph/grove/extension
 ```
 
 ## Step 1: Define a Model
@@ -42,7 +48,7 @@ type User struct {
 import (
     "github.com/xraph/grove"
     "github.com/xraph/grove/driver"
-    "github.com/xraph/grove/pgdriver"
+    "github.com/xraph/grove/drivers/pgdriver"
 )
 
 // 1. Create and open the driver
@@ -115,3 +121,4 @@ type LegacyUser struct {
 - [Dual Tag System](/docs/concepts/dual-tags) — Learn how tag resolution works
 - [PostgreSQL Driver](/docs/drivers/postgres) — Full reference for PG-specific features
 - [Basic CRUD](/docs/guides/basic-crud) — Complete CRUD examples with relations
+- [Forge Extension](/docs/integration/forge-extension) — Use Grove with Forge for DI, config, and lifecycle management

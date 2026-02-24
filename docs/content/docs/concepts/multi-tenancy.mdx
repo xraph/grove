@@ -105,3 +105,23 @@ db.NewDelete(&user).WherePK().Exec(ctx)
 - Queries without a tenant context are denied by the hook (returns an error)
 - There is no built-in API to query across tenants
 - Admin/superuser bypass requires adding a context flag check at the top of your hook that returns `hook.Skip` for admin users
+
+## KV Store Multi-Tenancy
+
+The KV module provides a dedicated [Namespace middleware](/docs/kv/middleware/namespace) that automatically prefixes all keys with a tenant identifier:
+
+```go
+import (
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/middleware"
+)
+
+store, _ := kv.Open(drv, dsn,
+    kv.WithHook(middleware.NewNamespaceHook("tenant-123")),
+)
+
+// All keys are now prefixed: "tenant-123:user:456"
+store.Set(ctx, "user:456", userData)
+```
+
+This approach provides key-level isolation in shared KV backends like Redis without requiring separate databases per tenant.

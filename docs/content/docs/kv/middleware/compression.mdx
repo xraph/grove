@@ -1,0 +1,125 @@
+---
+title: Compression Middleware
+description: Transparent gzip compression and decompression for KV values.
+---
+
+The compression middleware transparently compresses values before they are stored and decompresses them when they are read. This reduces storage usage and network transfer size for large values without any changes to application code.
+
+## Installation
+
+```go
+import "github.com/xraph/grove/kv/middleware"
+```
+
+## Usage
+
+```go
+import (
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/middleware"
+)
+
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewCompress(middleware.Gzip)),
+)
+```
+
+### Constructor
+
+```go
+func NewCompress(algo CompressionAlgorithm, threshold ...int) *CompressHook
+```
+
+| Parameter | Description |
+|---|---|
+| `algo` | Compression algorithm to use (currently `middleware.Gzip`) |
+| `threshold` | Optional minimum value size in bytes before compression is applied (default: 256) |
+
+### Threshold Examples
+
+```go
+// Compress values >= 256 bytes (default)
+middleware.NewCompress(middleware.Gzip)
+
+// Compress values >= 1KB
+middleware.NewCompress(middleware.Gzip, 1024)
+
+// Compress all values regardless of size
+middleware.NewCompress(middleware.Gzip, 0)
+```
+
+## How It Works
+
+The compression middleware implements both `PreQueryHook` and `PostQueryHook`:
+
+1. **On SET (PreQueryHook):** If the value exceeds the threshold, it is compressed using gzip and prefixed with a magic byte (`0x1F`) that marks it as compressed data.
+2. **On GET (PostQueryHook):** The middleware checks the first byte of the value. If it matches the magic byte, the remaining bytes are decompressed. Uncompressed values pass through unchanged.
+
+```
+SET "config" = <2KB JSON>
+  |
+  v
+[Size >= threshold?] --yes--> Compress --> [0x1F | gzip data] --> Driver
+  |
+  no
+  v
+[Raw value] --> Driver
+```
+
+```
+GET "config"
+  |
+  v
+Driver --> [0x1F prefix?] --yes--> Decompress --> Return plaintext
+  |
+  no
+  v
+Return raw value
+```
+
+## Magic Byte Prefix
+
+Compressed values are prefixed with the byte `0x1F` to distinguish them from uncompressed values. This allows the middleware to handle both compressed and uncompressed data transparently:
+
+- Values written **with** compression enabled carry the `0x1F` prefix and are decompressed on read.
+- Values written **without** compression (or below the threshold) have no prefix and are returned as-is.
+
+This means you can enable compression on an existing store and it will correctly handle both old uncompressed values and new compressed values.
+
+## Compression Algorithm
+
+Currently, the middleware supports **gzip** compression (`middleware.Gzip`), which provides a good balance of compression ratio and speed. Gzip is widely supported and works well for JSON, text, and other structured data commonly stored in KV stores.
+
+## Storage and Network Savings
+
+Compression is most effective for:
+
+- **JSON payloads** -- typically 60-80% reduction
+- **Text and log data** -- typically 70-90% reduction
+- **Serialized structs** -- typically 40-60% reduction
+
+Small values (below the threshold) are not compressed because the gzip overhead can make them larger. The default threshold of 256 bytes is a reasonable starting point for most workloads.
+
+## Combining with Encryption
+
+When using both compression and encryption, always compress **before** encrypting. Encrypted data has high entropy and does not compress well. Register the compression hook before the encryption hook:
+
+```go
+encryptHook, err := middleware.NewEncrypt(key)
+if err != nil {
+    log.Fatal(err)
+}
+
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewCompress(middleware.Gzip)),
+    kv.WithHook(encryptHook),
+)
+```
+
+## API Reference
+
+| Method | Description |
+|---|---|
+| `NewCompress(algo, threshold...)` | Create a new compression hook |
+| `Compress(data)` | Manually compress a byte slice |
+| `Decompress(data)` | Manually decompress a byte slice (auto-detects magic byte) |

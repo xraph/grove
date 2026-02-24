@@ -125,7 +125,7 @@ type Condition struct {
 }
 
 // HookResult is returned by pre-query/pre-mutation hooks.
-type HookResult struct {
+type HookResult struct { //nolint:revive // HookResult is the established public API name
 	Decision Decision
 	Error    error         // Set when Decision == Deny.
 	Filters  []ExtraFilter // Additional conditions to inject (pre-query).

@@ -46,14 +46,14 @@ func (d *MockDriver) Name() string            { return "mock" }
 func (d *MockDriver) Dialect() driver.Dialect { return d.dialect }
 func (d *MockDriver) SupportsReturning() bool { return true }
 
-func (d *MockDriver) Open(ctx context.Context, dsn string, opts ...driver.Option) error {
+func (d *MockDriver) Open(_ context.Context, _ string, opts ...driver.Option) error {
 	d.opts = driver.ApplyOptions(opts)
 	return nil
 }
 
 func (d *MockDriver) Close() error { return nil }
 
-func (d *MockDriver) Ping(ctx context.Context) error { return nil }
+func (d *MockDriver) Ping(_ context.Context) error { return nil }
 
 func (d *MockDriver) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
 	d.record("Exec", query, args)
@@ -79,7 +79,7 @@ func (d *MockDriver) QueryRow(ctx context.Context, query string, args ...any) dr
 	return &MockRow{}
 }
 
-func (d *MockDriver) BeginTx(ctx context.Context, opts *driver.TxOptions) (driver.Tx, error) {
+func (d *MockDriver) BeginTx(_ context.Context, _ *driver.TxOptions) (driver.Tx, error) {
 	return &MockTx{driver: d}, nil
 }
 
@@ -143,7 +143,7 @@ type MockRows struct {
 }
 
 func (r *MockRows) Next() bool                 { return false }
-func (r *MockRows) Scan(dest ...any) error     { return fmt.Errorf("grovetest: no rows") }
+func (r *MockRows) Scan(_ ...any) error        { return fmt.Errorf("grovetest: no rows") }
 func (r *MockRows) Columns() ([]string, error) { return nil, nil }
 func (r *MockRows) Close() error               { r.closed = true; return nil }
 func (r *MockRows) Err() error                 { return nil }
@@ -151,7 +151,7 @@ func (r *MockRows) Err() error                 { return nil }
 // MockRow implements driver.Row.
 type MockRow struct{}
 
-func (r *MockRow) Scan(dest ...any) error { return fmt.Errorf("grovetest: no rows") }
+func (r *MockRow) Scan(_ ...any) error { return fmt.Errorf("grovetest: no rows") }
 
 // MockTx implements driver.Tx.
 type MockTx struct {

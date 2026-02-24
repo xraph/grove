@@ -9,7 +9,7 @@ import (
 )
 
 // noop is a no-op migration function used across all tests.
-var noop MigrateFunc = func(ctx context.Context, exec Executor) error { return nil }
+var noop MigrateFunc = func(_ context.Context, _ Executor) error { return nil }
 
 func TestNewGroup(t *testing.T) {
 	g := NewGroup("core")

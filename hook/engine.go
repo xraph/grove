@@ -162,7 +162,7 @@ func (e *Engine) RunPreMutation(ctx context.Context, qc *QueryContext, data any)
 }
 
 // RunPostMutation executes all matching PostMutationHook hooks.
-func (e *Engine) RunPostMutation(ctx context.Context, qc *QueryContext, data any, result any) error {
+func (e *Engine) RunPostMutation(ctx context.Context, qc *QueryContext, data, result any) error {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 

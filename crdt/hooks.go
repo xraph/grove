@@ -16,7 +16,7 @@ var (
 
 // AfterMutation is called after every INSERT, UPDATE, or DELETE on a
 // CRDT-enabled table. It writes CRDT metadata to the shadow table.
-func (p *Plugin) AfterMutation(ctx context.Context, qc *hook.QueryContext, data any, _ any) error {
+func (p *Plugin) AfterMutation(ctx context.Context, qc *hook.QueryContext, data, _ any) error {
 	if p.metadata == nil {
 		return nil
 	}
@@ -117,7 +117,9 @@ func (p *Plugin) writeFieldStates(ctx context.Context, table, pk string, fields 
 				// Add new elements from the current value.
 				elements := toSlice(value)
 				for _, elem := range elements {
-					_ = set.Add(elem, p.nodeID, clock)
+					if err := set.Add(elem, p.nodeID, clock); err != nil {
+						return fmt.Errorf("crdt: add set element: %w", err)
+					}
 				}
 			}
 
@@ -182,7 +184,7 @@ func extractFieldValues(data any) map[string]any {
 	if err != nil {
 		return values
 	}
-	_ = json.Unmarshal(raw, &values)
+	json.Unmarshal(raw, &values) //nolint:errcheck // best-effort struct-to-map conversion
 	return values
 }
 
@@ -198,7 +200,10 @@ func toInt64(v any) int64 {
 	case float64:
 		return int64(val)
 	case json.Number:
-		n, _ := val.Int64()
+		n, err := val.Int64()
+		if err != nil {
+			return 0
+		}
 		return n
 	default:
 		return 0

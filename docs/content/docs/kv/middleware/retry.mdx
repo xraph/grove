@@ -1,0 +1,133 @@
+---
+title: Retry Middleware
+description: Automatic retry with exponential backoff and jitter for transient KV failures.
+---
+
+The retry middleware automatically retries failed KV operations with exponential backoff and optional jitter. This handles transient failures -- network blips, temporary unavailability, or lock contention -- without requiring retry logic in application code.
+
+## Installation
+
+```go
+import "github.com/xraph/grove/kv/middleware"
+```
+
+## Usage
+
+```go
+import (
+    "time"
+
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/middleware"
+)
+
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewRetry(3)),
+)
+```
+
+### Constructor
+
+```go
+func NewRetry(maxAttempts int, opts ...RetryOption) *RetryHook
+```
+
+| Parameter | Description |
+|---|---|
+| `maxAttempts` | Maximum number of attempts (including the initial attempt) |
+| `opts` | Optional configuration functions |
+
+### Options
+
+```go
+// Set the initial wait duration before the first retry (default: 100ms).
+middleware.WithInitialWait(200 * time.Millisecond)
+
+// Set the maximum wait duration between retries (default: 5s).
+middleware.WithMaxWait(10 * time.Second)
+
+// Enable or disable random jitter on retry delays (default: true).
+middleware.WithJitter(false)
+```
+
+Full example with all options:
+
+```go
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewRetry(5,
+        middleware.WithInitialWait(200*time.Millisecond),
+        middleware.WithMaxWait(10*time.Second),
+        middleware.WithJitter(true),
+    )),
+)
+```
+
+## Exponential Backoff with Jitter
+
+The retry middleware calculates wait times using exponential backoff:
+
+```
+delay = initialWait * 2^attempt
+```
+
+With jitter enabled (the default), the actual delay is randomized within 50-100% of the calculated value to prevent thundering herd effects when many clients retry simultaneously:
+
+```
+delay = delay * random(0.5, 1.0)
+```
+
+The delay is capped at `maxWait` to prevent excessively long waits.
+
+### Example Timing (defaults)
+
+| Attempt | Base Delay | With Jitter (range) |
+|---|---|---|
+| 1st retry | 100ms | 50ms -- 100ms |
+| 2nd retry | 200ms | 100ms -- 200ms |
+| 3rd retry | 400ms | 200ms -- 400ms |
+| 4th retry | 800ms | 400ms -- 800ms |
+| 5th retry | 1.6s | 800ms -- 1.6s |
+| 6th+ retry | 5s (capped) | 2.5s -- 5s |
+
+## Which Errors Trigger Retries
+
+The retry middleware retries operations that return errors from the driver layer. These typically include:
+
+- **Network errors** -- connection refused, timeout, reset
+- **Temporary unavailability** -- backend overloaded, rate limited
+- **I/O errors** -- transient disk or storage failures
+
+The following errors are **not retried**:
+
+- `kv.ErrKeyNotFound` -- the key does not exist (not a transient condition)
+- `kv.ErrKeyEmpty` -- invalid input
+- Context cancellation or deadline exceeded
+
+## Inspecting Retry Configuration
+
+You can query the retry hook's configuration programmatically:
+
+```go
+retry := middleware.NewRetry(3, middleware.WithInitialWait(200*time.Millisecond))
+
+// Get the maximum number of attempts
+retry.MaxAttempts() // 3
+
+// Calculate the backoff duration for a specific attempt (0-indexed)
+retry.BackoffDuration(0) // ~200ms (with jitter)
+retry.BackoffDuration(1) // ~400ms (with jitter)
+retry.BackoffDuration(2) // ~800ms (with jitter)
+```
+
+## Combining with Circuit Breaker
+
+For robust fault tolerance, combine retries with the [circuit breaker](/docs/kv/middleware/circuit-breaker). Register the circuit breaker **before** the retry hook so that the circuit breaker can reject requests immediately when the backend is known to be down:
+
+```go
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewCircuitBreaker(5, 30*time.Second)),
+    kv.WithHook(middleware.NewRetry(3)),
+)
+```
+
+This prevents the retry middleware from making futile attempts against a backend that is already known to be unavailable.

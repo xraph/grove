@@ -1,0 +1,4 @@
+{
+  "title": "CRDT",
+  "pages": ["index", "getting-started", "types", "sync", "streaming", "typescript-client", "api-reference"]
+}

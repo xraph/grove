@@ -11,7 +11,7 @@ import (
   "fmt"
 
   "github.com/xraph/grove"
-  "github.com/xraph/grove/pgdriver"
+  "github.com/xraph/grove/drivers/pgdriver"
 )
 
 type User struct {
@@ -55,7 +55,7 @@ import (
   "fmt"
 
   "github.com/xraph/grove"
-  "github.com/xraph/grove/mongodriver"
+  "github.com/xraph/grove/drivers/mongodriver"
   "go.mongodb.org/mongo-driver/bson"
 )
 

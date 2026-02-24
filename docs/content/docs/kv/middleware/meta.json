@@ -1,0 +1,14 @@
+{
+  "title": "Middleware",
+  "pages": [
+    "overview",
+    "cache",
+    "circuit-breaker",
+    "retry",
+    "compression",
+    "encryption",
+    "logging",
+    "namespace",
+    "stampede"
+  ]
+}

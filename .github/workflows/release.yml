@@ -55,13 +55,13 @@ jobs:
 
       - name: Verify driver sub-modules
         run: |
-          for mod in pgdriver mysqldriver sqlitedriver mongodriver tursodriver clickhousedriver; do
+          for mod in pgdriver mysqldriver sqlitedriver mongodriver tursodriver clickhousedriver esdriver; do
             echo "::group::Verifying $mod"
-            cd "$mod"
+            cd "drivers/$mod"
             go mod download
             go build ./...
             go test -race -count=1 ./...
-            cd ..
+            cd ../..
             echo "::endgroup::"
           done
 
@@ -71,6 +71,25 @@ jobs:
           go mod download
           go build ./...
 
+      - name: Verify KV module
+        working-directory: kv
+        run: |
+          go mod download
+          go build ./...
+          go test -race -count=1 ./...
+
+      - name: Verify KV driver sub-modules
+        run: |
+          for mod in badgerdriver boltdriver dynamodriver memcacheddriver redisdriver; do
+            echo "::group::Verifying kv/drivers/$mod"
+            cd "kv/drivers/$mod"
+            go mod download
+            go build ./...
+            go test -race -count=1 ./...
+            cd ../../..
+            echo "::endgroup::"
+          done
+
       - name: Tag sub-modules
         run: |
           TAG="${{ steps.set-tag.outputs.tag }}"
@@ -78,8 +97,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           # Tag all driver sub-modules
-          for mod in pgdriver mysqldriver sqlitedriver mongodriver tursodriver clickhousedriver; do
-            MOD_TAG="$mod/$TAG"
+          for mod in pgdriver mysqldriver sqlitedriver mongodriver tursodriver clickhousedriver esdriver; do
+            MOD_TAG="drivers/$mod/$TAG"
             echo "Tagging $MOD_TAG"
             git tag "$MOD_TAG"
             git push origin "$MOD_TAG"
@@ -90,6 +109,20 @@ jobs:
           echo "Tagging $EXT_TAG"
           git tag "$EXT_TAG"
           git push origin "$EXT_TAG"
+
+          # Tag KV sub-module
+          KV_TAG="kv/$TAG"
+          echo "Tagging $KV_TAG"
+          git tag "$KV_TAG"
+          git push origin "$KV_TAG"
+
+          # Tag all KV driver sub-modules
+          for mod in badgerdriver boltdriver dynamodriver memcacheddriver redisdriver; do
+            MOD_TAG="kv/drivers/$mod/$TAG"
+            echo "Tagging $MOD_TAG"
+            git tag "$MOD_TAG"
+            git push origin "$MOD_TAG"
+          done
 
       - name: Generate release notes
         id: notes
@@ -125,16 +158,31 @@ jobs:
 
             Driver sub-modules:
             ```bash
-            go get github.com/xraph/grove/pgdriver@${{ steps.set-tag.outputs.tag }}
-            go get github.com/xraph/grove/mysqldriver@${{ steps.set-tag.outputs.tag }}
-            go get github.com/xraph/grove/sqlitedriver@${{ steps.set-tag.outputs.tag }}
-            go get github.com/xraph/grove/mongodriver@${{ steps.set-tag.outputs.tag }}
-            go get github.com/xraph/grove/tursodriver@${{ steps.set-tag.outputs.tag }}
-            go get github.com/xraph/grove/clickhousedriver@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove/drivers/pgdriver@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove/drivers/mysqldriver@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove/drivers/sqlitedriver@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove/drivers/mongodriver@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove/drivers/tursodriver@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove/drivers/clickhousedriver@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove/drivers/esdriver@${{ steps.set-tag.outputs.tag }}
             ```
 
             Forge extension:
             ```bash
             go get github.com/xraph/grove/extension@${{ steps.set-tag.outputs.tag }}
+            ```
+
+            KV store:
+            ```bash
+            go get github.com/xraph/grove/kv@${{ steps.set-tag.outputs.tag }}
+            ```
+
+            KV driver sub-modules:
+            ```bash
+            go get github.com/xraph/grove/kv/drivers/badgerdriver@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove/kv/drivers/boltdriver@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove/kv/drivers/dynamodriver@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove/kv/drivers/memcacheddriver@${{ steps.set-tag.outputs.tag }}
+            go get github.com/xraph/grove/kv/drivers/redisdriver@${{ steps.set-tag.outputs.tag }}
             ```
           generate_release_notes: true

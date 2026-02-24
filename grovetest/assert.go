@@ -66,7 +66,7 @@ func AssertNoQueries(t *testing.T, d *MockDriver) {
 }
 
 func querySummary(d *MockDriver) []string {
-	var summaries []string
+	summaries := make([]string, 0, len(d.Queries()))
 	for _, q := range d.Queries() {
 		summaries = append(summaries, q.Method+": "+q.Query)
 	}

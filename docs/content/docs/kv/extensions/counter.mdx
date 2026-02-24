@@ -1,0 +1,212 @@
+---
+title: "Atomic Counter"
+description: "Distributed atomic counter with increment, decrement, get, set, and reset operations backed by Grove KV."
+---
+
+The `AtomicCounter` extension provides a distributed counter that supports atomic increment, decrement, get, set, and reset operations. Unlike the CRDT counter (which supports eventual consistency across nodes), the atomic counter relies on a consistent backing store for strict ordering.
+
+## Installation
+
+```go
+import "github.com/xraph/grove/kv/extension"
+```
+
+## Creating a Counter
+
+```go
+counter := extension.NewAtomicCounter(store, "visitors")
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `store` | `*kv.Store` | The backing KV store |
+| `key` | `string` | Logical name for the counter (auto-prefixed with `counter:`) |
+
+The counter is stored at `counter:<key>`. If the key does not exist, the counter starts at zero.
+
+## API Reference
+
+### Increment
+
+Adds `delta` to the counter and returns the new value.
+
+```go
+func (c *AtomicCounter) Increment(ctx context.Context, delta int64) (int64, error)
+```
+
+```go
+newVal, err := counter.Increment(ctx, 1)
+// newVal = 1 (if counter was 0)
+
+newVal, err = counter.Increment(ctx, 5)
+// newVal = 6
+```
+
+### Decrement
+
+Subtracts `delta` from the counter and returns the new value. Internally, this calls `Increment` with `-delta`.
+
+```go
+func (c *AtomicCounter) Decrement(ctx context.Context, delta int64) (int64, error)
+```
+
+```go
+newVal, err := counter.Decrement(ctx, 2)
+// newVal = 4 (if counter was 6)
+```
+
+The counter can go negative -- there is no floor enforcement.
+
+### Get
+
+Returns the current counter value. Returns `0` if the counter has not been set.
+
+```go
+func (c *AtomicCounter) Get(ctx context.Context) (int64, error)
+```
+
+```go
+val, err := counter.Get(ctx)
+```
+
+### Set
+
+Sets the counter to a specific value, overwriting whatever was there before.
+
+```go
+func (c *AtomicCounter) Set(ctx context.Context, value int64) error
+```
+
+```go
+err := counter.Set(ctx, 1000)
+```
+
+### Reset
+
+Sets the counter to zero.
+
+```go
+func (c *AtomicCounter) Reset(ctx context.Context) error
+```
+
+```go
+err := counter.Reset(ctx)
+```
+
+## Example: Visitor Counter
+
+Track page views across multiple application instances using a shared counter.
+
+```go
+package main
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    "net/http"
+
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/extension"
+    "github.com/xraph/grove/kv/drivers/redisdriver"
+)
+
+func main() {
+    ctx := context.Background()
+
+    rdb := redisdriver.New()
+    rdb.Open(ctx, "redis://localhost:6379/0")
+
+    store, _ := kv.Open(rdb)
+    defer store.Close()
+
+    visitors := extension.NewAtomicCounter(store, "page-views")
+
+    mux := http.NewServeMux()
+
+    mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+        count, err := visitors.Increment(r.Context(), 1)
+        if err != nil {
+            http.Error(w, "counter error", http.StatusInternalServerError)
+            return
+        }
+
+        json.NewEncoder(w).Encode(map[string]int64{
+            "total_views": count,
+        })
+    })
+
+    mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+        count, err := visitors.Get(r.Context())
+        if err != nil {
+            http.Error(w, "counter error", http.StatusInternalServerError)
+            return
+        }
+
+        json.NewEncoder(w).Encode(map[string]int64{
+            "total_views": count,
+        })
+    })
+
+    fmt.Println("listening on :8080")
+    http.ListenAndServe(":8080", mux)
+}
+```
+
+## Example: Inventory Tracking
+
+Use multiple counters to track available stock per product.
+
+```go
+func decrementStock(ctx context.Context, store *kv.Store, productID string, qty int64) error {
+    counter := extension.NewAtomicCounter(store, "stock:"+productID)
+
+    current, err := counter.Get(ctx)
+    if err != nil {
+        return err
+    }
+
+    if current < qty {
+        return fmt.Errorf("insufficient stock: have %d, need %d", current, qty)
+    }
+
+    _, err = counter.Decrement(ctx, qty)
+    return err
+}
+
+func restockProduct(ctx context.Context, store *kv.Store, productID string, qty int64) (int64, error) {
+    counter := extension.NewAtomicCounter(store, "stock:"+productID)
+    return counter.Increment(ctx, qty)
+}
+```
+
+## Key Layout
+
+Counters are stored with the following key pattern:
+
+```
+counter:<key>
+```
+
+For example:
+
+```
+counter:visitors
+counter:page-views
+counter:stock:SKU-001
+```
+
+The value is stored as an `int64`.
+
+## Atomic Counter vs. CRDT Counter
+
+| Feature | AtomicCounter | CRDT PN-Counter |
+|---------|--------------|-----------------|
+| Consistency | Strong (read-your-write) | Eventual |
+| Multi-node writes | Requires consistent store | Conflict-free merge |
+| Performance | Single key read/write | Per-node tracking |
+| Use case | Exact counts, inventory | Distributed metrics, analytics |
+
+Use `AtomicCounter` when you need exact, strongly consistent values (inventory, billing). Use the [CRDT PN-Counter](/docs/crdt/types) when you need conflict-free multi-node writes with eventual convergence.

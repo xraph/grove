@@ -21,7 +21,7 @@ import (
 
     "github.com/xraph/grove"
     "github.com/xraph/grove/driver"
-    "github.com/xraph/grove/mysqldriver"
+    "github.com/xraph/grove/drivers/mysqldriver"
 )
 
 // 1. Create and open the driver
@@ -421,8 +421,8 @@ The `mysqlmigrate` package provides a MySQL-specific migration executor that use
 ```go
 import (
     "github.com/xraph/grove/migrate"
-    "github.com/xraph/grove/mysqldriver"
-    "github.com/xraph/grove/mysqldriver/mysqlmigrate"
+    "github.com/xraph/grove/drivers/mysqldriver"
+    "github.com/xraph/grove/drivers/mysqldriver/mysqlmigrate"
 )
 
 // Define a migration group

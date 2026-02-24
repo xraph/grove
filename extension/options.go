@@ -1,30 +1,28 @@
 package extension
 
 import (
-	"log/slog"
-
 	"github.com/xraph/grove"
 	"github.com/xraph/grove/crdt"
 	"github.com/xraph/grove/hook"
 	"github.com/xraph/grove/migrate"
 )
 
-// Config holds Forge extension configuration.
-type Config struct {
-	DisableMigrate bool
-}
-
 // ExtOption is a functional option for the Forge extension.
 type ExtOption func(*Extension)
 
-// WithConfig sets the extension config.
-func WithConfig(c Config) ExtOption { return func(e *Extension) { e.config = c } }
-
-// WithLogger sets the logger.
-func WithLogger(l *slog.Logger) ExtOption { return func(e *Extension) { e.logger = l } }
-
-// WithDriver sets the database driver for the extension.
+// WithDriver sets a pre-configured database driver for the extension.
+// When set, this takes precedence over YAML driver/dsn configuration.
 func WithDriver(drv grove.GroveDriver) ExtOption { return func(e *Extension) { e.driver = drv } }
+
+// WithDSN sets the driver name and DSN for the extension.
+// The driver will be created from the registry during Register().
+// If WithDriver() is also set, it takes precedence.
+func WithDSN(driver, dsn string) ExtOption {
+	return func(e *Extension) {
+		e.config.Driver = driver
+		e.config.DSN = dsn
+	}
+}
 
 // WithMigrations adds migration groups to the extension.
 func WithMigrations(groups ...*migrate.Group) ExtOption {
@@ -40,6 +38,27 @@ func WithHook(h any, scope ...hook.Scope) ExtOption {
 		}
 		e.hooks = append(e.hooks, hookEntry{hook: h, scope: s})
 	}
+}
+
+// WithRequireConfig requires config to be present in YAML files.
+// If true and no config is found, Register returns an error.
+func WithRequireConfig(require bool) ExtOption {
+	return func(e *Extension) { e.config.RequireConfig = require }
+}
+
+// WithDisableRoutes disables CRDT sync route registration.
+func WithDisableRoutes() ExtOption {
+	return func(e *Extension) { e.config.DisableRoutes = true }
+}
+
+// WithDisableMigrate disables automatic migration execution.
+func WithDisableMigrate() ExtOption {
+	return func(e *Extension) { e.config.DisableMigrate = true }
+}
+
+// WithBasePath sets the URL prefix for CRDT sync routes.
+func WithBasePath(path string) ExtOption {
+	return func(e *Extension) { e.config.BasePath = path }
 }
 
 // --- CRDT Options ---

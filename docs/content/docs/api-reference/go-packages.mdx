@@ -14,10 +14,13 @@ description: Reference for all Grove Go packages.
 | `hook` | `github.com/xraph/grove/hook` | Privacy hooks: PreQuery, PostQuery, PreMutation, PostMutation, StreamRowHook |
 | `stream` | `github.com/xraph/grove/stream` | Streaming iterator: Stream[T], pipeline transforms, ChangeStream[T] |
 | `migrate` | `github.com/xraph/grove/migrate` | Migration system: Group, Migration, Orchestrator |
-| `pgdriver` | `github.com/xraph/grove/pgdriver` | PostgreSQL driver (pgx-based) |
-| `mysqldriver` | `github.com/xraph/grove/mysqldriver` | MySQL driver |
-| `sqlitedriver` | `github.com/xraph/grove/sqlitedriver` | SQLite driver (pure Go) |
-| `mongodriver` | `github.com/xraph/grove/mongodriver` | MongoDB driver |
+| `pgdriver` | `github.com/xraph/grove/drivers/pgdriver` | PostgreSQL driver (pgx-based) |
+| `mysqldriver` | `github.com/xraph/grove/drivers/mysqldriver` | MySQL driver |
+| `sqlitedriver` | `github.com/xraph/grove/drivers/sqlitedriver` | SQLite driver (pure Go) |
+| `mongodriver` | `github.com/xraph/grove/drivers/mongodriver` | MongoDB driver |
+| `tursodriver` | `github.com/xraph/grove/drivers/tursodriver` | Turso/libSQL driver |
+| `clickhousedriver` | `github.com/xraph/grove/drivers/clickhousedriver` | ClickHouse driver |
+| `esdriver` | `github.com/xraph/grove/drivers/esdriver` | Elasticsearch driver |
 | `plugin` | `github.com/xraph/grove/plugin` | Plugin interfaces and registry |
 | `grovetest` | `github.com/xraph/grove/grovetest` | Testing utilities: mock driver, fixtures, assertions |
 | `extension` | `github.com/xraph/grove/extension` | Forge extension entry point |
@@ -26,6 +29,20 @@ description: Reference for all Grove Go packages.
 | `internal/tagparser` | `github.com/xraph/grove/internal/tagparser` | High-performance struct tag parser |
 | `internal/pool` | `github.com/xraph/grove/internal/pool` | sync.Pool-based byte buffer pool |
 | `internal/safe` | `github.com/xraph/grove/internal/safe` | Safe identifier quoting |
+| **KV Module** | | |
+| `kv` | `github.com/xraph/grove/kv` | Core KV Store: Open, Get, Set, Delete, Exists, MGet, MSet |
+| `kv/driver` | `github.com/xraph/grove/kv/driver` | KV Driver interface, capabilities, optional interfaces |
+| `kv/codec` | `github.com/xraph/grove/kv/codec` | Codecs: JSON, MsgPack, Protobuf, Gob |
+| `kv/keyspace` | `github.com/xraph/grove/kv/keyspace` | Keyspace[T] typed key-value partitions |
+| `kv/middleware` | `github.com/xraph/grove/kv/middleware` | Middleware: cache, retry, circuit, compress, encrypt, namespace, logging, stampede |
+| `kv/crdt` | `github.com/xraph/grove/kv/crdt` | CRDT adapter: Counter, Register[T], Set[T], Map, Syncer |
+| `kv/extension` | `github.com/xraph/grove/kv/extension` | Extensions: lock, ratelimit, session, counter, leaderboard, queue |
+| `kv/redisdriver` | `github.com/xraph/grove/kv/drivers/redisdriver` | Redis KV driver (go-redis) |
+| `kv/memcacheddriver` | `github.com/xraph/grove/kv/drivers/memcacheddriver` | Memcached KV driver (gomemcache) |
+| `kv/dynamodriver` | `github.com/xraph/grove/kv/drivers/dynamodriver` | DynamoDB KV driver (aws-sdk-go-v2) |
+| `kv/boltdriver` | `github.com/xraph/grove/kv/drivers/boltdriver` | BoltDB KV driver (bbolt) |
+| `kv/badgerdriver` | `github.com/xraph/grove/kv/drivers/badgerdriver` | Badger KV driver (badger/v4) |
+| `kv/kvtest` | `github.com/xraph/grove/kv/kvtest` | KV conformance test suite and mock driver |
 
 ## Core Types
 

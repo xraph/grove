@@ -16,7 +16,7 @@ var scanPtrPool = sync.Pool{
 }
 
 func getScanPtrs(n int) *[]any {
-	sp := scanPtrPool.Get().(*[]any)
+	sp := scanPtrPool.Get().(*[]any) //nolint:errcheck // sync.Pool.New always returns *[]any
 	s := *sp
 	if cap(s) < n {
 		*sp = make([]any, n)
@@ -54,7 +54,7 @@ type Rows interface {
 // dest must be a pointer to a struct. The function builds a slice of field
 // pointers from the struct based on the Table's Fields ordering and calls
 // row.Scan with those pointers.
-func ScanRow(row Row, dest any, table *schema.Table) error {
+func ScanRow(row Row, dest any, table *schema.Table) error { //nolint:revive // ScanRow is the established public API name
 	v := reflect.ValueOf(dest)
 	if v.Kind() != reflect.Ptr || v.IsNil() {
 		return fmt.Errorf("scan: dest must be a non-nil pointer to a struct, got %T", dest)
@@ -83,7 +83,7 @@ func ScanRow(row Row, dest any, table *schema.Table) error {
 //
 // After initial column resolution the hot loop performs zero allocations
 // beyond the new struct values appended to the slice.
-func ScanRows(rows Rows, dest any, table *schema.Table) error {
+func ScanRows(rows Rows, dest any, table *schema.Table) error { //nolint:revive // ScanRows is the established public API name
 	// Validate dest type.
 	destVal := reflect.ValueOf(dest)
 	if destVal.Kind() != reflect.Ptr || destVal.IsNil() {

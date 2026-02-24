@@ -1,0 +1,112 @@
+---
+title: "Grove KV Overview"
+description: "A command-oriented data access layer for key-value stores with typed keyspaces, middleware hooks, CRDT integration, and pluggable backends."
+---
+
+import { Cards, Card } from "fumadocs-ui/components/card";
+
+Grove KV is a command-oriented data access layer for key-value, cache, and document stores. It is part of the Grove ecosystem and shares Grove's hook engine, plugin architecture, CRDT layer, and observability infrastructure.
+
+Grove KV is not a fake SQL abstraction over SET/GET -- it exposes **native idioms per store** (Redis pipelines, DynamoDB expressions, Memcached CAS) while providing a unified `Store` interface for common operations.
+
+## Supported Backends
+
+Grove KV ships with dedicated drivers for five backends:
+
+| Driver | Package | Capabilities |
+|--------|---------|-------------|
+| **Redis** | `redisdriver` | TTL, CAS, Scan, Batch, PubSub, Streams, Transactions, Sorted Sets |
+| **Memcached** | `memcacheddriver` | TTL, CAS, Batch |
+| **DynamoDB** | `dynamodriver` | TTL, Batch, Expressions, Transactions |
+| **BoltDB** | `boltdriver` | Scan, Transactions |
+| **Badger** | `badgerdriver` | TTL, Scan, Batch, Transactions, Iterators |
+
+Each driver implements the core `driver.Driver` interface and optionally implements `BatchDriver`, `TTLDriver`, `ScanDriver`, `CASDriver`, `PubSubDriver`, and `TransactionDriver` for extended capabilities.
+
+## Architecture
+
+```
+Store
+ ├── Driver         (Redis, Memcached, DynamoDB, BoltDB, Badger)
+ ├── Codec          (JSON, MsgPack, Protobuf, Gob)
+ └── Hook Engine    (pre/post command hooks, shared with Grove ORM)
+
+Keyspace[T]         (typed, namespaced partition over a Store)
+
+Extensions          (Lock, RateLimit, Session, Counter, Leaderboard, Queue)
+
+CRDT Layer          (LWW-Register, PN-Counter, OR-Set, CRDT Map, Sync)
+```
+
+The `Store` wraps a connected driver, a default codec, and a hook engine. All values pass through the codec for serialization before reaching the driver. Hooks intercept every command for logging, namespacing, compression, encryption, caching, and more.
+
+## Key Features
+
+- **Command-Oriented** -- Operations map directly to KV commands (GET, SET, DEL, MGET, MSET, TTL, EXPIRE, SCAN) rather than SQL-style queries
+- **Typed Keyspaces** -- `Keyspace[T]` binds a Go type, key prefix, codec, and TTL policy to a partition of the store for type-safe access
+- **Middleware as Hooks** -- Pre/post command hooks for logging, namespacing, compression, encryption, stampede protection, retries, and circuit breaking
+- **CRDT Integration** -- Built-in LWW-Register, PN-Counter, OR-Set, and CRDT Map types with sync support for distributed state
+- **Extensions** -- Higher-level primitives built on the Store: distributed locks, rate limiters, sessions, atomic counters, leaderboards, and queues
+- **Pluggable Codecs** -- JSON (default), MsgPack, Protobuf, and Gob with support for custom codecs
+- **Native Access via Unwrap** -- Access driver-specific features (Redis pipelines, Badger iterators, DynamoDB expressions) via typed Unwrap functions
+
+## Quick Example
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "time"
+
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/drivers/redisdriver"
+)
+
+func main() {
+    ctx := context.Background()
+
+    // 1. Create and connect the Redis driver.
+    rdb := redisdriver.New()
+    rdb.Open(ctx, "redis://localhost:6379/0")
+
+    // 2. Open a Store with the connected driver.
+    store, err := kv.Open(rdb)
+    if err != nil {
+        panic(err)
+    }
+    defer store.Close()
+
+    // 3. Set a value with a TTL.
+    type User struct {
+        Name  string `json:"name"`
+        Email string `json:"email"`
+    }
+
+    err = store.Set(ctx, "user:1", &User{
+        Name:  "Alice",
+        Email: "alice@example.com",
+    }, kv.WithTTL(5*time.Minute))
+    if err != nil {
+        panic(err)
+    }
+
+    // 4. Get the value back.
+    var user User
+    err = store.Get(ctx, "user:1", &user)
+    if err != nil {
+        panic(err)
+    }
+    fmt.Println(user.Name) // Alice
+}
+```
+
+## Next Steps
+
+<Cards>
+  <Card title="Getting Started" href="/docs/kv/getting-started" description="Install Grove KV and run your first Get/Set in under 5 minutes." />
+  <Card title="Store Interface" href="/docs/kv/store-interface" description="Full API reference for the Store: Get, Set, Delete, MGet, Batch, TTL, Scan, and more." />
+  <Card title="Keyspaces" href="/docs/kv/keyspaces" description="Typed, namespaced key partitions with automatic prefix, codec, and TTL management." />
+  <Card title="Codecs" href="/docs/kv/codecs" description="Built-in serialization codecs and how to implement custom ones." />
+</Cards>

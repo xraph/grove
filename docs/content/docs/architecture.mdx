@@ -33,7 +33,21 @@ grove/
 ├── migrate/                    # Migration orchestrator (database-agnostic)
 ├── scan/                       # High-performance result scanning
 ├── internal/                   # Buffer pools, tag parser
-└── grovetest/                  # Testing utilities
+├── grovetest/                  # Testing utilities
+└── kv/                         # Key-Value store module (separate go.mod)
+    ├── store.go                # Core Store: Get, Set, Delete, Exists, MGet, MSet
+    ├── driver/                 # KV driver interface + capabilities
+    ├── codec/                  # Serialization: JSON, MsgPack, Protobuf, Gob
+    ├── keyspace/               # Keyspace[T] typed partitions
+    ├── middleware/              # Hooks: cache, retry, circuit, compress, encrypt, namespace, logging, stampede
+    ├── crdt/                   # CRDT adapter: Counter, Register[T], Set[T], Map, Syncer
+    ├── extension/              # Extensions: lock, ratelimit, session, counter, leaderboard, queue
+    ├── redisdriver/            # Redis driver (go-redis)
+    ├── memcacheddriver/        # Memcached driver (gomemcache)
+    ├── dynamodriver/           # DynamoDB driver (aws-sdk-go-v2)
+    ├── boltdriver/             # BoltDB driver (bbolt)
+    ├── badgerdriver/           # Badger driver (badger/v4)
+    └── kvtest/                 # Conformance test suite + mock driver
 ```
 
 ## Query Pipeline
@@ -128,11 +142,24 @@ grove (core)
 ├── grove/stream          (zero deps — defines Cursor, Stream[T], pipeline transforms)
 ├── grove/hook            (depends on driver)
 ├── grove/migrate         (depends on driver)
-├── grove/pgdriver        (depends on driver, schema, scan, stream, hook)
-├── grove/mysqldriver     (depends on driver, schema, scan)
-├── grove/sqlitedriver    (depends on driver, schema, scan)
-├── grove/mongodriver     (depends on driver, schema, scan, stream)
-└── grove/grovetest       (depends on driver)
+├── grove/drivers/pgdriver        (depends on driver, schema, scan, stream, hook)
+├── grove/drivers/mysqldriver     (depends on driver, schema, scan)
+├── grove/drivers/sqlitedriver    (depends on driver, schema, scan)
+├── grove/drivers/mongodriver     (depends on driver, schema, scan, stream)
+├── grove/grovetest       (depends on driver)
+└── grove/kv              (separate module — depends on grove/hook, grove/crdt)
+    ├── kv/driver         (zero deps — KV driver interface)
+    ├── kv/codec          (zero deps — serialization codecs)
+    ├── kv/keyspace       (depends on kv, kv/codec)
+    ├── kv/middleware      (depends on grove/hook)
+    ├── kv/crdt           (depends on kv, grove/crdt)
+    ├── kv/extension      (depends on kv)
+    ├── kv/redisdriver    (depends on kv/driver, go-redis)
+    ├── kv/memcacheddriver(depends on kv/driver, gomemcache)
+    ├── kv/dynamodriver   (depends on kv/driver, aws-sdk-go-v2)
+    ├── kv/boltdriver     (depends on kv/driver, bbolt)
+    ├── kv/badgerdriver   (depends on kv/driver, badger/v4)
+    └── kv/kvtest         (depends on kv, kv/driver)
 ```
 
 The `stream` package has no dependencies on other Grove packages. It defines the `Cursor` interface and generic `Stream[T]` type. Drivers depend on `stream` to implement the `Cursor` interface (e.g., `pgdriver.pgCursor`) and to construct `Stream[T]` instances. The `stream.HookRunner` interface avoids a direct dependency on the `hook` package, using an adapter pattern instead.

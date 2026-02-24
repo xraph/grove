@@ -1,0 +1,60 @@
+---
+title: "Extensions Overview"
+description: "Higher-level abstractions built on the Grove KV Store interface -- distributed locks, rate limiters, sessions, counters, leaderboards, and job queues."
+---
+
+import { Cards, Card } from "fumadocs-ui/components/card";
+
+Grove KV extensions are **application-level primitives** built entirely on the `*kv.Store` interface. Because they only use the standard Store operations (Get, Set, Delete, Expire, Exists), every extension works with **any** backend driver -- Redis, Memcached, DynamoDB, BoltDB, or Badger -- with zero driver-specific code.
+
+## What Are Extensions?
+
+Each extension is a standalone Go struct that wraps a `*kv.Store` and provides a focused, higher-level API for a common distributed-systems pattern. You create an extension by passing your existing store, and the extension handles key management, serialization, TTLs, and coordination logic internally.
+
+```go
+import (
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/extension"
+)
+
+// Any Store, any driver.
+store, _ := kv.Open(driver)
+
+// Create extensions from the same store.
+sessions := extension.NewSessionStore(store)
+limiter  := extension.NewRateLimiter(store, "api", 100, time.Minute)
+lock     := extension.NewLock(store, "deploy", 10*time.Second)
+counter  := extension.NewAtomicCounter(store, "visitors")
+board    := extension.NewLeaderboard(store, "scores")
+queue    := extension.NewQueue(store, "tasks")
+```
+
+## Driver-Agnostic by Design
+
+Extensions depend only on the `*kv.Store` interface, not on any specific driver. This means:
+
+- **Swap backends freely** -- switch from BoltDB in development to Redis in production without touching extension code.
+- **Test with any driver** -- use an in-memory Badger store in tests and a real Redis cluster in production.
+- **Compose with hooks** -- all Store-level hooks (logging, namespacing, compression, encryption) apply transparently to extension operations.
+
+## Available Extensions
+
+| Extension | Constructor | Key Prefix | Description |
+|-----------|------------|------------|-------------|
+| **Distributed Lock** | `NewLock` | `lock:` | Mutual exclusion with TTL-based expiry and retry support |
+| **Rate Limiter** | `NewRateLimiter` | custom | Sliding window counter for distributed rate limiting |
+| **Session Store** | `NewSessionStore` | `sess:` (default) | HTTP session storage with auto-generated IDs and TTL |
+| **Atomic Counter** | `NewAtomicCounter` | `counter:` | Distributed increment/decrement with get and reset |
+| **Leaderboard** | `NewLeaderboard` | `lb:` | Sorted member/score leaderboard with ranking |
+| **Job Queue** | `NewQueue` | `queue:` | FIFO job queue with visibility timeout and acknowledgment |
+
+## Next Steps
+
+<Cards>
+  <Card title="Session Store" href="/docs/kv/extensions/session-store" description="HTTP session storage with cryptographically random IDs, configurable TTL, and touch support." />
+  <Card title="Rate Limiter" href="/docs/kv/extensions/rate-limiter" description="Sliding window rate limiting with remaining count and reset time." />
+  <Card title="Distributed Lock" href="/docs/kv/extensions/distributed-lock" description="Mutual exclusion lock with TTL expiry, retry logic, and extend support." />
+  <Card title="Atomic Counter" href="/docs/kv/extensions/counter" description="Distributed atomic increment/decrement counter with get, set, and reset." />
+  <Card title="Leaderboard" href="/docs/kv/extensions/leaderboard" description="Sorted leaderboard with add, rank, top-N, and remove operations." />
+  <Card title="Job Queue" href="/docs/kv/extensions/queue" description="FIFO job queue with enqueue, dequeue, visibility timeout, and acknowledgment." />
+</Cards>

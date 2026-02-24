@@ -53,7 +53,7 @@ func TestHTTPClient_Pull_Success(t *testing.T) {
 }
 
 func TestHTTPClient_Pull_ServerError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"error":"internal error"}`))
 	}))
@@ -114,7 +114,7 @@ func TestHTTPClient_Push_Success(t *testing.T) {
 }
 
 func TestHTTPClient_Push_ServerError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error":"bad request"}`))
 	}))
@@ -144,7 +144,7 @@ func TestStreamingTransport_EmbedHTTPClient(t *testing.T) {
 	transport := NewStreamingTransport("https://example.com/sync")
 
 	// Should embed HTTPClient for pull/push.
-	assert.Equal(t, "https://example.com/sync", transport.HTTPClient.baseURL)
+	assert.Equal(t, "https://example.com/sync", transport.baseURL)
 	// Should set stream URL.
 	assert.Equal(t, "https://example.com/sync/stream", transport.streamURL)
 	// Should have default reconnect delay.
@@ -283,7 +283,7 @@ func TestStreamingTransport_StreamChanges_ContextCancel(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- transport.StreamChanges(ctx, HLC{}, func(change ChangeRecord) {})
+		done <- transport.StreamChanges(ctx, HLC{}, func(_ ChangeRecord) {})
 	}()
 
 	// Cancel after a short delay.
@@ -301,7 +301,7 @@ func TestStreamingTransport_StreamChanges_ContextCancel(t *testing.T) {
 func TestStreamingTransport_StreamChanges_Reconnects(t *testing.T) {
 	var connectionCount atomic.Int32
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		connectionCount.Add(1)
 
 		flusher, ok := w.(http.Flusher)
@@ -327,14 +327,14 @@ func TestStreamingTransport_StreamChanges_Reconnects(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	_ = transport.StreamChanges(ctx, HLC{}, func(change ChangeRecord) {})
+	_ = transport.StreamChanges(ctx, HLC{}, func(_ ChangeRecord) {})
 
 	// Should have reconnected at least twice.
 	assert.GreaterOrEqual(t, connectionCount.Load(), int32(2))
 }
 
 func TestStreamingTransport_StreamChanges_ServerError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("server error"))
 	}))
@@ -348,7 +348,7 @@ func TestStreamingTransport_StreamChanges_ServerError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	err := transport.StreamChanges(ctx, HLC{}, func(change ChangeRecord) {})
+	err := transport.StreamChanges(ctx, HLC{}, func(_ ChangeRecord) {})
 	// Should return context deadline exceeded after retries.
 	assert.Error(t, err)
 }
@@ -385,6 +385,6 @@ func TestStreamingTransport_ProcessSSEStream_InvalidJSON(t *testing.T) {
 	assert.Empty(t, received) // Invalid JSON should be skipped.
 }
 
-func TestStreamingTransport_SatisfiesTransportInterface(t *testing.T) {
+func TestStreamingTransport_SatisfiesTransportInterface(_ *testing.T) {
 	var _ Transport = NewStreamingTransport("http://example.com/sync")
 }

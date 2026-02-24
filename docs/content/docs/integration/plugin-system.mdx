@@ -116,3 +116,7 @@ Metrics:
 - `grove_query_duration_seconds` — Query latency histogram
 - `grove_connections_active` — Active connection count
 - `grove_migrations_total` — Migration execution count
+
+## KV Store Plugin Compatibility
+
+The KV module (`grove/kv`) uses the same `grove/plugin` package for plugin registration. The `grove/hook` package is shared between the ORM and KV store, so middleware written as hooks works seamlessly across both. See the [KV Middleware Overview](/docs/kv/middleware/overview) for KV-specific middleware patterns.

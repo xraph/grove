@@ -1,0 +1,305 @@
+---
+title: "Keyspaces"
+description: "Typed, namespaced key-value partitions with automatic prefix management, per-keyspace codecs, default TTLs, and type-safe access."
+---
+
+A `Keyspace[T]` is a typed, namespaced partition of a KV store. It binds a Go type, key prefix, codec, and TTL policy together so that every operation within the keyspace is type-safe, consistently prefixed, and automatically serialized.
+
+## Why Keyspaces?
+
+Without keyspaces, you manage key prefixes and type assertions manually:
+
+```go
+// Manual approach -- error-prone and repetitive.
+store.Set(ctx, "users:u_123", &user, kv.WithTTL(24*time.Hour))
+var user User
+store.Get(ctx, "users:u_123", &user)
+```
+
+With keyspaces, the prefix, TTL, and codec are declared once:
+
+```go
+// Keyspace approach -- type-safe and DRY.
+users := keyspace.New[User](store, "users",
+    keyspace.WithTTL(24*time.Hour),
+)
+users.Set(ctx, "u_123", user)
+user, err := users.Get(ctx, "u_123")
+```
+
+The keyspace automatically prepends `"users:"` to every key, applies a 24-hour TTL to every Set, and returns a typed `User` from every Get -- no type assertions needed.
+
+## Creating a Keyspace
+
+```go
+import (
+    "github.com/xraph/grove/kv/keyspace"
+    "github.com/xraph/grove/kv/codec"
+)
+
+type User struct {
+    ID    string `json:"id"`
+    Name  string `json:"name"`
+    Email string `json:"email"`
+}
+
+users := keyspace.New[User](store, "users")
+```
+
+The type parameter `T` determines the value type for all operations. The `prefix` string is prepended to every key with a separator (default `":"`).
+
+## Options
+
+| Option | Description |
+|--------|-------------|
+| `keyspace.WithTTL(d)` | Default TTL for all Set operations in the keyspace |
+| `keyspace.WithCodec(c)` | Override the store-level codec for this keyspace |
+| `keyspace.WithSeparator(sep)` | Change the key segment separator (default `":"`) |
+
+```go
+sessions := keyspace.New[Session](store, "session",
+    keyspace.WithTTL(30*time.Minute),
+    keyspace.WithCodec(codec.MsgPack()),
+    keyspace.WithSeparator("/"),
+)
+// Keys will be "session/abc123" instead of "session:abc123".
+```
+
+If no codec is specified, the keyspace inherits the store's default codec.
+
+## Methods
+
+### Get
+
+Retrieves and decodes the value for the given key. Returns a typed `T` value directly.
+
+```go
+func (ks *Keyspace[T]) Get(ctx context.Context, key string) (T, error)
+```
+
+```go
+user, err := users.Get(ctx, "u_123")
+if errors.Is(err, kv.ErrNotFound) {
+    // key does not exist
+}
+fmt.Println(user.Name)
+```
+
+### GetEntry
+
+Retrieves the value with full metadata including TTL, version, and key.
+
+```go
+func (ks *Keyspace[T]) GetEntry(ctx context.Context, key string) (*kv.Entry[T], error)
+```
+
+```go
+entry, err := users.GetEntry(ctx, "u_123")
+fmt.Println(entry.Value.Name)  // the User
+fmt.Println(entry.Key)         // "users:u_123"
+fmt.Println(entry.TTL)         // remaining TTL
+fmt.Println(entry.Version)     // CAS version (if supported)
+```
+
+The `Entry[T]` struct:
+
+```go
+type Entry[T any] struct {
+    Key      string
+    Value    T
+    TTL      time.Duration
+    Version  uint64
+    Metadata map[string]string
+}
+```
+
+### Set
+
+Encodes and stores the value. Applies the keyspace's default TTL unless overridden by `SetOption` values.
+
+```go
+func (ks *Keyspace[T]) Set(ctx context.Context, key string, value T, opts ...kv.SetOption) error
+```
+
+```go
+err := users.Set(ctx, "u_123", User{
+    ID:    "u_123",
+    Name:  "Alice",
+    Email: "alice@example.com",
+})
+```
+
+Override the default TTL for a single call:
+
+```go
+err := users.Set(ctx, "u_temp", tempUser, kv.WithTTL(5*time.Minute))
+```
+
+### Delete
+
+Removes one or more keys within the keyspace.
+
+```go
+func (ks *Keyspace[T]) Delete(ctx context.Context, keys ...string) error
+```
+
+```go
+err := users.Delete(ctx, "u_123", "u_456")
+```
+
+### Exists
+
+Returns the count of keys that exist within the keyspace.
+
+```go
+func (ks *Keyspace[T]) Exists(ctx context.Context, keys ...string) (int64, error)
+```
+
+```go
+count, err := users.Exists(ctx, "u_123", "u_456")
+```
+
+### MGet
+
+Retrieves multiple keys within the keyspace. Returns a typed `map[string]T` keyed by the original (unprefixed) key names.
+
+```go
+func (ks *Keyspace[T]) MGet(ctx context.Context, keys []string) (map[string]T, error)
+```
+
+```go
+result, err := users.MGet(ctx, []string{"u_123", "u_456"})
+for key, user := range result {
+    fmt.Printf("%s => %s\n", key, user.Name)
+}
+```
+
+### Scan
+
+Iterates over keys matching a pattern suffix within the keyspace. The keys passed to the callback are stripped of the keyspace prefix.
+
+```go
+func (ks *Keyspace[T]) Scan(ctx context.Context, pattern string, fn func(key string) error) error
+```
+
+```go
+err := users.Scan(ctx, "*", func(key string) error {
+    fmt.Println("user key:", key) // prints "u_123", not "users:u_123"
+    return nil
+})
+```
+
+### Prefix and Store
+
+Access the keyspace's prefix and underlying store:
+
+```go
+fmt.Println(users.Prefix()) // "users"
+store := users.Store()      // the underlying *kv.Store
+```
+
+## Key Composition
+
+The `keyspace` package includes helpers for building and parsing composite keys:
+
+### ComposeKey
+
+Joins segments with a separator:
+
+```go
+key := keyspace.ComposeKey(":", "org", "team", "member")
+// "org:team:member"
+```
+
+### ParseKey
+
+Splits a composite key into segments:
+
+```go
+segments := keyspace.ParseKey("org:team:member", ":")
+// ["org", "team", "member"]
+```
+
+### Join
+
+Shorthand for `ComposeKey` with `":"` as the separator:
+
+```go
+key := keyspace.Join("org", "team", "member")
+// "org:team:member"
+```
+
+## Complete Example
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "time"
+
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/codec"
+    "github.com/xraph/grove/kv/keyspace"
+    "github.com/xraph/grove/kv/drivers/redisdriver"
+)
+
+type User struct {
+    ID    string `json:"id" msgpack:"id"`
+    Name  string `json:"name" msgpack:"name"`
+    Email string `json:"email" msgpack:"email"`
+    Role  string `json:"role" msgpack:"role"`
+}
+
+func main() {
+    ctx := context.Background()
+
+    rdb := redisdriver.New()
+    if err := rdb.Open(ctx, "redis://localhost:6379/0"); err != nil {
+        log.Fatal(err)
+    }
+
+    store, err := kv.Open(rdb)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer store.Close()
+
+    // Create a typed keyspace with a 24-hour default TTL and MsgPack codec.
+    users := keyspace.New[User](store, "users",
+        keyspace.WithTTL(24*time.Hour),
+        keyspace.WithCodec(codec.MsgPack()),
+    )
+
+    // Set.
+    alice := User{ID: "u_1", Name: "Alice", Email: "alice@example.com", Role: "admin"}
+    if err := users.Set(ctx, alice.ID, alice); err != nil {
+        log.Fatal(err)
+    }
+
+    // Get -- returns a typed User directly.
+    user, err := users.Get(ctx, "u_1")
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("Name: %s, Role: %s\n", user.Name, user.Role)
+
+    // GetEntry -- includes metadata.
+    entry, err := users.GetEntry(ctx, "u_1")
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("Key: %s, TTL: %s\n", entry.Key, entry.TTL)
+
+    // Scan all user keys.
+    err = users.Scan(ctx, "*", func(key string) error {
+        fmt.Println("found user:", key)
+        return nil
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+}
+```

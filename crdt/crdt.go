@@ -21,7 +21,7 @@ import (
 )
 
 // CRDTType identifies the conflict resolution strategy for a field.
-type CRDTType string
+type CRDTType string //nolint:revive // CRDTType is the established public API name
 
 const (
 	// TypeLWW is a Last-Writer-Wins register. The value with the highest HLC wins.

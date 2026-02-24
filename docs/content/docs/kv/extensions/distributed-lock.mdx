@@ -1,0 +1,197 @@
+---
+title: "Distributed Lock"
+description: "Mutual exclusion lock backed by Grove KV with TTL-based expiry, retry support, and token-based ownership."
+---
+
+The `Lock` extension provides distributed mutual exclusion using the KV store's `SetNX` (set-if-not-exists) semantics. Locks are protected by a random token to prevent accidental release by a different holder, and they expire automatically via TTL to avoid deadlocks.
+
+## Installation
+
+```go
+import "github.com/xraph/grove/kv/extension"
+```
+
+## Creating a Lock
+
+```go
+lock := extension.NewLock(store, "deploy", 10*time.Second)
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `store` | `*kv.Store` | The backing KV store |
+| `key` | `string` | Logical name for the lock (auto-prefixed with `lock:`) |
+| `ttl` | `time.Duration` | Time-to-live for the lock; it auto-expires if not released or extended |
+
+The lock is stored at `lock:<key>`. A default TTL of 10 seconds is a reasonable starting point -- tune it based on the expected duration of the critical section.
+
+## API Reference
+
+### Acquire
+
+Attempts to acquire the lock. Returns an error if the lock is already held by another process.
+
+```go
+func (l *Lock) Acquire(ctx context.Context) error
+```
+
+```go
+err := lock.Acquire(ctx)
+if err != nil {
+    // lock is already held or store error
+}
+// ... critical section ...
+```
+
+Internally, `Acquire` generates a cryptographically random **lock token** (16 bytes, hex-encoded) and writes it to the store using `SetNX` with the configured TTL. The token is kept in memory so that only the holder can release or extend the lock.
+
+### AcquireWithRetry
+
+Attempts to acquire the lock with retries. Retries up to `maxRetries` times, waiting `retryInterval` between attempts.
+
+```go
+func (l *Lock) AcquireWithRetry(ctx context.Context, retryInterval time.Duration, maxRetries int) error
+```
+
+```go
+// Retry every 100ms, up to 50 times (5 seconds total).
+err := lock.AcquireWithRetry(ctx, 100*time.Millisecond, 50)
+if err != nil {
+    // timed out or context cancelled
+}
+```
+
+The method respects context cancellation -- if the context is cancelled or times out during a retry wait, it returns the context error immediately.
+
+### Release
+
+Releases the lock. Returns an error if the lock was not acquired by this instance.
+
+```go
+func (l *Lock) Release(ctx context.Context) error
+```
+
+```go
+err := lock.Release(ctx)
+```
+
+### Extend
+
+Extends the lock's TTL. Use this to keep the lock alive during long-running operations. Returns an error if the lock was not acquired by this instance.
+
+```go
+func (l *Lock) Extend(ctx context.Context, ttl time.Duration) error
+```
+
+```go
+// Extend by another 30 seconds.
+err := lock.Extend(ctx, 30*time.Second)
+```
+
+## Lock Token
+
+Each `Acquire` call generates a unique random token. This token serves two purposes:
+
+1. **Ownership verification** -- `Release` and `Extend` check that the lock is still held by this instance before operating.
+2. **Stale lock safety** -- If a lock expires and is re-acquired by another process, the original holder cannot accidentally release the new holder's lock.
+
+The token is 16 bytes of randomness from `crypto/rand`, hex-encoded to 32 characters.
+
+## Example: Distributed Job Coordination
+
+A common pattern is to use a distributed lock to ensure only one worker processes a particular job at a time.
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "time"
+
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/extension"
+    "github.com/xraph/grove/kv/drivers/redisdriver"
+)
+
+func main() {
+    ctx := context.Background()
+
+    rdb := redisdriver.New()
+    rdb.Open(ctx, "redis://localhost:6379/0")
+
+    store, _ := kv.Open(rdb)
+    defer store.Close()
+
+    // Only one worker should run the daily report at a time.
+    lock := extension.NewLock(store, "daily-report", 5*time.Minute)
+
+    // Try to acquire with retries.
+    err := lock.AcquireWithRetry(ctx, 500*time.Millisecond, 10)
+    if err != nil {
+        log.Println("another worker is generating the report")
+        return
+    }
+    defer lock.Release(ctx)
+
+    // Extend periodically for long-running work.
+    go func() {
+        ticker := time.NewTicker(2 * time.Minute)
+        defer ticker.Stop()
+        for range ticker.C {
+            if err := lock.Extend(ctx, 5*time.Minute); err != nil {
+                return
+            }
+        }
+    }()
+
+    // Critical section: generate the report.
+    fmt.Println("generating daily report...")
+    time.Sleep(3 * time.Minute) // simulate work
+    fmt.Println("report complete")
+}
+```
+
+## Example: Acquire with Context Timeout
+
+You can combine `AcquireWithRetry` with a context deadline for a clean timeout pattern:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+lock := extension.NewLock(store, "checkout", 30*time.Second)
+err := lock.AcquireWithRetry(ctx, 100*time.Millisecond, 100)
+if err != nil {
+    // either max retries exceeded or context deadline exceeded
+    log.Printf("failed to acquire lock: %v", err)
+}
+```
+
+## Key Layout
+
+Locks are stored with the following key pattern:
+
+```
+lock:<key>
+```
+
+For example:
+
+```
+lock:deploy
+lock:daily-report
+lock:checkout
+```
+
+The value stored at the key is the lock token (a 32-character hex string). The key has a TTL equal to the configured lock TTL.
+
+## Best Practices
+
+- **Set the TTL slightly longer than the expected critical section** to avoid premature expiry, but short enough to recover from crashes quickly.
+- **Use `Extend` in a background goroutine** for operations that may take longer than the initial TTL.
+- **Always defer `Release`** after a successful `Acquire` to ensure the lock is freed even if the critical section panics.
+- **Use context timeouts** with `AcquireWithRetry` to bound how long a caller waits for the lock.

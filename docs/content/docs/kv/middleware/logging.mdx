@@ -1,0 +1,134 @@
+---
+title: Logging Middleware
+description: Structured logging for every KV operation with latency tracking.
+---
+
+The logging middleware records every KV operation with structured fields using Go's standard `log/slog` package. Each log entry includes the operation type, key, and latency, making it straightforward to trace performance and debug issues.
+
+## Installation
+
+```go
+import "github.com/xraph/grove/kv/middleware"
+```
+
+## Usage
+
+```go
+import (
+    "log/slog"
+
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/middleware"
+)
+
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewLogging(slog.Default())),
+)
+```
+
+### Constructor
+
+```go
+func NewLogging(logger *slog.Logger) *LoggingHook
+```
+
+| Parameter | Description |
+|---|---|
+| `logger` | An `*slog.Logger` instance for structured log output |
+
+## How It Works
+
+The logging hook implements both `PreQueryHook` and `PostQueryHook`:
+
+1. **BeforeQuery** records the start time in `qc.Values` under the key `_log_start`.
+2. **AfterQuery** calculates the elapsed time and emits a structured log entry.
+
+### Log Fields
+
+Each log entry includes:
+
+| Field | Type | Description |
+|---|---|---|
+| `op` | `string` | Operation name (e.g., `"GET"`, `"SET"`, `"DEL"`) |
+| `key` | `string` | The key being operated on |
+| `latency` | `duration` | Time elapsed between BeforeQuery and AfterQuery |
+
+### Example Output
+
+With the default text handler:
+
+```
+level=INFO msg="kv command" op=GET key=user:123 latency=1.234ms
+level=INFO msg="kv command" op=SET key=user:123 latency=2.567ms
+level=INFO msg="kv command" op=DEL key=user:123 latency=0.891ms
+```
+
+With a JSON handler:
+
+```json
+{"level":"INFO","msg":"kv command","op":"GET","key":"user:123","latency":"1.234ms"}
+```
+
+## Integration with Structured Logging
+
+The middleware accepts any `*slog.Logger`, so you can configure it with custom handlers, levels, and attributes:
+
+### Custom Logger with Attributes
+
+```go
+logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+    Level: slog.LevelDebug,
+})).With(
+    slog.String("service", "user-api"),
+    slog.String("component", "kv"),
+)
+
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewLogging(logger)),
+)
+```
+
+This produces log entries with the additional `service` and `component` fields on every KV operation.
+
+### Using with Third-Party Loggers
+
+Any logger that provides an `*slog.Logger` interface works. For example, with a Zap-backed slog handler:
+
+```go
+import "go.uber.org/zap/exp/zapslog"
+
+zapLogger, _ := zap.NewProduction()
+slogLogger := slog.New(zapslog.NewHandler(zapLogger.Core()))
+
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewLogging(slogLogger)),
+)
+```
+
+## Middleware Ordering
+
+Place the logging hook early in the middleware chain if you want to capture the total latency including all other middleware. Place it later if you want to measure only the time spent in the driver:
+
+```go
+// Logs total latency (including namespace prefixing, cache check, etc.)
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewLogging(logger)),
+    kv.WithHook(middleware.NewNamespace("tenant:acme")),
+    kv.WithHook(middleware.NewCache(1000, 5*time.Minute)),
+)
+```
+
+```go
+// Logs only driver latency (excludes middleware overhead)
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewNamespace("tenant:acme")),
+    kv.WithHook(middleware.NewCache(1000, 5*time.Minute)),
+    kv.WithHook(middleware.NewLogging(logger)),
+)
+```
+
+## API Reference
+
+| Method | Description |
+|---|---|
+| `NewLogging(logger)` | Create a new logging hook with the given `*slog.Logger` |

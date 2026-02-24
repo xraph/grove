@@ -108,13 +108,13 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 		}
 
 		if processedChange.Tombstone {
-			if err := c.metadata.WriteTombstone(ctx, processedChange.Table, processedChange.PK, processedChange.HLC, processedChange.NodeID); err != nil {
-				return nil, fmt.Errorf("crdt: merge tombstone: %w", err)
+			if writeErr := c.metadata.WriteTombstone(ctx, processedChange.Table, processedChange.PK, processedChange.HLC, processedChange.NodeID); writeErr != nil {
+				return nil, fmt.Errorf("crdt: merge tombstone: %w", writeErr)
 			}
 			merged++
 
 			// Run AfterInboundChange hook.
-			_ = c.hooks.AfterInboundChange(ctx, processedChange)
+			c.hooks.AfterInboundChange(ctx, processedChange) //nolint:errcheck // fire-and-forget post-hook
 			continue
 		}
 
@@ -153,7 +153,7 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 		merged++
 
 		// Run AfterInboundChange hook.
-		_ = c.hooks.AfterInboundChange(ctx, processedChange)
+		c.hooks.AfterInboundChange(ctx, processedChange) //nolint:errcheck // fire-and-forget post-hook
 	}
 
 	return &PushResponse{
@@ -259,7 +259,7 @@ func (c *SyncController) httpHandlePull(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp) //nolint:errcheck // HTTP response write
 }
 
 func (c *SyncController) httpHandlePush(w http.ResponseWriter, r *http.Request) {
@@ -276,11 +276,11 @@ func (c *SyncController) httpHandlePush(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp) //nolint:errcheck // HTTP response write
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg}) //nolint:errcheck // HTTP response write
 }

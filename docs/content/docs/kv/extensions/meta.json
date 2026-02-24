@@ -1,0 +1,12 @@
+{
+  "title": "Extensions",
+  "pages": [
+    "overview",
+    "session-store",
+    "rate-limiter",
+    "distributed-lock",
+    "counter",
+    "leaderboard",
+    "queue"
+  ]
+}

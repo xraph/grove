@@ -83,7 +83,7 @@ func (r *mockRows) Scan(dest ...any) error {
 }
 
 func (r *mockRows) Close() error { r.closed = true; return nil }
-func (r *mockRows) Err() error  { return nil }
+func (r *mockRows) Err() error   { return nil }
 
 // --- Helper to create a test plugin ---
 
@@ -330,10 +330,8 @@ func TestSyncController_StreamChangesSince_ContextCancel(t *testing.T) {
 
 	// Channel should close after context cancellation.
 	select {
-	case _, ok := <-ch:
-		if ok {
-			// May get empty batch or closed — both fine.
-		}
+	case <-ch:
+		// May get empty batch or closed — both fine.
 	case <-time.After(1 * time.Second):
 		t.Fatal("channel should close after context cancel")
 	}
@@ -360,7 +358,10 @@ func TestNewHTTPHandler_Pull_BackwardCompat(t *testing.T) {
 		NodeID: "client",
 	})
 
-	resp, err := http.Post(server.URL+"/pull", "application/json", bytes.NewReader(reqBody))
+	httpReq, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL+"/pull", bytes.NewReader(reqBody))
+	require.NoError(t, err)
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(httpReq)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -393,7 +394,10 @@ func TestNewHTTPHandler_Push_BackwardCompat(t *testing.T) {
 		NodeID: "remote",
 	})
 
-	resp, err := http.Post(server.URL+"/push", "application/json", bytes.NewReader(reqBody))
+	httpReq, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL+"/push", bytes.NewReader(reqBody))
+	require.NoError(t, err)
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(httpReq)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -411,7 +415,10 @@ func TestNewHTTPHandler_Pull_InvalidJSON(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	resp, err := http.Post(server.URL+"/pull", "application/json", bytes.NewReader([]byte("invalid json")))
+	httpReq, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL+"/pull", bytes.NewReader([]byte("invalid json")))
+	require.NoError(t, err)
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(httpReq)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -424,7 +431,10 @@ func TestNewHTTPHandler_Push_InvalidJSON(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	resp, err := http.Post(server.URL+"/push", "application/json", bytes.NewReader([]byte("{bad")))
+	httpReq, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL+"/push", bytes.NewReader([]byte("{bad")))
+	require.NoError(t, err)
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(httpReq)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 

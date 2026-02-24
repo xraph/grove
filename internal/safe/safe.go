@@ -30,7 +30,7 @@ func QuoteIdent(ident string) string {
 // Valid identifiers contain only ASCII letters, digits, and underscores,
 // and must start with a letter or underscore. An empty string is not valid.
 func IsValidIdent(ident string) bool {
-	if len(ident) == 0 {
+	if ident == "" {
 		return false
 	}
 	for i := 0; i < len(ident); i++ {
@@ -73,7 +73,7 @@ func Sanitize(ident string) string {
 	result := b.String()
 
 	// If the result starts with a digit, prepend an underscore.
-	if len(result) > 0 && result[0] >= '0' && result[0] <= '9' {
+	if result != "" && result[0] >= '0' && result[0] <= '9' {
 		result = "_" + result
 	}
 

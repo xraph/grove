@@ -1,0 +1,207 @@
+---
+title: Badger Driver
+description: Badger embedded LSM-tree driver for Grove KV with native TTL, Scan, Batch, CAS, and Transaction support.
+---
+
+The Badger driver connects Grove KV to [Badger](https://github.com/dgraph-io/badger), a fast embeddable LSM-tree key-value store written in Go. Badger supports native TTL, prefix iteration, range scans, and ACID transactions. It is designed for high-performance workloads with both SSD-optimized and in-memory modes.
+
+## Installation
+
+```bash
+go get github.com/xraph/grove/kv
+go get github.com/xraph/grove/kv/drivers/badgerdriver
+```
+
+## Connection
+
+```go
+import (
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/drivers/badgerdriver"
+)
+
+// On-disk database
+store, err := kv.Open(badgerdriver.New(), "/path/to/badger")
+if err != nil {
+    log.Fatal(err)
+}
+defer store.Close()
+```
+
+For an in-memory database (no disk persistence), use the `memory://` DSN:
+
+```go
+store, err := kv.Open(badgerdriver.New(), "memory://")
+if err != nil {
+    log.Fatal(err)
+}
+defer store.Close()
+```
+
+The DSN is the directory path where Badger stores its data files. The directory is created automatically if it does not exist. Use `"memory://"` or `":memory:"` for an in-memory-only store.
+
+## Capabilities
+
+| Capability | Supported |
+|------------|-----------|
+| TTL | Yes (native) |
+| CAS (SetNX/SetXX) | Yes |
+| Scan | Yes (prefix + glob matching) |
+| Batch | Yes (MGet/MSet via WriteBatch) |
+| PubSub | No |
+| Transactions | Yes (native ACID) |
+| Streams | No |
+
+## High-Performance LSM-Tree Storage
+
+Badger uses a Log-Structured Merge Tree (LSM-tree) architecture optimized for write-heavy workloads:
+
+- **Key-value separation** -- keys are stored in the LSM tree while large values are stored in a separate value log, reducing write amplification
+- **Concurrent reads** -- multiple goroutines can read simultaneously without blocking
+- **Concurrent writes** -- WriteBatch allows concurrent writes with automatic batching
+- **SSD-optimized** -- designed to minimize I/O for solid-state drives
+- **In-memory mode** -- run entirely in RAM for maximum throughput (no persistence)
+
+## Native TTL
+
+Badger supports TTL natively at the storage engine level. Expired entries are automatically garbage-collected during compaction:
+
+```go
+// Set with a TTL -- Badger handles expiration automatically
+err := store.Set(ctx, "cache:result", data, 5*time.Minute)
+
+// Check remaining TTL
+remaining, err := store.TTL(ctx, "cache:result")
+if remaining == -1 {
+    // Key exists but has no expiry
+}
+
+// Update TTL on an existing key
+err = store.Expire(ctx, "cache:result", 10*time.Minute)
+```
+
+Unlike emulated TTL in other embedded drivers, Badger's TTL is enforced at the storage level. Expired keys are not returned by reads and are physically removed during garbage collection.
+
+## Scan
+
+Badger supports prefix-based key scanning with glob pattern matching:
+
+```go
+// Scan all keys with a prefix
+err := store.Scan(ctx, "user:*", func(key string) error {
+    fmt.Println(key)
+    return nil
+})
+
+// Scan all keys
+err = store.Scan(ctx, "*", func(key string) error {
+    fmt.Println(key)
+    return nil
+})
+```
+
+## Native Transactions
+
+For fine-grained control, use the driver's transaction methods directly:
+
+### Read-Only Transaction
+
+```go
+bdb := badgerdriver.Unwrap(store)
+
+err := bdb.ViewTxn(func(txn *badger.Txn) error {
+    item, err := txn.Get([]byte("my-key"))
+    if err != nil {
+        return err
+    }
+    return item.Value(func(val []byte) error {
+        fmt.Println(string(val))
+        return nil
+    })
+})
+```
+
+### Read-Write Transaction
+
+```go
+bdb := badgerdriver.Unwrap(store)
+
+err := bdb.UpdateTxn(func(txn *badger.Txn) error {
+    // Read
+    item, err := txn.Get([]byte("counter"))
+    if err != nil {
+        return err
+    }
+    val, err := item.ValueCopy(nil)
+    if err != nil {
+        return err
+    }
+
+    // Modify and write back
+    count, _ := strconv.Atoi(string(val))
+    entry := badger.NewEntry([]byte("counter"), []byte(strconv.Itoa(count+1)))
+    return txn.SetEntry(entry)
+})
+```
+
+## Prefix Scan and Range Scan
+
+The driver provides dedicated methods for prefix and range iteration that return both keys and values:
+
+### Prefix Scan
+
+```go
+bdb := badgerdriver.Unwrap(store)
+
+err := bdb.PrefixScan(ctx, "user:", func(key string, value []byte) error {
+    fmt.Printf("key=%s value=%s\n", key, value)
+    return nil
+})
+```
+
+### Range Scan
+
+Iterate over a lexicographic range `[start, end)`:
+
+```go
+bdb := badgerdriver.Unwrap(store)
+
+err := bdb.RangeScan(ctx, "event:2024-01-01", "event:2024-02-01",
+    func(key string, value []byte) error {
+        fmt.Printf("key=%s\n", key)
+        return nil
+    },
+)
+```
+
+## Options
+
+The Badger driver detects in-memory mode from the DSN:
+
+| DSN | Mode |
+|-----|------|
+| `/path/to/dir` | On-disk persistent storage |
+| `memory://` | In-memory only (no persistence) |
+| `:memory:` | In-memory only (no persistence) |
+
+## Unwrap for Direct Access
+
+Access the underlying `BadgerDB` driver or `badger.DB` for advanced operations:
+
+```go
+// Get the BadgerDB driver
+bdb := badgerdriver.Unwrap(store)
+
+// Get the raw badger.DB handle
+db := badgerdriver.UnwrapDB(store)
+
+// Access badger directly (e.g., run garbage collection)
+err := db.RunValueLogGC(0.5)
+
+// Check database size
+lsm, vlog := db.Size()
+fmt.Printf("LSM: %d bytes, VLog: %d bytes\n", lsm, vlog)
+
+// Flatten the LSM tree
+err = db.Flatten(4) // 4 concurrent compactions
+```

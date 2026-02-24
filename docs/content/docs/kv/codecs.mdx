@@ -1,0 +1,168 @@
+---
+title: "Codecs"
+description: "Serialization codecs for Grove KV: JSON, MsgPack, Protobuf, Gob, and how to implement custom codecs."
+---
+
+Codecs handle the marshalling and unmarshalling of Go types to and from byte slices for storage in KV backends. The Store encodes values through the codec before passing them to the driver, and decodes them on retrieval.
+
+## Codec Interface
+
+Every codec implements three methods:
+
+```go
+type Codec interface {
+    // Encode serializes v into bytes.
+    Encode(v any) ([]byte, error)
+
+    // Decode deserializes data into v. v must be a pointer.
+    Decode(data []byte, v any) error
+
+    // Name returns the codec identifier (e.g., "json", "msgpack", "protobuf").
+    Name() string
+}
+```
+
+## Built-in Codecs
+
+Grove KV ships with four codecs in the `github.com/xraph/grove/kv/codec` package:
+
+### JSON (default)
+
+Uses `encoding/json`. This is the default codec when no codec is specified.
+
+```go
+import "github.com/xraph/grove/kv/codec"
+
+store, err := kv.Open(rdb, kv.WithCodec(codec.JSON()))
+```
+
+- Human-readable output
+- Broad compatibility with external systems
+- Supports all Go types that `encoding/json` supports
+- Largest payload size of the built-in codecs
+
+### MsgPack
+
+Uses `github.com/vmihailenco/msgpack/v5`. More compact than JSON and faster to encode/decode.
+
+```go
+store, err := kv.Open(rdb, kv.WithCodec(codec.MsgPack()))
+```
+
+- 30-50% smaller payloads than JSON
+- Faster serialization than JSON
+- Binary format (not human-readable)
+- Good default for production workloads where payload size matters
+
+### Protobuf
+
+Uses `google.golang.org/protobuf/proto`. Values **must** implement `proto.Message`.
+
+```go
+store, err := kv.Open(rdb, kv.WithCodec(codec.Protobuf{}))
+```
+
+- Smallest payload size
+- Fastest serialization
+- Requires `.proto` schema definitions and code generation
+- Values must implement `proto.Message` -- will return an error otherwise
+
+### Gob
+
+Uses `encoding/gob`. Go-native binary encoding.
+
+```go
+store, err := kv.Open(rdb, kv.WithCodec(codec.Gob{}))
+```
+
+- Go-native format with good type fidelity
+- Handles interface types (must register with `gob.Register`)
+- Not compatible with non-Go consumers
+- Slightly larger than MsgPack
+
+## Using a Codec
+
+### Store-level
+
+Set the codec when opening the store. All `Get` and `Set` operations will use it:
+
+```go
+store, err := kv.Open(rdb, kv.WithCodec(codec.MsgPack()))
+```
+
+### Per-keyspace
+
+Override the store-level codec for a specific keyspace:
+
+```go
+import "github.com/xraph/grove/kv/keyspace"
+
+// This keyspace uses MsgPack even if the store uses JSON.
+users := keyspace.New[User](store, "users",
+    keyspace.WithCodec(codec.MsgPack()),
+)
+```
+
+This is useful when different keyspaces have different serialization requirements -- for example, a session keyspace might use MsgPack for speed while a configuration keyspace uses JSON for debuggability.
+
+### Raw bypass
+
+If you need to handle serialization yourself, use `GetRaw` and `SetRaw` on the Store to bypass the codec entirely:
+
+```go
+raw, err := store.GetRaw(ctx, "key")
+err = store.SetRaw(ctx, "key", myBytes)
+```
+
+## When to Use Each Codec
+
+| Codec | Payload Size | Speed | Compatibility | Best For |
+|-------|-------------|-------|---------------|----------|
+| **JSON** | Largest | Moderate | Universal | Debugging, external APIs, human-readable data |
+| **MsgPack** | Small | Fast | Multi-language | Production caches, sessions, general use |
+| **Protobuf** | Smallest | Fastest | Multi-language (with schema) | High-throughput systems with `.proto` schemas |
+| **Gob** | Medium | Fast | Go only | Go-to-Go communication, complex Go types |
+
+**Recommendation:** Start with JSON for development. Switch to MsgPack for production workloads where payload size or throughput matters. Use Protobuf when you already have `.proto` schemas. Use Gob for Go-only systems that need to serialize complex interface types.
+
+## Implementing a Custom Codec
+
+Implement the `Codec` interface to add support for any serialization format:
+
+```go
+package mycodec
+
+import (
+    "github.com/xraph/grove/kv/codec"
+    "github.com/fxamacker/cbor/v2"
+)
+
+// CBOR implements codec.Codec using CBOR (RFC 8949).
+type CBOR struct{}
+
+// Verify interface compliance at compile time.
+var _ codec.Codec = CBOR{}
+
+func (CBOR) Name() string { return "cbor" }
+
+func (CBOR) Encode(v any) ([]byte, error) {
+    return cbor.Marshal(v)
+}
+
+func (CBOR) Decode(data []byte, v any) error {
+    return cbor.Unmarshal(data, v)
+}
+```
+
+Use it like any built-in codec:
+
+```go
+store, err := kv.Open(rdb, kv.WithCodec(mycodec.CBOR{}))
+```
+
+### Implementation notes
+
+- `Encode` receives an `any` value. It may be a pointer or a value type.
+- `Decode` receives a pointer (`v` is always a pointer). Unmarshal into it.
+- `Name` should return a stable, lowercase identifier. It is used for logging and diagnostics.
+- Return clear errors from `Encode` and `Decode` -- the Store wraps them with `kv.ErrCodecEncode` and `kv.ErrCodecDecode` for consistent error handling.

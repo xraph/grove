@@ -91,7 +91,7 @@ func NewHook(c Collector) *Hook {
 }
 
 // BeforeQuery records the start time.
-func (h *Hook) BeforeQuery(ctx context.Context, qc *hook.QueryContext) (*hook.HookResult, error) {
+func (h *Hook) BeforeQuery(_ context.Context, qc *hook.QueryContext) (*hook.HookResult, error) {
 	if qc.Values == nil {
 		qc.Values = make(map[string]any)
 	}
@@ -100,7 +100,7 @@ func (h *Hook) BeforeQuery(ctx context.Context, qc *hook.QueryContext) (*hook.Ho
 }
 
 // AfterQuery records the duration.
-func (h *Hook) AfterQuery(ctx context.Context, qc *hook.QueryContext, result any) error {
+func (h *Hook) AfterQuery(_ context.Context, qc *hook.QueryContext, _ any) error {
 	start, ok := qc.Values["_obs_start"].(time.Time)
 	if !ok {
 		return nil
@@ -110,7 +110,7 @@ func (h *Hook) AfterQuery(ctx context.Context, qc *hook.QueryContext, result any
 }
 
 // BeforeMutation records the start time for mutations.
-func (h *Hook) BeforeMutation(ctx context.Context, qc *hook.QueryContext, data any) (*hook.HookResult, error) {
+func (h *Hook) BeforeMutation(_ context.Context, qc *hook.QueryContext, _ any) (*hook.HookResult, error) {
 	if qc.Values == nil {
 		qc.Values = make(map[string]any)
 	}
@@ -119,7 +119,7 @@ func (h *Hook) BeforeMutation(ctx context.Context, qc *hook.QueryContext, data a
 }
 
 // AfterMutation records the duration for mutations.
-func (h *Hook) AfterMutation(ctx context.Context, qc *hook.QueryContext, data any, result any) error {
+func (h *Hook) AfterMutation(_ context.Context, qc *hook.QueryContext, _, _ any) error {
 	start, ok := qc.Values["_obs_start"].(time.Time)
 	if !ok {
 		return nil

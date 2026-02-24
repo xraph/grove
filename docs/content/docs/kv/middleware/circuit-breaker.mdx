@@ -1,0 +1,142 @@
+---
+title: Circuit Breaker Middleware
+description: Circuit breaker pattern for fault tolerance -- fail fast when the backend is unavailable.
+---
+
+The circuit breaker middleware protects your application from cascading failures when the backing KV store is unavailable or degraded. When consecutive failures exceed a threshold, the circuit "opens" and subsequent requests fail immediately with `ErrCircuitOpen` instead of waiting for timeouts.
+
+## Installation
+
+```go
+import "github.com/xraph/grove/kv/middleware"
+```
+
+## Usage
+
+```go
+import (
+    "time"
+
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/middleware"
+)
+
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewCircuitBreaker(5, 30*time.Second)),
+)
+```
+
+### Constructor
+
+```go
+func NewCircuitBreaker(threshold int, timeout time.Duration) *CircuitBreakerHook
+```
+
+| Parameter | Description |
+|---|---|
+| `threshold` | Number of consecutive failures before the circuit opens |
+| `timeout` | Duration the circuit stays open before transitioning to half-open |
+
+## Circuit States
+
+The circuit breaker has three states:
+
+```
+         success
+    +-----------------+
+    |                 |
+    v     failures    |
+[Closed] ---------> [Open]
+    ^                 |
+    |    timeout      |
+    |    elapsed      v
+    +---------- [Half-Open]
+     success     |
+                 | failure
+                 v
+              [Open]
+```
+
+### Closed (normal operation)
+
+All requests pass through to the backend. Each failure increments an internal counter. When the counter reaches `threshold`, the circuit transitions to **Open**.
+
+A successful operation resets the failure counter to zero.
+
+### Open (failing fast)
+
+All requests are immediately rejected with `middleware.ErrCircuitOpen`. No traffic reaches the backend, giving it time to recover.
+
+After `timeout` elapses, the circuit transitions to **Half-Open**.
+
+### Half-Open (testing recovery)
+
+A limited number of requests (one by default) are allowed through to test whether the backend has recovered:
+
+- If the test request **succeeds**, the circuit transitions back to **Closed** and normal operation resumes.
+- If the test request **fails**, the circuit transitions back to **Open** and the timeout resets.
+
+## Error Handling
+
+When the circuit is open, all operations return `middleware.ErrCircuitOpen`:
+
+```go
+import "errors"
+
+err := store.Get(ctx, "key", &value)
+if errors.Is(err, middleware.ErrCircuitOpen) {
+    // Backend is unavailable -- serve degraded response
+    // or return a cached fallback
+}
+```
+
+## Recording Results
+
+The circuit breaker exposes `RecordSuccess()` and `RecordFailure()` methods to update its state based on operation outcomes:
+
+```go
+cb := middleware.NewCircuitBreaker(5, 30*time.Second)
+
+// After a successful operation
+cb.RecordSuccess()
+
+// After a failed operation
+cb.RecordFailure()
+```
+
+You can also inspect the current state:
+
+```go
+state := cb.State()
+switch state {
+case middleware.StateClosed:
+    // Normal operation
+case middleware.StateOpen:
+    // Circuit is open
+case middleware.StateHalfOpen:
+    // Testing recovery
+}
+```
+
+## Configuration Guidelines
+
+| Scenario | Threshold | Timeout |
+|---|---|---|
+| Low-latency, fail fast | 3 | 10s |
+| Moderate tolerance | 5 | 30s |
+| High tolerance, slow recovery | 10 | 60s |
+
+Choose a **threshold** that reflects how many failures indicate a real outage versus transient blips. Choose a **timeout** that gives the backend enough time to recover before retesting.
+
+## Combining with Retry
+
+Place the circuit breaker **before** the retry middleware so that retries do not count as separate failures against the circuit breaker threshold:
+
+```go
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewCircuitBreaker(5, 30*time.Second)),
+    kv.WithHook(middleware.NewRetry(3)),
+)
+```
+
+When the circuit is open, the retry middleware never runs because the circuit breaker rejects the request in its `PreQueryHook`.

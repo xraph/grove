@@ -1,0 +1,184 @@
+---
+title: Namespace Middleware
+description: Automatic key prefixing for multi-tenant isolation in KV stores.
+---
+
+The namespace middleware automatically prepends a prefix to all keys, providing logical isolation between tenants, environments, or application modules. This eliminates the need to manually prefix keys throughout your application code.
+
+## Installation
+
+```go
+import "github.com/xraph/grove/kv/middleware"
+```
+
+## Usage
+
+```go
+import (
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/middleware"
+)
+
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewNamespace("tenant:acme")),
+)
+
+// All operations are transparently prefixed:
+// store.Set(ctx, "user:123", value)  -->  stored as "tenant:acme:user:123"
+// store.Get(ctx, "user:123", &dest)  -->  fetches "tenant:acme:user:123"
+```
+
+### Constructor
+
+```go
+func NewNamespace(prefix string, separator ...string) *NamespaceHook
+```
+
+| Parameter | Description |
+|---|---|
+| `prefix` | The namespace prefix to prepend to all keys |
+| `separator` | Optional separator between prefix and key (default: `":"`) |
+
+### Custom Separator
+
+```go
+// Uses "/" as separator: "tenant/acme/user:123"
+middleware.NewNamespace("tenant/acme", "/")
+
+// Uses "." as separator: "tenant.acme.user:123"
+middleware.NewNamespace("tenant.acme", ".")
+```
+
+## How It Works
+
+The namespace hook implements `PreQueryHook`. Before any KV operation reaches the driver, it modifies the keys by prepending the configured prefix and separator:
+
+```
+Application:  store.Get(ctx, "user:123", &dest)
+                |
+                v
+Namespace Hook: key = "tenant:acme" + ":" + "user:123"
+                      = "tenant:acme:user:123"
+                |
+                v
+Driver:         GET "tenant:acme:user:123"
+```
+
+This transformation applies to all operations (GET, SET, DELETE, MSET, etc.) and all keys in multi-key operations.
+
+## Multi-Tenancy Isolation
+
+The primary use case for namespace middleware is multi-tenant key isolation. Each tenant's data is stored under a unique prefix, preventing key collisions between tenants.
+
+### Static Tenant Prefix
+
+For applications where the tenant is known at store creation time:
+
+```go
+func newStoreForTenant(drv driver.Driver, tenantID string) (*kv.Store, error) {
+    return kv.Open(drv,
+        kv.WithHook(middleware.NewNamespace("t:"+tenantID)),
+    )
+}
+
+// Tenant "acme" store: all keys prefixed with "t:acme:"
+acmeStore, _ := newStoreForTenant(drv, "acme")
+
+// Tenant "globex" store: all keys prefixed with "t:globex:"
+globexStore, _ := newStoreForTenant(drv, "globex")
+```
+
+### Extracting Tenant from Context
+
+For request-scoped tenancy where the tenant ID comes from the request context, you can create a store per request or use a custom hook that reads the tenant from context:
+
+```go
+type DynamicNamespaceHook struct{}
+
+var _ hook.PreQueryHook = (*DynamicNamespaceHook)(nil)
+
+func (h *DynamicNamespaceHook) BeforeQuery(ctx context.Context, qc *hook.QueryContext) (*hook.HookResult, error) {
+    tenantID := tenant.FromContext(ctx)
+    if tenantID == "" {
+        return &hook.HookResult{Decision: hook.Deny, Error: errors.New("missing tenant")}, nil
+    }
+
+    if keys, ok := qc.Values["_kv_keys"].([]string); ok {
+        modified := make([]string, len(keys))
+        for i, k := range keys {
+            modified[i] = "t:" + tenantID + ":" + k
+        }
+        qc.Values["_kv_keys"] = modified
+        if len(modified) > 0 {
+            qc.RawQuery = modified[0]
+        }
+    }
+
+    return &hook.HookResult{Decision: hook.Modify}, nil
+}
+```
+
+## Environment Isolation
+
+Namespace middleware is also useful for isolating environments that share a single KV backend:
+
+```go
+// Development
+store, _ := kv.Open(drv, kv.WithHook(middleware.NewNamespace("dev")))
+
+// Staging
+store, _ := kv.Open(drv, kv.WithHook(middleware.NewNamespace("staging")))
+
+// Production
+store, _ := kv.Open(drv, kv.WithHook(middleware.NewNamespace("prod")))
+```
+
+## Example: Tenant-Based Key Isolation
+
+A complete example showing how namespace middleware isolates tenant data on a shared KV store:
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/middleware"
+    "github.com/xraph/grove/kv/driver/boltdriver"
+)
+
+func main() {
+    drv := boltdriver.New()
+    drv.Open(context.Background(), "shared.db")
+
+    // Create isolated stores for two tenants
+    acmeStore, _ := kv.Open(drv,
+        kv.WithHook(middleware.NewNamespace("tenant:acme")),
+    )
+    globexStore, _ := kv.Open(drv,
+        kv.WithHook(middleware.NewNamespace("tenant:globex")),
+    )
+
+    ctx := context.Background()
+
+    // Both tenants can use the same key names without collision
+    acmeStore.Set(ctx, "config", map[string]string{"theme": "blue"})
+    globexStore.Set(ctx, "config", map[string]string{"theme": "green"})
+
+    // Each tenant sees only their own data
+    var acmeConfig, globexConfig map[string]string
+    acmeStore.Get(ctx, "config", &acmeConfig)     // {"theme": "blue"}
+    globexStore.Get(ctx, "config", &globexConfig)  // {"theme": "green"}
+}
+```
+
+Under the hood, the backing store contains two distinct keys: `tenant:acme:config` and `tenant:globex:config`.
+
+## API Reference
+
+| Method | Description |
+|---|---|
+| `NewNamespace(prefix, separator...)` | Create a new namespace hook with the given prefix and optional separator |

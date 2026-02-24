@@ -1,0 +1,168 @@
+---
+title: Middleware Overview
+description: KV middleware system overview -- composable hooks for logging, caching, encryption, and more.
+---
+
+Grove KV middleware extends store behavior without modifying application code. Every middleware implements `hook.PreQueryHook` and/or `hook.PostQueryHook` from `github.com/xraph/grove/hook` and is registered at store creation time via `kv.WithHook()`.
+
+## Middleware as Hooks
+
+All KV middleware follows the same pattern as Grove's [hook system](/docs/hooks/overview). Each middleware is a struct that implements one or both of these interfaces:
+
+```go
+// Runs before the KV operation reaches the driver.
+type PreQueryHook interface {
+    BeforeQuery(ctx context.Context, qc *QueryContext) (*HookResult, error)
+}
+
+// Runs after the KV operation completes.
+type PostQueryHook interface {
+    AfterQuery(ctx context.Context, qc *QueryContext, result any) error
+}
+```
+
+Pre-query hooks can inspect, modify, or short-circuit operations. Post-query hooks can transform results, record metrics, or trigger side effects.
+
+## Registering Middleware
+
+Middleware is registered as options when opening a KV store:
+
+```go
+import (
+    "log/slog"
+    "time"
+
+    "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/middleware"
+    "github.com/xraph/grove/kv/driver/boltdriver"
+)
+
+drv := boltdriver.New()
+drv.Open(ctx, "data.db")
+
+store, err := kv.Open(drv,
+    kv.WithHook(middleware.NewLogging(slog.Default())),
+    kv.WithHook(middleware.NewNamespace("tenant:acme")),
+    kv.WithHook(middleware.NewCache(1000, 5*time.Minute)),
+)
+```
+
+Each `kv.WithHook()` call appends the middleware to the hook chain. You can also pass an optional `hook.Scope` to restrict which operations the middleware applies to.
+
+## Available Middleware
+
+| Middleware | Constructor | Purpose |
+|---|---|---|
+| [Logging](/docs/kv/middleware/logging) | `NewLogging(logger)` | Structured operation logging with latency tracking |
+| [Namespace](/docs/kv/middleware/namespace) | `NewNamespace(prefix)` | Multi-tenant key prefixing and isolation |
+| [L1 Cache](/docs/kv/middleware/cache) | `NewCache(size, ttl)` | In-memory read-through cache with TTL |
+| [Stampede Protection](/docs/kv/middleware/stampede) | `NewStampede()` | Singleflight deduplication for concurrent GETs |
+| [Compression](/docs/kv/middleware/compression) | `NewCompress(algo)` | Transparent gzip compression for large values |
+| [Encryption](/docs/kv/middleware/encryption) | `NewEncrypt(key)` | AES-GCM transparent encryption at rest |
+| [Retry](/docs/kv/middleware/retry) | `NewRetry(maxAttempts)` | Automatic retry with exponential backoff and jitter |
+| [Circuit Breaker](/docs/kv/middleware/circuit-breaker) | `NewCircuitBreaker(threshold, timeout)` | Fault tolerance with open/closed/half-open states |
+
+## Middleware Ordering
+
+Hooks run in the order they are registered. This matters because some middleware must run before others to function correctly.
+
+**Pre-query hooks** execute top-to-bottom (first registered runs first). **Post-query hooks** also execute in registration order.
+
+A recommended ordering for a production setup:
+
+```go
+store, err := kv.Open(drv,
+    // 1. Circuit breaker first -- reject immediately if backend is down
+    kv.WithHook(middleware.NewCircuitBreaker(5, 30*time.Second)),
+    // 2. Logging -- capture all operations including short-circuited ones
+    kv.WithHook(middleware.NewLogging(slog.Default())),
+    // 3. Namespace -- prefix keys before any caching or backend access
+    kv.WithHook(middleware.NewNamespace("tenant:acme")),
+    // 4. L1 cache -- serve from memory if possible
+    kv.WithHook(middleware.NewCache(10000, 5*time.Minute)),
+    // 5. Stampede -- deduplicate concurrent cache misses
+    kv.WithHook(middleware.NewStampede()),
+    // 6. Retry -- retry transient backend failures
+    kv.WithHook(middleware.NewRetry(3)),
+    // 7. Compression -- compress before encryption for better ratios
+    kv.WithHook(middleware.NewCompress(middleware.Gzip)),
+    // 8. Encryption -- encrypt last, closest to the driver
+    kv.WithHook(encryptHook),
+)
+```
+
+The exact order depends on your requirements. For example, if you want logging to capture the original (un-namespaced) key, place it before the namespace hook.
+
+## Writing Custom Middleware
+
+Any struct that implements `PreQueryHook`, `PostQueryHook`, or both can be used as KV middleware.
+
+```go
+package mymiddleware
+
+import (
+    "context"
+    "fmt"
+
+    "github.com/xraph/grove/hook"
+    kv "github.com/xraph/grove/kv"
+)
+
+// MetricsHook records operation counts.
+type MetricsHook struct {
+    counter map[string]int64
+}
+
+// Compile-time interface check.
+var _ hook.PreQueryHook = (*MetricsHook)(nil)
+
+func NewMetrics() *MetricsHook {
+    return &MetricsHook{counter: make(map[string]int64)}
+}
+
+func (h *MetricsHook) BeforeQuery(_ context.Context, qc *hook.QueryContext) (*hook.HookResult, error) {
+    opName := kv.CommandName(qc.Operation)
+    h.counter[opName]++
+    return &hook.HookResult{Decision: hook.Allow}, nil
+}
+```
+
+Register it just like any built-in middleware:
+
+```go
+store, err := kv.Open(drv,
+    kv.WithHook(NewMetrics()),
+)
+```
+
+### Hook Decisions
+
+Your `BeforeQuery` method returns a `*hook.HookResult` with a `Decision`:
+
+| Decision | Effect |
+|---|---|
+| `hook.Allow` | Continue to the next hook and the driver |
+| `hook.Deny` | Abort the operation immediately (set `HookResult.Error`) |
+| `hook.Modify` | Continue with modified query context |
+| `hook.Skip` | This hook has no opinion -- pass through |
+
+### Sharing State Between Pre and Post Hooks
+
+Use `qc.Values` to pass data between `BeforeQuery` and `AfterQuery`:
+
+```go
+func (h *MyHook) BeforeQuery(_ context.Context, qc *hook.QueryContext) (*hook.HookResult, error) {
+    if qc.Values == nil {
+        qc.Values = make(map[string]any)
+    }
+    qc.Values["_my_start"] = time.Now()
+    return &hook.HookResult{Decision: hook.Allow}, nil
+}
+
+func (h *MyHook) AfterQuery(_ context.Context, qc *hook.QueryContext, result any) error {
+    start, _ := qc.Values["_my_start"].(time.Time)
+    elapsed := time.Since(start)
+    // Use elapsed...
+    return nil
+}
+```
