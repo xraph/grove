@@ -39,10 +39,28 @@ type Extension struct {
 	groups []*migrate.Group
 	hooks  []hookEntry
 
+	// Multi-DB support.
+	databases    []databaseEntry
+	defaultDB    string
+	manager      *DBManager
+	dbHooks      map[string][]hookEntry
+	dbMigrations map[string][]*migrate.Group
+
 	// CRDT integration.
 	crdtPlugin         *crdt.Plugin
+	crdtHookScope      hook.Scope
+	crdtDatabase       string // named DB for CRDT (multi-DB mode)
 	syncer             *crdt.Syncer
 	syncControllerOpts []crdt.SyncControllerOption
+}
+
+// databaseEntry holds the configuration for a named database
+// provided via WithDatabase or WithDatabaseDSN options.
+type databaseEntry struct {
+	name       string
+	driver     grove.GroveDriver
+	driverName string // for DSN-based resolution
+	dsn        string
 }
 
 type hookEntry struct {
@@ -61,11 +79,20 @@ func New(opts ...ExtOption) *Extension {
 	return e
 }
 
-// DB returns the Grove DB instance (nil until Register is called).
+// DB returns the default Grove DB instance (nil until Register is called).
 func (e *Extension) DB() *grove.DB { return e.db }
 
-// MigrationGroups returns all registered migration groups.
+// Manager returns the DBManager for multi-DB mode.
+// Returns nil in single-DB mode.
+func (e *Extension) Manager() *DBManager { return e.manager }
+
+// MigrationGroups returns all registered migration groups (single-DB mode).
 func (e *Extension) MigrationGroups() []*migrate.Group { return e.groups }
+
+// isMultiDB returns true if multiple named databases are configured.
+func (e *Extension) isMultiDB() bool {
+	return len(e.databases) > 0 || len(e.config.Databases) > 0
+}
 
 // Register implements [forge.Extension].
 func (e *Extension) Register(fapp forge.App) error {
@@ -79,46 +106,243 @@ func (e *Extension) Register(fapp forge.App) error {
 		return err
 	}
 
-	// 3. Build driver from config if not set via WithDriver().
+	// 3. Route to single-DB or multi-DB initialization.
+	if e.isMultiDB() {
+		if err := e.registerMultiDB(fapp); err != nil {
+			return err
+		}
+	} else {
+		if err := e.registerSingleDB(fapp); err != nil {
+			return err
+		}
+	}
+
+	// 4. Register CRDT sync controller if enabled and routes not disabled.
+	if err := e.registerCRDT(fapp); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// registerSingleDB handles the original single-database path.
+func (e *Extension) registerSingleDB(fapp forge.App) error {
+	// Build driver from config if not set via WithDriver().
 	if err := e.resolveDriver(); err != nil {
 		return err
 	}
 
-	// 4. Init DB, register hooks.
+	// Init DB, register hooks.
 	if err := e.initDB(); err != nil {
 		return err
 	}
 
-	// 5. Register *grove.DB in DI container.
+	// Register *grove.DB in DI container.
 	if err := vessel.Provide(fapp.Container(), func() (*grove.DB, error) {
 		return e.db, nil
 	}); err != nil {
 		return fmt.Errorf("grove: register db in container: %w", err)
 	}
 
-	// 6. Register CRDT sync controller if enabled and routes not disabled.
-	if e.crdtPlugin != nil && !e.config.DisableRoutes {
-		ctrl := crdt.NewSyncController(e.crdtPlugin, e.syncControllerOpts...)
-		forgeCtrl := &crdtForgeController{ctrl: ctrl}
+	e.Logger().Info("grove extension registered",
+		forge.F("driver", e.driver.Name()),
+	)
+	return nil
+}
 
-		if err := fapp.RegisterController(forgeCtrl); err != nil {
-			return fmt.Errorf("grove: register crdt controller: %w", err)
+// registerMultiDB handles the multi-database path.
+func (e *Extension) registerMultiDB(fapp forge.App) error {
+	mgr := NewDBManager()
+
+	// Merge programmatic entries with config entries.
+	entries := e.buildDatabaseEntries()
+
+	// Open each database.
+	for _, entry := range entries {
+		drv, err := e.resolveDatabaseDriver(entry)
+		if err != nil {
+			return fmt.Errorf("grove: database %q: %w", entry.name, err)
 		}
 
-		// Provide CRDT plugin via DI.
-		if err := vessel.Provide(fapp.Container(), func() *crdt.Plugin {
-			return e.crdtPlugin
-		}); err != nil {
-			return fmt.Errorf("grove: register crdt plugin in container: %w", err)
+		db, err := grove.Open(drv)
+		if err != nil {
+			return fmt.Errorf("grove: open database %q: %w", entry.name, err)
 		}
 
-		e.Logger().Info("grove: CRDT sync controller registered",
-			forge.F("node_id", e.crdtPlugin.NodeID()),
+		// Apply global hooks.
+		for _, h := range e.hooks {
+			db.Hooks().AddHook(h.hook, h.scope)
+		}
+
+		// Apply per-DB hooks.
+		if dbHooks, ok := e.dbHooks[entry.name]; ok {
+			for _, h := range dbHooks {
+				db.Hooks().AddHook(h.hook, h.scope)
+			}
+		}
+
+		mgr.Add(entry.name, db)
+
+		e.Logger().Info("grove: database opened",
+			forge.F("name", entry.name),
+			forge.F("driver", drv.Name()),
 		)
 	}
 
+	// Set default database.
+	defaultName := e.resolveDefaultName(entries)
+	if defaultName != "" {
+		if err := mgr.SetDefault(defaultName); err != nil {
+			return fmt.Errorf("grove: set default database: %w", err)
+		}
+	}
+
+	e.manager = mgr
+
+	// Set e.db to the default for backward-compatible DB() accessor.
+	defaultDB, err := mgr.Default()
+	if err != nil {
+		return fmt.Errorf("grove: get default database: %w", err)
+	}
+	e.db = defaultDB
+
+	// Apply CRDT hooks to the target database.
+	if e.crdtPlugin != nil {
+		crdtDB, err := e.resolveCRDTDatabase()
+		if err != nil {
+			return err
+		}
+		crdtDB.Hooks().AddHook(e.crdtPlugin, e.crdtHookScope)
+	}
+
+	// Register in DI.
+	if err := e.registerMultiDBInDI(fapp); err != nil {
+		return err
+	}
+
 	e.Logger().Info("grove extension registered",
-		forge.F("driver", e.driver.Name()),
+		forge.F("mode", "multi-db"),
+		forge.F("databases", mgr.Len()),
+		forge.F("default", defaultName),
+	)
+	return nil
+}
+
+// buildDatabaseEntries merges programmatic and config-based database entries.
+// Programmatic entries take precedence over config entries with the same name.
+func (e *Extension) buildDatabaseEntries() []databaseEntry {
+	entries := make([]databaseEntry, len(e.databases))
+	copy(entries, e.databases)
+
+	// Track names from programmatic entries.
+	seen := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		seen[entry.name] = true
+	}
+
+	// Add config entries that aren't already provided programmatically.
+	for _, cfg := range e.config.Databases {
+		if seen[cfg.Name] {
+			continue
+		}
+		entries = append(entries, databaseEntry{
+			name:       cfg.Name,
+			driverName: cfg.Driver,
+			dsn:        cfg.DSN,
+		})
+	}
+
+	return entries
+}
+
+// resolveDatabaseDriver creates a driver for a database entry.
+func (e *Extension) resolveDatabaseDriver(entry databaseEntry) (grove.GroveDriver, error) {
+	if entry.driver != nil {
+		return entry.driver, nil
+	}
+	if entry.driverName == "" || entry.dsn == "" {
+		return nil, errors.New("driver and dsn are required")
+	}
+	return grove.OpenDriver(context.Background(), entry.driverName, entry.dsn)
+}
+
+// resolveDefaultName determines the default database name.
+func (e *Extension) resolveDefaultName(entries []databaseEntry) string {
+	if e.defaultDB != "" {
+		return e.defaultDB
+	}
+	if e.config.Default != "" {
+		return e.config.Default
+	}
+	if len(entries) > 0 {
+		return entries[0].name
+	}
+	return ""
+}
+
+// resolveCRDTDatabase returns the database that CRDT hooks should attach to.
+func (e *Extension) resolveCRDTDatabase() (*grove.DB, error) {
+	if e.crdtDatabase != "" {
+		db, err := e.manager.Get(e.crdtDatabase)
+		if err != nil {
+			return nil, fmt.Errorf("grove: crdt database %q: %w", e.crdtDatabase, err)
+		}
+		return db, nil
+	}
+	return e.manager.Default()
+}
+
+// registerMultiDBInDI registers the manager and all databases in the DI container.
+func (e *Extension) registerMultiDBInDI(fapp forge.App) error {
+	// Register the DBManager itself.
+	if err := vessel.Provide(fapp.Container(), func() *DBManager {
+		return e.manager
+	}); err != nil {
+		return fmt.Errorf("grove: register db manager in container: %w", err)
+	}
+
+	// Register default *grove.DB (unnamed — backward compatible).
+	if err := vessel.Provide(fapp.Container(), func() (*grove.DB, error) {
+		return e.manager.Default()
+	}); err != nil {
+		return fmt.Errorf("grove: register default db in container: %w", err)
+	}
+
+	// Register each named database.
+	for name, db := range e.manager.All() {
+		namedDB := db // capture loop variable
+		if err := vessel.ProvideNamed(fapp.Container(), name, func() *grove.DB {
+			return namedDB
+		}); err != nil {
+			return fmt.Errorf("grove: register db %q in container: %w", name, err)
+		}
+	}
+
+	return nil
+}
+
+// registerCRDT registers the CRDT sync controller if enabled.
+func (e *Extension) registerCRDT(fapp forge.App) error {
+	if e.crdtPlugin == nil || e.config.DisableRoutes {
+		return nil
+	}
+
+	ctrl := crdt.NewSyncController(e.crdtPlugin, e.syncControllerOpts...)
+	forgeCtrl := &crdtForgeController{ctrl: ctrl}
+
+	if err := fapp.RegisterController(forgeCtrl); err != nil {
+		return fmt.Errorf("grove: register crdt controller: %w", err)
+	}
+
+	// Provide CRDT plugin via DI.
+	if err := vessel.Provide(fapp.Container(), func() *crdt.Plugin {
+		return e.crdtPlugin
+	}); err != nil {
+		return fmt.Errorf("grove: register crdt plugin in container: %w", err)
+	}
+
+	e.Logger().Info("grove: CRDT sync controller registered",
+		forge.F("node_id", e.crdtPlugin.NodeID()),
 	)
 	return nil
 }
@@ -151,9 +375,11 @@ func (e *Extension) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop gracefully shuts down the Grove DB.
+// Stop gracefully shuts down all Grove databases.
 func (e *Extension) Stop(_ context.Context) error {
-	if e.db != nil {
+	if e.manager != nil {
+		e.manager.Close()
+	} else if e.db != nil {
 		e.db.Close()
 	}
 	e.MarkStopped()
@@ -162,6 +388,14 @@ func (e *Extension) Stop(_ context.Context) error {
 
 // Health implements [forge.Extension].
 func (e *Extension) Health(_ context.Context) error {
+	if e.manager != nil {
+		for name, db := range e.manager.All() {
+			if db == nil {
+				return fmt.Errorf("grove: database %q is nil", name)
+			}
+		}
+		return nil
+	}
 	if e.db == nil {
 		return errors.New("grove: extension not initialized")
 	}
@@ -174,6 +408,7 @@ func (e *Extension) Health(_ context.Context) error {
 func (e *Extension) loadConfiguration() error {
 	programmaticConfig := e.config
 	hasProgrammaticDriver := e.driver != nil || (programmaticConfig.Driver != "" && programmaticConfig.DSN != "")
+	hasProgrammaticDBs := len(e.databases) > 0
 
 	// Try loading from config file.
 	finalConfig, configLoaded := e.tryLoadFromConfigFile()
@@ -184,7 +419,7 @@ func (e *Extension) loadConfiguration() error {
 				"ensure 'extensions.grove' or 'grove' key exists in your config")
 		}
 
-		finalConfig = e.selectProgrammaticOrDefaultConfig(programmaticConfig, hasProgrammaticDriver)
+		finalConfig = e.selectProgrammaticOrDefaultConfig(programmaticConfig, hasProgrammaticDriver || hasProgrammaticDBs)
 	} else {
 		// Config loaded from YAML — merge with programmatic options.
 		finalConfig = e.mergeConfigurations(finalConfig, programmaticConfig)
@@ -194,6 +429,7 @@ func (e *Extension) loadConfiguration() error {
 		forge.F("driver", finalConfig.Driver),
 		forge.F("disable_routes", finalConfig.DisableRoutes),
 		forge.F("disable_migrate", finalConfig.DisableMigrate),
+		forge.F("databases", len(finalConfig.Databases)),
 	)
 
 	e.config = finalConfig
@@ -275,6 +511,11 @@ func (e *Extension) mergeConfigurations(yamlConfig, programmaticConfig Config) C
 		yamlConfig.BasePath = programmaticConfig.BasePath
 	}
 
+	// Default: YAML takes precedence.
+	if yamlConfig.Default == "" && programmaticConfig.Default != "" {
+		yamlConfig.Default = programmaticConfig.Default
+	}
+
 	return yamlConfig
 }
 
@@ -301,7 +542,7 @@ func (e *Extension) resolveDriver() error {
 
 // --- DB Initialization ---
 
-// initDB creates the grove.DB and registers hooks.
+// initDB creates the grove.DB and registers hooks (single-DB mode).
 func (e *Extension) initDB() error {
 	db, err := grove.Open(e.driver)
 	if err != nil {
@@ -311,6 +552,11 @@ func (e *Extension) initDB() error {
 
 	for _, h := range e.hooks {
 		db.Hooks().AddHook(h.hook, h.scope)
+	}
+
+	// In single-DB mode, CRDT hooks are applied directly.
+	if e.crdtPlugin != nil {
+		db.Hooks().AddHook(e.crdtPlugin, e.crdtHookScope)
 	}
 
 	return nil

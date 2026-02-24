@@ -1,6 +1,6 @@
 ---
 title: Forge Extension
-description: Use Grove as a first-class Forge extension with YAML configuration, DI, migrations, CRDT sync, and lifecycle management.
+description: Use Grove as a first-class Forge extension with YAML configuration, DI, migrations, CRDT sync, multi-database support, and lifecycle management.
 ---
 
 Grove provides a first-class Forge extension that handles configuration loading, driver creation, dependency injection, and lifecycle management. It follows the canonical Forge extension pattern with `BaseExtension` embedding.
@@ -60,9 +60,19 @@ The `Config` struct supports the following fields, all configurable via YAML or 
 |-------|----------|------|-------------|
 | Driver | `driver` | `string` | Driver name: `postgres`, `sqlite`, `mysql`, `mongodb`, `turso`, `clickhouse` |
 | DSN | `dsn` | `string` | Data source name / connection string |
+| Databases | `databases` | `[]DatabaseConfig` | Named database connections for multi-DB mode |
+| Default | `default` | `string` | Default database name when using multi-DB |
 | DisableRoutes | `disable_routes` | `bool` | Skip CRDT sync route registration |
 | DisableMigrate | `disable_migrate` | `bool` | Skip automatic migration execution |
 | BasePath | `base_path` | `string` | URL prefix for CRDT sync routes (default: `/sync`) |
+
+Each entry in `Databases` has:
+
+| Field | YAML Key | Type | Description |
+|-------|----------|------|-------------|
+| Name | `name` | `string` | Unique identifier for this database |
+| Driver | `driver` | `string` | Driver name |
+| DSN | `dsn` | `string` | Connection string |
 
 YAML configuration can use either key:
 
@@ -80,6 +90,8 @@ grove:
 ```
 
 ## Options
+
+### Single-DB Options
 
 ```go
 groveext.New(
@@ -110,15 +122,46 @@ groveext.New(
 )
 ```
 
+### Multi-DB Options
+
+```go
+groveext.New(
+    // Add named databases with pre-configured drivers.
+    groveext.WithDatabase("primary", pgdb),
+    groveext.WithDatabase("analytics", chdb),
+
+    // Or add named databases using driver name + DSN (resolved from registry).
+    groveext.WithDatabaseDSN("cache", "sqlite", "file:cache.db"),
+
+    // Set which database is the default (used by DB() and unnamed DI).
+    groveext.WithDefaultDatabase("primary"),
+
+    // Per-database hooks.
+    groveext.WithHookFor("primary", &tenantHook, hook.Scope{Tables: []string{"orders"}}),
+    groveext.WithHookFor("analytics", &readOnlyHook),
+
+    // Per-database migrations.
+    groveext.WithMigrationsFor("primary", core.Migrations, billing.Migrations),
+    groveext.WithMigrationsFor("analytics", analytics.Migrations),
+
+    // Global hooks (applied to ALL databases).
+    groveext.WithHook(&auditHook),
+
+    // CRDT on a specific database.
+    groveext.WithCRDT(crdtPlugin),
+    groveext.WithCRDTDatabase("primary"),
+)
+```
+
 ## Lifecycle
 
 ### Register Phase
 
 1. Calls `BaseExtension.Register()` to store the Forge app, logger, and metrics
 2. Loads configuration: YAML (`extensions.grove` → `grove`) → merge with programmatic → defaults
-3. Resolves the driver — uses `WithDriver()` if set, otherwise creates from `driver`+`dsn` via the driver registry
-4. Opens the `grove.DB` and registers hooks
-5. Provides `*grove.DB` in the Forge DI container via `vessel.Provide()`
+3. Routes to **single-DB** or **multi-DB** initialization based on configuration
+4. Opens the database(s) and registers hooks
+5. Provides database instances in the Forge DI container via Vessel
 6. Registers CRDT sync controller if enabled (and routes not disabled)
 
 ### Start Phase
@@ -128,12 +171,14 @@ groveext.New(
 
 ### Stop Phase
 
-1. Closes the Grove DB and all connections
-2. Marks the extension as stopped
+1. In single-DB mode: closes the Grove DB
+2. In multi-DB mode: closes all databases via the `DBManager`
+3. Marks the extension as stopped
 
 ### Health Check
 
-Returns an error if the DB has not been initialized.
+- In single-DB mode: returns an error if the DB has not been initialized
+- In multi-DB mode: checks all registered databases and returns the first error
 
 ## Accessing the DB
 
@@ -157,6 +202,196 @@ func myHandler(ctx forge.Context) error {
     return ctx.JSON(200, users)
 }
 ```
+
+## Multi-Database Support
+
+The extension supports managing multiple named database connections. This is useful when your application needs different databases for different concerns — for example, a primary Postgres for relational data, a ClickHouse for analytics, or a SQLite for local cache.
+
+### Programmatic Setup
+
+```go
+import (
+    "github.com/xraph/forge"
+    "github.com/xraph/grove/drivers/pgdriver"
+    "github.com/xraph/grove/drivers/clickhousedriver"
+    groveext "github.com/xraph/grove/extension"
+)
+
+pgdb := pgdriver.New()
+pgdb.Open(ctx, "postgres://user:pass@localhost:5432/app")
+
+chdb := clickhousedriver.New()
+chdb.Open(ctx, "clickhouse://localhost:9000/analytics")
+
+app := forge.New()
+app.Use(groveext.New(
+    groveext.WithDatabase("primary", pgdb),
+    groveext.WithDatabase("analytics", chdb),
+    groveext.WithDefaultDatabase("primary"),
+))
+app.Start(ctx)
+```
+
+### YAML Configuration
+
+```yaml
+extensions:
+  grove:
+    databases:
+      - name: primary
+        driver: postgres
+        dsn: "postgres://user:pass@localhost:5432/app"
+      - name: analytics
+        driver: clickhouse
+        dsn: "clickhouse://localhost:9000/analytics"
+      - name: cache
+        driver: sqlite
+        dsn: "file:cache.db"
+    default: primary
+```
+
+```go
+app := forge.New()
+app.Use(groveext.New()) // Multi-DB config loaded from YAML
+app.Start(ctx)
+```
+
+### Accessing Named Databases
+
+Use Vessel's named injection to resolve specific databases:
+
+```go
+import (
+    "github.com/xraph/grove"
+    "github.com/xraph/vessel"
+    groveext "github.com/xraph/grove/extension"
+)
+
+func analyticsHandler(ctx forge.Context) error {
+    // Get the default database (unnamed injection).
+    defaultDB := forge.Inject[*grove.DB](ctx)
+
+    // Get a specific named database.
+    analyticsDB, err := vessel.InjectNamed[*grove.DB](ctx.App().Container(), "analytics")
+    if err != nil {
+        return err
+    }
+
+    // Get the DBManager for dynamic access.
+    mgr := forge.Inject[*groveext.DBManager](ctx)
+
+    // Access any database by name.
+    cacheDB, err := mgr.Get("cache")
+    if err != nil {
+        return err
+    }
+
+    _ = defaultDB
+    _ = analyticsDB
+    _ = cacheDB
+    return nil
+}
+```
+
+### DI Registration
+
+In multi-DB mode, the extension registers three types of services in the DI container:
+
+| Service | Resolution | Description |
+|---------|-----------|-------------|
+| `*grove.DB` | `vessel.Inject[*grove.DB]()` | The default database (backward compatible) |
+| `*grove.DB` (named) | `vessel.InjectNamed[*grove.DB](c, "name")` | A specific named database |
+| `*extension.DBManager` | `vessel.Inject[*extension.DBManager]()` | The manager for dynamic access |
+
+### DBManager API
+
+The `DBManager` is the central type for multi-database management:
+
+```go
+mgr := ext.Manager() // nil in single-DB mode
+
+// Get a named database.
+db, err := mgr.Get("analytics")
+
+// Get the default database.
+db, err := mgr.Default()
+
+// Get the default database name.
+name := mgr.DefaultName()
+
+// Change the default at runtime.
+err := mgr.SetDefault("analytics")
+
+// Get all databases as a map (returns a copy).
+all := mgr.All()
+
+// Get the count of registered databases.
+n := mgr.Len()
+
+// Close all databases.
+err := mgr.Close()
+```
+
+### Per-Database Hooks
+
+Hooks can be scoped to specific databases or applied globally:
+
+```go
+groveext.New(
+    groveext.WithDatabase("primary", pgdb),
+    groveext.WithDatabase("analytics", chdb),
+
+    // Global hook — applied to ALL databases.
+    groveext.WithHook(&auditHook),
+
+    // Per-database hooks — applied to a specific database only.
+    groveext.WithHookFor("primary", &tenantIsolation, hook.Scope{
+        Tables:   []string{"orders", "invoices"},
+        Priority: 1,
+    }),
+    groveext.WithHookFor("analytics", &readOnlyEnforcer),
+)
+```
+
+### Per-Database Migrations
+
+Migration groups can target specific databases:
+
+```go
+groveext.New(
+    groveext.WithDatabase("primary", pgdb),
+    groveext.WithDatabase("analytics", chdb),
+
+    groveext.WithMigrationsFor("primary", core.Migrations, billing.Migrations),
+    groveext.WithMigrationsFor("analytics", analytics.Migrations),
+)
+```
+
+### Backward Compatibility
+
+The multi-database feature is fully backward compatible:
+
+- **Single-DB mode** (`WithDriver` / `WithDSN`) works exactly as before
+- `ext.DB()` always returns the default database in both modes
+- `ext.Manager()` returns `nil` in single-DB mode, non-nil in multi-DB mode
+- Unnamed DI injection (`vessel.Inject[*grove.DB]()`) resolves the default database in both modes
+
+### CRDT with Multi-DB
+
+When using CRDT with multiple databases, specify which database should receive CRDT hooks:
+
+```go
+groveext.New(
+    groveext.WithDatabase("primary", pgdb),
+    groveext.WithDatabase("analytics", chdb),
+
+    groveext.WithCRDT(crdtPlugin, hook.Scope{Tables: []string{"documents"}}),
+    groveext.WithCRDTDatabase("primary"), // CRDT hooks on primary only
+    groveext.WithSyncer(syncer),
+)
+```
+
+If `WithCRDTDatabase` is not specified, CRDT hooks are applied to the default database.
 
 ## Driver Registry
 
@@ -189,7 +424,7 @@ Once registered, drivers can be created by name:
 drv, err := grove.OpenDriver(ctx, "postgres", "postgres://user:pass@localhost/mydb")
 ```
 
-The extension uses this automatically when YAML config provides `driver` and `dsn`.
+The extension uses this automatically when YAML config provides `driver` and `dsn`, including for each entry in the `databases` list.
 
 ## Hooks
 

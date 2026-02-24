@@ -92,7 +92,7 @@ jobs:
         working-directory: drivers/${{ matrix.driver }}
         run: |
           go mod tidy
-          git diff --exit-code drivers/${{ matrix.driver }}/go.mod drivers/${{ matrix.driver }}/go.sum
+          git diff --exit-code go.mod go.sum
 
       - name: Build
         working-directory: drivers/${{ matrix.driver }}
@@ -127,7 +127,7 @@ jobs:
         working-directory: extension
         run: |
           go mod tidy
-          git diff --exit-code extension/go.mod extension/go.sum
+          git diff --exit-code go.mod go.sum
 
       - name: Build
         working-directory: extension
@@ -158,7 +158,7 @@ jobs:
         working-directory: kv
         run: |
           go mod tidy
-          git diff --exit-code kv/go.mod kv/go.sum
+          git diff --exit-code go.mod go.sum
 
       - name: Build
         working-directory: kv
@@ -211,7 +211,7 @@ jobs:
         working-directory: kv/drivers/${{ matrix.driver }}
         run: |
           go mod tidy
-          git diff --exit-code kv/drivers/${{ matrix.driver }}/go.mod kv/drivers/${{ matrix.driver }}/go.sum
+          git diff --exit-code go.mod go.sum
 
       - name: Build
         working-directory: kv/drivers/${{ matrix.driver }}

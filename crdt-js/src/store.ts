@@ -117,6 +117,7 @@ export class CRDTStore {
 
     this.applyChangeInternal(change);
     this.pending.push(change);
+    this.notifyListeners(table, pk);
     return change;
   }
 
@@ -142,6 +143,7 @@ export class CRDTStore {
 
     this.applyChangeInternal(change);
     this.pending.push(change);
+    this.notifyListeners(table, pk);
     return change;
   }
 
@@ -167,6 +169,7 @@ export class CRDTStore {
 
     this.applyChangeInternal(change);
     this.pending.push(change);
+    this.notifyListeners(table, pk);
     return change;
   }
 
@@ -192,6 +195,7 @@ export class CRDTStore {
 
     this.applyChangeInternal(change);
     this.pending.push(change);
+    this.notifyListeners(table, pk);
     return change;
   }
 
@@ -217,6 +221,7 @@ export class CRDTStore {
 
     this.applyChangeInternal(change);
     this.pending.push(change);
+    this.notifyListeners(table, pk);
     return change;
   }
 

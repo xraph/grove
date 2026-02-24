@@ -50,6 +50,8 @@ jobs:
       - name: Verify root module
         run: |
           go mod download
+          go mod tidy
+          git diff --exit-code go.mod go.sum
           go build ./...
           go test -race -count=1 ./...
 
@@ -59,6 +61,8 @@ jobs:
             echo "::group::Verifying $mod"
             cd "drivers/$mod"
             go mod download
+            go mod tidy
+            git diff --exit-code go.mod go.sum
             go build ./...
             go test -race -count=1 ./...
             cd ../..
@@ -69,12 +73,16 @@ jobs:
         working-directory: extension
         run: |
           go mod download
+          go mod tidy
+          git diff --exit-code go.mod go.sum
           go build ./...
 
       - name: Verify KV module
         working-directory: kv
         run: |
           go mod download
+          go mod tidy
+          git diff --exit-code go.mod go.sum
           go build ./...
           go test -race -count=1 ./...
 
@@ -84,6 +92,8 @@ jobs:
             echo "::group::Verifying kv/drivers/$mod"
             cd "kv/drivers/$mod"
             go mod download
+            go mod tidy
+            git diff --exit-code go.mod go.sum
             go build ./...
             go test -race -count=1 ./...
             cd ../../..
