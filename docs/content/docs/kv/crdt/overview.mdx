@@ -157,6 +157,12 @@ func main() {
 }
 ```
 
+## Presence & Real-Time Awareness
+
+KV CRDT is designed for backend store-to-store replication and does not include a presence system. For live user awareness features — such as cursor tracking, typing indicators, or online user lists — use the main CRDT module (`grove/crdt`) with its TypeScript client and React hooks. The main CRDT module provides an in-memory `PresenceManager` with TTL-based cleanup, SSE event broadcast, and `usePresence`/`useDocumentPresence` React hooks.
+
+See [Presence & Awareness](/docs/crdt/presence) for the full guide.
+
 ## Next Steps
 
 - [CRDT Types](/docs/kv/crdt/types) for detailed API documentation on Counter, Register, Set, and Map

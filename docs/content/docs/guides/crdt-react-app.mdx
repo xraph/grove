@@ -495,3 +495,57 @@ function App() {
     );
 }
 ```
+
+## Adding Presence
+
+To show who else is viewing a document, enable presence on the server and use the `useDocumentPresence` hook. First, add the presence config to your provider:
+
+```tsx
+<CRDTProvider config={{
+    baseURL: "/api/sync",
+    nodeID: getNodeID(),
+    tables: ["documents"],
+    presence: { heartbeatInterval: 10000 },
+}}>
+```
+
+Then add active users to the `DocumentCard` component:
+
+```tsx
+import { useDocumentPresence } from "@grove-js/crdt/react";
+
+function DocumentCard({ id }: { id: string }) {
+    const { data, update, remove } = useDocument<Document>("documents", id);
+    const { others, updateMyPresence } = useDocumentPresence<{
+        name: string;
+        color: string;
+    }>("documents", id);
+
+    useEffect(() => {
+        updateMyPresence({ name: "You", color: "#3b82f6" });
+    }, []);
+
+    if (!data) return null;
+
+    return (
+        <div className="card">
+            <div className="card-header">
+                <input
+                    value={data.title}
+                    onChange={(e) => update("title", e.target.value)}
+                />
+                <div className="active-users">
+                    {others.map((p) => (
+                        <span key={p.node_id} style={{ color: p.data.color }}>
+                            {p.data.name}
+                        </span>
+                    ))}
+                </div>
+            </div>
+            {/* ... rest of card ... */}
+        </div>
+    );
+}
+```
+
+The hook automatically leaves the topic when the component unmounts. For a full guide on building typing indicators, cursor tracking, and more, see [CRDT: Collaborative Presence](/docs/guides/crdt-presence).

@@ -5,6 +5,7 @@
     "bun-migration",
     "crdt-offline-first",
     "crdt-multi-node",
-    "crdt-react-app"
+    "crdt-react-app",
+    "crdt-presence"
   ]
 }

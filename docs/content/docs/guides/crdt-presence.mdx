@@ -1,0 +1,403 @@
+---
+title: "CRDT: Collaborative Presence"
+description: Build real-time collaborative features — active users, typing indicators, and cursor tracking — using Grove CRDT presence.
+---
+
+This guide walks through building collaborative presence features using the Grove CRDT presence system. You'll add active user avatars, typing indicators, and cursor tracking to a React application backed by a Go server.
+
+## Prerequisites
+
+- A Grove Go server with CRDT sync endpoints (see [Getting Started](/docs/crdt/getting-started))
+- The `@grove-js/crdt` TypeScript package installed
+- React 18+
+
+## Step 1: Enable Presence on the Server
+
+Add `WithPresenceEnabled(true)` to your `SyncController` configuration:
+
+```go
+app.Use(groveext.New(
+    groveext.WithDriver(pgdb),
+    groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents"}}),
+    groveext.WithSyncController(
+        crdt.WithStreamPollInterval(500 * time.Millisecond),
+        crdt.WithStreamKeepAlive(15 * time.Second),
+        crdt.WithPresenceEnabled(true),          // Enable presence
+        crdt.WithPresenceTTL(30 * time.Second),   // Entry TTL (default: 30s)
+    ),
+))
+```
+
+This registers two additional endpoints alongside the existing sync routes:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/sync/presence` | Update or leave a topic |
+| GET | `/sync/presence?topic=...` | Get current presence snapshot |
+
+The SSE stream at `GET /sync/stream` also broadcasts `"presence"` events.
+
+## Step 2: Configure the React Client
+
+Enable presence in your `CRDTProvider` config:
+
+```tsx
+import { CRDTProvider } from "@grove-js/crdt/react";
+
+function App() {
+    return (
+        <CRDTProvider config={{
+            baseURL: "/api/sync",
+            nodeID: getNodeID(),
+            tables: ["documents"],
+            presence: { heartbeatInterval: 10000 }, // Re-send presence every 10s
+        }}>
+            <DocumentEditor />
+        </CRDTProvider>
+    );
+}
+
+function getNodeID(): string {
+    let id = sessionStorage.getItem("crdt-node-id");
+    if (!id) {
+        id = `browser-${crypto.randomUUID().slice(0, 8)}`;
+        sessionStorage.setItem("crdt-node-id", id);
+    }
+    return id;
+}
+```
+
+The `heartbeatInterval` controls how often the client re-sends presence to keep the server's TTL alive. Set it lower than the server's `WithPresenceTTL` (e.g., 10s heartbeat with 30s TTL).
+
+## Step 3: Active Users Component
+
+Show who else is viewing a document using `useDocumentPresence`:
+
+```tsx
+import { useEffect } from "react";
+import { useDocumentPresence } from "@grove-js/crdt/react";
+
+interface UserPresence {
+    name: string;
+    color: string;
+    avatar?: string;
+}
+
+const COLORS = ["#3b82f6", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899"];
+
+function ActiveUsers({ docId }: { docId: string }) {
+    const { others, updateMyPresence } = useDocumentPresence<UserPresence>(
+        "documents",
+        docId,
+    );
+
+    // Announce ourselves when the component mounts.
+    useEffect(() => {
+        const color = COLORS[Math.floor(Math.random() * COLORS.length)];
+        updateMyPresence({
+            name: getCurrentUserName(),
+            color,
+        });
+    }, []);
+
+    return (
+        <div className="active-users">
+            {others.map((peer) => (
+                <div
+                    key={peer.node_id}
+                    className="avatar"
+                    style={{ backgroundColor: peer.data.color }}
+                    title={peer.data.name}
+                >
+                    {peer.data.name[0].toUpperCase()}
+                </div>
+            ))}
+            {others.length === 0 && (
+                <span className="solo">Only you</span>
+            )}
+        </div>
+    );
+}
+```
+
+The hook automatically sends a `"leave"` event when the component unmounts.
+
+## Step 4: Typing Indicators
+
+Add a typing indicator to a text editor:
+
+```tsx
+import { useCallback, useRef } from "react";
+import { useDocumentPresence } from "@grove-js/crdt/react";
+
+interface EditorPresence {
+    name: string;
+    color: string;
+    isTyping: boolean;
+}
+
+function CollaborativeTextarea({ docId }: { docId: string }) {
+    const { others, updateMyPresence } = useDocumentPresence<EditorPresence>(
+        "documents",
+        docId,
+    );
+    const typingTimeout = useRef<ReturnType<typeof setTimeout>>();
+
+    const handleTyping = useCallback(() => {
+        updateMyPresence({ isTyping: true });
+
+        // Clear previous timeout and set a new one.
+        clearTimeout(typingTimeout.current);
+        typingTimeout.current = setTimeout(() => {
+            updateMyPresence({ isTyping: false });
+        }, 2000);
+    }, [updateMyPresence]);
+
+    const typingUsers = others.filter((p) => p.data.isTyping);
+
+    return (
+        <div>
+            <textarea
+                onKeyDown={handleTyping}
+                rows={6}
+                placeholder="Start typing..."
+            />
+            {typingUsers.length > 0 && (
+                <div className="typing-indicator">
+                    {typingUsers.map((p) => p.data.name).join(", ")}{" "}
+                    {typingUsers.length === 1 ? "is" : "are"} typing...
+                </div>
+            )}
+        </div>
+    );
+}
+```
+
+The typing state is set to `true` on each keystroke and automatically cleared after 2 seconds of inactivity.
+
+## Step 5: Cursor Tracking
+
+Track cursor positions on a canvas or editor:
+
+```tsx
+import { useCallback } from "react";
+import { useDocumentPresence } from "@grove-js/crdt/react";
+
+interface CursorPresence {
+    name: string;
+    color: string;
+    cursor: { x: number; y: number } | null;
+}
+
+function CursorOverlay({ docId }: { docId: string }) {
+    const { others, updateMyPresence } = useDocumentPresence<CursorPresence>(
+        "documents",
+        docId,
+    );
+
+    const handleMouseMove = useCallback(
+        (e: React.MouseEvent<HTMLDivElement>) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            updateMyPresence({
+                cursor: {
+                    x: e.clientX - rect.left,
+                    y: e.clientY - rect.top,
+                },
+            });
+        },
+        [updateMyPresence],
+    );
+
+    const handleMouseLeave = useCallback(() => {
+        updateMyPresence({ cursor: null });
+    }, [updateMyPresence]);
+
+    return (
+        <div
+            className="cursor-area"
+            onMouseMove={handleMouseMove}
+            onMouseLeave={handleMouseLeave}
+            style={{ position: "relative" }}
+        >
+            {/* Render remote cursors */}
+            {others
+                .filter((p) => p.data.cursor)
+                .map((p) => (
+                    <div
+                        key={p.node_id}
+                        className="remote-cursor"
+                        style={{
+                            position: "absolute",
+                            left: p.data.cursor!.x,
+                            top: p.data.cursor!.y,
+                            pointerEvents: "none",
+                        }}
+                    >
+                        <svg width="16" height="16" viewBox="0 0 16 16">
+                            <path d="M0 0L16 6L8 8L6 16Z" fill={p.data.color} />
+                        </svg>
+                        <span
+                            className="cursor-label"
+                            style={{ backgroundColor: p.data.color }}
+                        >
+                            {p.data.name}
+                        </span>
+                    </div>
+                ))}
+
+            {/* Your editor content here */}
+        </div>
+    );
+}
+```
+
+## Step 6: Putting It All Together
+
+Combine active users, typing indicators, and cursor tracking in a single document view:
+
+```tsx
+import { CRDTProvider, useDocument, useDocumentPresence } from "@grove-js/crdt/react";
+import { useEffect, useCallback, useRef } from "react";
+
+interface DocPresence {
+    name: string;
+    color: string;
+    isTyping: boolean;
+    cursor: { x: number; y: number } | null;
+}
+
+function DocumentView({ docId }: { docId: string }) {
+    const { data, update } = useDocument<{ id: string; title: string; body: string }>(
+        "documents",
+        docId,
+    );
+    const { others, updateMyPresence } = useDocumentPresence<DocPresence>(
+        "documents",
+        docId,
+    );
+    const typingTimeout = useRef<ReturnType<typeof setTimeout>>();
+
+    useEffect(() => {
+        updateMyPresence({
+            name: getCurrentUserName(),
+            color: "#3b82f6",
+            isTyping: false,
+            cursor: null,
+        });
+    }, []);
+
+    const handleTyping = useCallback(() => {
+        updateMyPresence({ isTyping: true });
+        clearTimeout(typingTimeout.current);
+        typingTimeout.current = setTimeout(() => {
+            updateMyPresence({ isTyping: false });
+        }, 2000);
+    }, [updateMyPresence]);
+
+    if (!data) return <div>Loading...</div>;
+
+    const typingUsers = others.filter((p) => p.data.isTyping);
+
+    return (
+        <div>
+            {/* Active users */}
+            <div className="toolbar">
+                {others.map((p) => (
+                    <span
+                        key={p.node_id}
+                        className="avatar"
+                        style={{ backgroundColor: p.data.color }}
+                        title={p.data.name}
+                    >
+                        {p.data.name[0]}
+                    </span>
+                ))}
+            </div>
+
+            {/* Title */}
+            <input
+                value={data.title}
+                onChange={(e) => update("title", e.target.value)}
+            />
+
+            {/* Body with typing indicator */}
+            <textarea
+                value={data.body}
+                onChange={(e) => update("body", e.target.value)}
+                onKeyDown={handleTyping}
+            />
+            {typingUsers.length > 0 && (
+                <p>
+                    {typingUsers.map((p) => p.data.name).join(", ")}{" "}
+                    {typingUsers.length === 1 ? "is" : "are"} typing...
+                </p>
+            )}
+        </div>
+    );
+}
+```
+
+## Production Considerations
+
+### Debounce Cursor Updates
+
+Cursor movement fires many events per second. Throttle updates to ~50ms:
+
+```typescript
+import { useCallback, useRef } from "react";
+
+function useThrottledPresence<T>(updateFn: (data: Partial<T>) => void, ms = 50) {
+    const lastUpdate = useRef(0);
+    const pending = useRef<Partial<T> | null>(null);
+    const timer = useRef<ReturnType<typeof setTimeout>>();
+
+    return useCallback(
+        (data: Partial<T>) => {
+            const now = Date.now();
+            if (now - lastUpdate.current >= ms) {
+                lastUpdate.current = now;
+                updateFn(data);
+            } else {
+                pending.current = data;
+                clearTimeout(timer.current);
+                timer.current = setTimeout(() => {
+                    if (pending.current) {
+                        updateFn(pending.current);
+                        pending.current = null;
+                        lastUpdate.current = Date.now();
+                    }
+                }, ms);
+            }
+        },
+        [updateFn, ms],
+    );
+}
+```
+
+### Keep Presence Data Small
+
+Presence updates are sent frequently via HTTP POST and broadcast to all connected clients. Keep the data payload small:
+
+- Send only what changed (the client merges partial updates)
+- Avoid large objects or arrays in presence data
+- Use numeric coordinates instead of complex position objects
+
+### Reconnection
+
+When the SSE connection drops and reconnects, the client's presence entry may have expired on the server. The `CRDTProvider` handles this automatically — the heartbeat timer re-announces presence after reconnection.
+
+### Server-Side TTL Tuning
+
+| Scenario | Heartbeat | TTL | Notes |
+|----------|-----------|-----|-------|
+| Low-latency collaboration | 5s | 15s | More frequent checks, faster detection of disconnects |
+| Standard collaboration | 10s | 30s | Good balance of responsiveness and overhead |
+| High-scale (many clients) | 20s | 60s | Reduce server load at the cost of slower disconnect detection |
+
+The TTL should be at least 2-3x the heartbeat interval to tolerate occasional network delays.
+
+## Next Steps
+
+- [Presence & Awareness](/docs/crdt/presence) for the full API reference
+- [TypeScript Client](/docs/crdt/typescript-client) for the pluggable architecture and all React hooks
+- [SSE Streaming](/docs/crdt/streaming) for how presence events flow over SSE
