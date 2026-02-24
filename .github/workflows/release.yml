@@ -100,6 +100,19 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Verify crdt-js
+        working-directory: crdt-js
+        run: |
+          npm ci
+          npm run build
+          npm test
+
       - name: Tag sub-modules
         run: |
           TAG="${{ steps.set-tag.outputs.tag }}"
@@ -133,6 +146,16 @@ jobs:
             git tag "$MOD_TAG"
             git push origin "$MOD_TAG"
           done
+
+      - name: Publish crdt-js to npm
+        working-directory: crdt-js
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          TAG="${{ steps.set-tag.outputs.tag }}"
+          VERSION="${TAG#v}"
+          npm version "$VERSION" --no-git-tag-version
+          npm publish --access public
 
       - name: Generate release notes
         id: notes
@@ -194,5 +217,10 @@ jobs:
             go get github.com/xraph/grove/kv/drivers/dynamodriver@${{ steps.set-tag.outputs.tag }}
             go get github.com/xraph/grove/kv/drivers/memcacheddriver@${{ steps.set-tag.outputs.tag }}
             go get github.com/xraph/grove/kv/drivers/redisdriver@${{ steps.set-tag.outputs.tag }}
+            ```
+
+            CRDT JS client:
+            ```bash
+            npm install @grove-js/crdt
             ```
           generate_release_notes: true
