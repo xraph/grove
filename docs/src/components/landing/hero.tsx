@@ -173,12 +173,7 @@ function EcosystemDiagram() {
               className="flex items-center gap-0"
             >
               <FlowLine length={28} color="green" delay={5} />
-              <FlowNode
-                label="crdt.sync"
-                color="gray"
-                size="sm"
-                delay={1.3}
-              />
+              <FlowNode label="crdt.sync" color="gray" size="sm" delay={1.3} />
               <FlowLine length={24} color="green" delay={6} />
               <div className="rounded-md border border-green-500/20 bg-green-500/10 px-2 py-0.5 font-mono text-[10px] font-medium text-green-600 dark:text-green-400 whitespace-nowrap">
                 converged

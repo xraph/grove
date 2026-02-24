@@ -638,7 +638,7 @@ describe("CRDTClient presence", () => {
       const calls = (fetchFn as ReturnType<typeof vi.fn>).mock.calls;
       // Find the POST to /presence
       const presenceCall = calls.find(
-        ([url]: [string]) => typeof url === "string" && url.includes("/presence")
+        (args) => typeof args[0] === "string" && args[0].includes("/presence")
       );
       expect(presenceCall).toBeDefined();
       const body = JSON.parse(presenceCall![1].body);
@@ -700,7 +700,7 @@ describe("CRDTClient presence", () => {
       await new Promise((r) => Promise.resolve().then(r));
 
       const presenceCalls = (fetchFn as ReturnType<typeof vi.fn>).mock.calls.filter(
-        ([url]: [string]) => typeof url === "string" && url.includes("/presence")
+        (args) => typeof args[0] === "string" && args[0].includes("/presence")
       );
       expect(presenceCalls.length).toBeGreaterThanOrEqual(1);
       const body = JSON.parse(presenceCalls[0][1].body);
@@ -723,7 +723,7 @@ describe("CRDTClient presence", () => {
 
       const calls = (fetchFn as ReturnType<typeof vi.fn>).mock.calls;
       const presenceCall = calls.find(
-        ([url]: [string]) => typeof url === "string" && url.includes("/presence")
+        (args) => typeof args[0] === "string" && args[0].includes("/presence")
       );
       expect(presenceCall).toBeDefined();
       const body = JSON.parse(presenceCall![1].body);
@@ -746,7 +746,7 @@ describe("CRDTClient presence", () => {
       await vi.runAllTimersAsync();
 
       const presenceCalls = (fetchFn as ReturnType<typeof vi.fn>).mock.calls.filter(
-        ([url]: [string]) => typeof url === "string" && url.includes("/presence")
+        (args) => typeof args[0] === "string" && args[0].includes("/presence")
       );
       expect(presenceCalls).toHaveLength(0);
     });
@@ -808,7 +808,7 @@ describe("CRDTClient presence", () => {
 
       // Should have sent leave for both topics
       const presenceCalls = (fetchFn as ReturnType<typeof vi.fn>).mock.calls.filter(
-        ([url]: [string]) => typeof url === "string" && url.includes("/presence")
+        (args) => typeof args[0] === "string" && args[0].includes("/presence")
       );
       expect(presenceCalls).toHaveLength(2);
 
@@ -824,7 +824,7 @@ describe("CRDTClient presence", () => {
       await vi.runAllTimersAsync();
 
       const heartbeatCalls = (fetchFn as ReturnType<typeof vi.fn>).mock.calls.filter(
-        ([url]: [string]) => typeof url === "string" && url.includes("/presence")
+        (args) => typeof args[0] === "string" && args[0].includes("/presence")
       );
       expect(heartbeatCalls).toHaveLength(0);
     });

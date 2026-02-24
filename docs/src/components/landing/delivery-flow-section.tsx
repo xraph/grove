@@ -3,8 +3,8 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/cn";
-import { SectionHeader } from "./section-header";
 import { FeatureBullet } from "./feature-bullet";
+import { SectionHeader } from "./section-header";
 
 // ─── Cycling Query Action ───────────────────────────────────
 const pipelineActions = ["query.select", "query.insert", "hook.filter"];

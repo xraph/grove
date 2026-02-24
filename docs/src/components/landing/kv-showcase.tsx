@@ -1,10 +1,10 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { SectionHeader } from "./section-header";
 import { CodeBlock } from "./code-block";
 import { FeatureBullet } from "./feature-bullet";
-import { FlowNode, FlowLine } from "./flow-primitives";
+import { FlowLine, FlowNode } from "./flow-primitives";
+import { SectionHeader } from "./section-header";
 
 // ─── KV Code Sample ──────────────────────────────────────────
 const kvCode = `store := redis.New(redis.Config{Addr: ":6379"})
@@ -61,11 +61,7 @@ function KeyspaceVisualization() {
                   pulse={i === 0}
                   delay={ns.delay}
                 />
-                <FlowLine
-                  length={48}
-                  color={ns.color}
-                  delay={ns.delay + 0.2}
-                />
+                <FlowLine length={48} color={ns.color} delay={ns.delay + 0.2} />
                 <FlowNode
                   label={backends[i].label}
                   color={backends[i].color}
