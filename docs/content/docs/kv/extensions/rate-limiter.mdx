@@ -8,13 +8,13 @@ The `RateLimiter` extension provides distributed rate limiting using a sliding w
 ## Installation
 
 ```go
-import "github.com/xraph/grove/kv/extension"
+import "github.com/xraph/grove/kv/plugins"
 ```
 
 ## Creating a Rate Limiter
 
 ```go
-limiter := extension.NewRateLimiter(store, "api", 100, time.Minute)
+limiter := plugins.NewRateLimiter(store, "api", 100, time.Minute)
 ```
 
 **Parameters:**
@@ -100,7 +100,7 @@ import (
     "time"
 
     "github.com/xraph/grove/kv"
-    "github.com/xraph/grove/kv/extension"
+    "github.com/xraph/grove/kv/plugins"
     "github.com/xraph/grove/kv/drivers/redisdriver"
 )
 
@@ -114,7 +114,7 @@ func main() {
     defer store.Close()
 
     // 100 requests per minute per user.
-    limiter := extension.NewRateLimiter(store, "api", 100, time.Minute)
+    limiter := plugins.NewRateLimiter(store, "api", 100, time.Minute)
 
     mux := http.NewServeMux()
     mux.HandleFunc("/api/data", RateLimitMiddleware(limiter, handleData))
@@ -122,7 +122,7 @@ func main() {
     http.ListenAndServe(":8080", mux)
 }
 
-func RateLimitMiddleware(limiter *extension.RateLimiter, next http.HandlerFunc) http.HandlerFunc {
+func RateLimitMiddleware(limiter *plugins.RateLimiter, next http.HandlerFunc) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
         // Use the client IP as the rate limit key.
         key := r.RemoteAddr
@@ -158,13 +158,13 @@ You can create separate limiters for different endpoints or combine the endpoint
 
 ```go
 // Strict limit on auth endpoints.
-authLimiter := extension.NewRateLimiter(store, "auth", 5, time.Minute)
+authLimiter := plugins.NewRateLimiter(store, "auth", 5, time.Minute)
 
 // Generous limit on read endpoints.
-readLimiter := extension.NewRateLimiter(store, "read", 1000, time.Minute)
+readLimiter := plugins.NewRateLimiter(store, "read", 1000, time.Minute)
 
 // Or use a single limiter with composite keys.
-limiter := extension.NewRateLimiter(store, "rl", 100, time.Minute)
+limiter := plugins.NewRateLimiter(store, "rl", 100, time.Minute)
 
 // Key includes both user and endpoint.
 result, _ := limiter.Allow(ctx, "user:u_123:/api/orders")

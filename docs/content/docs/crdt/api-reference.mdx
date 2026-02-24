@@ -235,6 +235,11 @@ type Transport interface {
 | `HandlePull` | `(ctx, *PullRequest) (*PullResponse, error)` | Core pull logic |
 | `HandlePush` | `(ctx, *PushRequest) (*PushResponse, error)` | Core push logic |
 | `StreamChangesSince` | `(ctx, tables, since) (<-chan []ChangeRecord, error)` | Change channel |
+| `HandlePresenceUpdate` | `(ctx, *PresenceUpdate) (*PresenceEvent, error)` | Process a presence update |
+| `HandleGetPresence` | `(ctx, topic string) (*PresenceSnapshot, error)` | Get presence snapshot for a topic |
+| `Presence` | `() *PresenceManager` | Access the presence manager (nil if disabled) |
+| `PresenceChannel` | `() <-chan PresenceEvent` | Broadcast channel for stream integration |
+| `Close` | `()` | Clean up controller resources |
 
 ### Controller Options
 
@@ -243,6 +248,8 @@ type Transport interface {
 | `WithStreamPollInterval` | `(d time.Duration) SyncControllerOption` | Poll interval (default: 1s) |
 | `WithStreamKeepAlive` | `(d time.Duration) SyncControllerOption` | Keep-alive interval (default: 15s) |
 | `WithControllerSyncHook` | `(hook SyncHook) SyncControllerOption` | Additional controller hook |
+| `WithPresenceEnabled` | `(bool) SyncControllerOption` | Enable presence subsystem (default: false) |
+| `WithPresenceTTL` | `(d time.Duration) SyncControllerOption` | Presence entry TTL (default: 30s) |
 
 ### Standalone Handler
 
@@ -250,7 +257,7 @@ type Transport interface {
 |----------|-----------|-------------|
 | `NewHTTPHandler` | `(plugin, opts...) http.Handler` | Standard http.Handler for sync |
 
-Endpoints: `POST /pull`, `POST /push`
+Endpoints: `POST /pull`, `POST /push`, and when presence is enabled: `POST /presence`, `GET /presence`
 
 ## Sync Hooks
 
@@ -290,6 +297,40 @@ type SyncHook interface {
 |----------|-----------|-------------|
 | `InspectState` | `(state *State) *InspectResult` | Convert to human-readable form |
 | `String` | `() string` | Formatted output |
+
+## Presence
+
+Ephemeral awareness system for tracking connected clients. See [Presence & Awareness](/docs/crdt/presence) for the full guide.
+
+### Presence Types
+
+| Type | Description |
+|------|-------------|
+| `PresenceState` | A client's presence data: `{NodeID, Topic, Data, UpdatedAt, ExpiresAt}` |
+| `PresenceUpdate` | Request body for updates: `{NodeID, Topic, Data}` |
+| `PresenceEvent` | SSE broadcast event: `{Type, NodeID, Topic, Data}` |
+| `PresenceSnapshot` | GET response: `{Topic, States}` |
+
+### Event Type Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `PresenceJoin` | `"join"` | New node joined a topic |
+| `PresenceUpdateEvt` | `"update"` | Existing node updated its data |
+| `PresenceLeave` | `"leave"` | Node left or entry expired |
+
+### PresenceManager
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `NewPresenceManager` | `(ttl time.Duration, onChange func(PresenceEvent), logger *slog.Logger) *PresenceManager` | Create with TTL, callback, and logger; starts cleanup goroutine |
+| `Update` | `(update PresenceUpdate) PresenceEvent` | Upsert presence, returns join/update event |
+| `Remove` | `(topic, nodeID string) *PresenceEvent` | Explicitly remove an entry |
+| `RemoveNode` | `(nodeID string) []PresenceEvent` | Remove all entries for a node (on disconnect) |
+| `Get` | `(topic string) []PresenceState` | Get all active presence for a topic |
+| `GetTopicsForNode` | `(nodeID string) []string` | Get all topics a node is present in |
+| `Close` | `()` | Stop the cleanup goroutine |
+| `MarshalPresenceEvent` | `(event PresenceEvent) ([]byte, error)` | Serialize event to JSON for SSE |
 
 ## Migrations
 

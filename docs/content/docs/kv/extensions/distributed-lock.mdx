@@ -8,13 +8,13 @@ The `Lock` extension provides distributed mutual exclusion using the KV store's 
 ## Installation
 
 ```go
-import "github.com/xraph/grove/kv/extension"
+import "github.com/xraph/grove/kv/plugins"
 ```
 
 ## Creating a Lock
 
 ```go
-lock := extension.NewLock(store, "deploy", 10*time.Second)
+lock := plugins.NewLock(store, "deploy", 10*time.Second)
 ```
 
 **Parameters:**
@@ -113,7 +113,7 @@ import (
     "time"
 
     "github.com/xraph/grove/kv"
-    "github.com/xraph/grove/kv/extension"
+    "github.com/xraph/grove/kv/plugins"
     "github.com/xraph/grove/kv/drivers/redisdriver"
 )
 
@@ -127,7 +127,7 @@ func main() {
     defer store.Close()
 
     // Only one worker should run the daily report at a time.
-    lock := extension.NewLock(store, "daily-report", 5*time.Minute)
+    lock := plugins.NewLock(store, "daily-report", 5*time.Minute)
 
     // Try to acquire with retries.
     err := lock.AcquireWithRetry(ctx, 500*time.Millisecond, 10)
@@ -163,7 +163,7 @@ You can combine `AcquireWithRetry` with a context deadline for a clean timeout p
 ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 defer cancel()
 
-lock := extension.NewLock(store, "checkout", 30*time.Second)
+lock := plugins.NewLock(store, "checkout", 30*time.Second)
 err := lock.AcquireWithRetry(ctx, 100*time.Millisecond, 100)
 if err != nil {
     // either max retries exceeded or context deadline exceeded

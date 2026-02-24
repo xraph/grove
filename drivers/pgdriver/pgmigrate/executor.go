@@ -10,6 +10,12 @@ import (
 	"github.com/xraph/grove/migrate"
 )
 
+func init() {
+	migrate.RegisterExecutor("pg", func(drv any) migrate.Executor {
+		return New(drv.(driver.Driver))
+	})
+}
+
 const (
 	migrationTableName = "grove_migrations"
 	lockTableName      = "grove_migration_locks"

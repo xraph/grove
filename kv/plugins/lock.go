@@ -1,5 +1,5 @@
 // Package extension provides application-level patterns built on Grove KV.
-package extension
+package plugins
 
 import (
 	"context"

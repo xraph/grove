@@ -22,11 +22,17 @@ npm install react
 The package exports from two entry points:
 
 ```typescript
-// Core: client, store, merge, clock, stream
-import { CRDTClient, CRDTStore, HybridClock } from "@grove-js/crdt";
+// Core: client, store, merge, clock, stream, presence
+import { CRDTClient, CRDTStore, HybridClock, PresenceManager } from "@grove-js/crdt";
+
+// Plugin interfaces (for custom implementations)
+import type { Transport, StreamTransport, AuthProvider, StorageAdapter } from "@grove-js/crdt";
 
 // React hooks
-import { CRDTProvider, useDocument, useCollection } from "@grove-js/crdt/react";
+import {
+    CRDTProvider, useDocument, useCollection,
+    usePresence, useDocumentPresence,
+} from "@grove-js/crdt/react";
 ```
 
 ## CRDTClient
@@ -59,11 +65,103 @@ const stream = client.stream({ reconnectDelay: 5000 });
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `baseURL` | `string` | Sync server URL (e.g., `"https://api.example.com/sync"`) |
+| `baseURL` | `string` | Sync server URL. Required when no custom `transport` is provided. |
 | `nodeID` | `string` | Unique client identifier |
 | `tables` | `string[]` | Tables to sync |
-| `headers` | `Record<string, string>` | Custom headers (auth tokens, etc.) |
-| `fetchImpl` | `typeof fetch` | Custom fetch implementation |
+| `headers` | `Record<string, string>` | Custom headers (used by built-in `HttpTransport`) |
+| `fetch` | `typeof fetch` | Custom fetch implementation (used by built-in `HttpTransport`) |
+| `transport` | `Transport` | Custom transport for pull/push operations. When provided, `baseURL` is not required. |
+| `streamTransport` | `StreamTransport` | Custom stream transport for real-time subscriptions |
+| `auth` | `AuthProvider` | Auth provider for dynamic header injection (e.g., JWT refresh) |
+| `storage` | `StorageAdapter` | Storage adapter for persistence (IndexedDB, localStorage, etc.) |
+| `presence` | `PresenceConfig` | Presence configuration. Set `{ heartbeatInterval: 10000 }` to enable. |
+
+## Pluggable Architecture
+
+The client supports pluggable transports, auth, and storage. Use the built-in defaults or provide your own implementations.
+
+### Transport Interface
+
+```typescript
+interface Transport {
+    pull(req: PullRequest): Promise<PullResponse>;
+    push(req: PushRequest): Promise<PushResponse>;
+    updatePresence?(update: PresenceUpdate): Promise<void>;  // Optional
+    getPresence?(topic: string): Promise<PresenceState[]>;   // Optional
+}
+```
+
+The built-in `HttpTransport` sends JSON POST requests to `/pull`, `/push`, and `/presence`. For custom backends (WebSocket, gRPC, etc.), implement the `Transport` interface:
+
+```typescript
+import type { Transport } from "@grove-js/crdt";
+
+const wsTransport: Transport = {
+    async pull(req) { /* ... send via WebSocket ... */ },
+    async push(req) { /* ... send via WebSocket ... */ },
+};
+
+const client = new CRDTClient({
+    nodeID: "browser-1",
+    transport: wsTransport,
+});
+```
+
+### StreamTransport Interface
+
+Extends `Transport` with real-time subscriptions:
+
+```typescript
+interface StreamTransport extends Transport {
+    subscribe(config: StreamConfig): StreamSubscription;
+}
+```
+
+The built-in `HttpStreamTransport` provides both HTTP pull/push and SSE streaming.
+
+### AuthProvider
+
+For dynamic header injection (e.g., JWT token refresh):
+
+```typescript
+interface AuthProvider {
+    getHeaders(): Record<string, string> | Promise<Record<string, string>>;
+}
+
+// Built-in static implementation
+import { StaticAuthProvider } from "@grove-js/crdt";
+const auth = new StaticAuthProvider({ Authorization: "Bearer <token>" });
+
+// Custom JWT refresh
+const jwtAuth: AuthProvider = {
+    async getHeaders() {
+        const token = await refreshTokenIfNeeded();
+        return { Authorization: `Bearer ${token}` };
+    },
+};
+
+const client = new CRDTClient({
+    baseURL: "/api/sync",
+    nodeID: "browser-1",
+    auth: jwtAuth,
+});
+```
+
+### StorageAdapter
+
+For persisting CRDT state to IndexedDB, localStorage, or other backends:
+
+```typescript
+interface StorageAdapter {
+    loadState(): Promise<Map<string, Map<string, DocumentState>>>;
+    saveDocument(table: string, pk: string, doc: DocumentState): Promise<void>;
+    deleteDocument(table: string, pk: string): Promise<void>;
+    loadPendingChanges(): Promise<ChangeRecord[]>;
+    savePendingChanges(changes: ChangeRecord[]): Promise<void>;
+}
+```
+
+The built-in `MemoryStorage` is a no-op default. Implement `StorageAdapter` for offline persistence.
 
 ## CRDTStore
 
@@ -364,6 +462,73 @@ function StreamControl() {
             <button onClick={connected ? disconnect : reconnect}>
                 {connected ? "Disconnect" : "Reconnect"}
             </button>
+        </div>
+    );
+}
+```
+
+### usePresence
+
+Subscribe to presence for any topic. See [Presence & Awareness](/docs/crdt/presence) for the full guide.
+
+```tsx
+import { usePresence } from "@grove-js/crdt/react";
+
+interface UserPresence {
+    name: string;
+    cursor: { x: number; y: number } | null;
+    isTyping: boolean;
+}
+
+function CollaborativeEditor({ roomId }: { roomId: string }) {
+    const { others, updateMyPresence, leave } = usePresence<UserPresence>(roomId);
+
+    return (
+        <div>
+            {others.map((peer) => (
+                <div key={peer.node_id}>
+                    {peer.data.name} {peer.data.isTyping ? "is typing..." : ""}
+                </div>
+            ))}
+
+            <textarea
+                onKeyDown={() => updateMyPresence({ isTyping: true })}
+                onBlur={() => updateMyPresence({ isTyping: false, cursor: null })}
+            />
+        </div>
+    );
+}
+```
+
+The hook automatically leaves the topic when the component unmounts.
+
+### useDocumentPresence
+
+Convenience wrapper that constructs the topic as `"table:pk"`:
+
+```tsx
+import { useDocumentPresence } from "@grove-js/crdt/react";
+
+function DocumentEditor({ docId }: { docId: string }) {
+    const { others, updateMyPresence } = useDocumentPresence<{
+        name: string;
+        color: string;
+    }>("documents", docId);
+
+    useEffect(() => {
+        updateMyPresence({ name: "Alice", color: "#3b82f6" });
+    }, []);
+
+    return (
+        <div>
+            <div className="active-users">
+                {others.map((p) => (
+                    <span key={p.node_id} style={{ color: p.data.color }}>
+                        {p.data.name}
+                    </span>
+                ))}
+            </div>
+            {/* ... editor content ... */}
         </div>
     );
 }

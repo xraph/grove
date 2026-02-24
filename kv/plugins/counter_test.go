@@ -1,4 +1,4 @@
-package extension_test
+package plugins_test
 
 import (
 	"context"
@@ -7,13 +7,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/xraph/grove/kv/extension"
 	"github.com/xraph/grove/kv/kvtest"
+	"github.com/xraph/grove/kv/plugins"
 )
 
 func TestAtomicCounter_Increment(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	counter := extension.NewAtomicCounter(store, "hits")
+	counter := plugins.NewAtomicCounter(store, "hits")
 
 	val, err := counter.Increment(context.Background(), 5)
 	require.NoError(t, err)
@@ -22,7 +22,7 @@ func TestAtomicCounter_Increment(t *testing.T) {
 
 func TestAtomicCounter_IncrementMultiple(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	counter := extension.NewAtomicCounter(store, "hits")
+	counter := plugins.NewAtomicCounter(store, "hits")
 
 	ctx := context.Background()
 	_, err := counter.Increment(ctx, 3)
@@ -35,7 +35,7 @@ func TestAtomicCounter_IncrementMultiple(t *testing.T) {
 
 func TestAtomicCounter_Decrement(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	counter := extension.NewAtomicCounter(store, "hits")
+	counter := plugins.NewAtomicCounter(store, "hits")
 
 	ctx := context.Background()
 	_, err := counter.Increment(ctx, 10)
@@ -48,7 +48,7 @@ func TestAtomicCounter_Decrement(t *testing.T) {
 
 func TestAtomicCounter_Get_Initial(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	counter := extension.NewAtomicCounter(store, "fresh")
+	counter := plugins.NewAtomicCounter(store, "fresh")
 
 	val, err := counter.Get(context.Background())
 	require.NoError(t, err)
@@ -57,7 +57,7 @@ func TestAtomicCounter_Get_Initial(t *testing.T) {
 
 func TestAtomicCounter_Get_AfterIncrement(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	counter := extension.NewAtomicCounter(store, "hits")
+	counter := plugins.NewAtomicCounter(store, "hits")
 
 	ctx := context.Background()
 	expected, err := counter.Increment(ctx, 42)
@@ -70,7 +70,7 @@ func TestAtomicCounter_Get_AfterIncrement(t *testing.T) {
 
 func TestAtomicCounter_Reset(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	counter := extension.NewAtomicCounter(store, "hits")
+	counter := plugins.NewAtomicCounter(store, "hits")
 
 	ctx := context.Background()
 	_, err := counter.Increment(ctx, 99)
@@ -86,7 +86,7 @@ func TestAtomicCounter_Reset(t *testing.T) {
 
 func TestAtomicCounter_Set(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	counter := extension.NewAtomicCounter(store, "hits")
+	counter := plugins.NewAtomicCounter(store, "hits")
 
 	ctx := context.Background()
 	err := counter.Set(ctx, 42)

@@ -1,4 +1,4 @@
-package extension_test
+package plugins_test
 
 import (
 	"context"
@@ -8,13 +8,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/xraph/grove/kv/extension"
 	"github.com/xraph/grove/kv/kvtest"
+	"github.com/xraph/grove/kv/plugins"
 )
 
 func TestSessionStore_Create_Get(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	ss := extension.NewSessionStore(store)
+	ss := plugins.NewSessionStore(store)
 
 	ctx := context.Background()
 	data := map[string]string{"user": "alice", "role": "admin"}
@@ -31,7 +31,7 @@ func TestSessionStore_Create_Get(t *testing.T) {
 
 func TestSessionStore_Create_UniqueIDs(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	ss := extension.NewSessionStore(store)
+	ss := plugins.NewSessionStore(store)
 
 	ctx := context.Background()
 	ids := make(map[string]struct{}, 100)
@@ -45,7 +45,7 @@ func TestSessionStore_Create_UniqueIDs(t *testing.T) {
 
 func TestSessionStore_Get_NotFound(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	ss := extension.NewSessionStore(store)
+	ss := plugins.NewSessionStore(store)
 
 	var data any
 	err := ss.Get(context.Background(), "nonexistent-session-id", &data)
@@ -54,7 +54,7 @@ func TestSessionStore_Get_NotFound(t *testing.T) {
 
 func TestSessionStore_Update(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	ss := extension.NewSessionStore(store)
+	ss := plugins.NewSessionStore(store)
 
 	ctx := context.Background()
 	id, err := ss.Create(ctx, map[string]string{"key": "old"})
@@ -71,7 +71,7 @@ func TestSessionStore_Update(t *testing.T) {
 
 func TestSessionStore_Delete(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	ss := extension.NewSessionStore(store)
+	ss := plugins.NewSessionStore(store)
 
 	ctx := context.Background()
 	id, err := ss.Create(ctx, "session-data")
@@ -87,7 +87,7 @@ func TestSessionStore_Delete(t *testing.T) {
 
 func TestSessionStore_Touch(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	ss := extension.NewSessionStore(store)
+	ss := plugins.NewSessionStore(store)
 
 	ctx := context.Background()
 	id, err := ss.Create(ctx, "session-data")
@@ -99,7 +99,7 @@ func TestSessionStore_Touch(t *testing.T) {
 
 func TestSessionStore_Exists_True(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	ss := extension.NewSessionStore(store)
+	ss := plugins.NewSessionStore(store)
 
 	ctx := context.Background()
 	id, err := ss.Create(ctx, "session-data")
@@ -112,7 +112,7 @@ func TestSessionStore_Exists_True(t *testing.T) {
 
 func TestSessionStore_Exists_False(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	ss := extension.NewSessionStore(store)
+	ss := plugins.NewSessionStore(store)
 
 	exists, err := ss.Exists(context.Background(), "nonexistent-id")
 	require.NoError(t, err)
@@ -121,7 +121,7 @@ func TestSessionStore_Exists_False(t *testing.T) {
 
 func TestSessionStore_CustomPrefix(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	ss := extension.NewSessionStore(store, extension.WithSessionPrefix("s"))
+	ss := plugins.NewSessionStore(store, plugins.WithSessionPrefix("s"))
 
 	ctx := context.Background()
 	id, err := ss.Create(ctx, "data-with-prefix")
@@ -135,7 +135,7 @@ func TestSessionStore_CustomPrefix(t *testing.T) {
 
 func TestSessionStore_CustomTTL(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	ss := extension.NewSessionStore(store, extension.WithSessionTTL(time.Hour))
+	ss := plugins.NewSessionStore(store, plugins.WithSessionTTL(time.Hour))
 
 	ctx := context.Background()
 	id, err := ss.Create(ctx, "long-lived-session")
@@ -148,7 +148,7 @@ func TestSessionStore_CustomTTL(t *testing.T) {
 
 func TestSessionStore_TTLExpiry(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	ss := extension.NewSessionStore(store, extension.WithSessionTTL(50*time.Millisecond))
+	ss := plugins.NewSessionStore(store, plugins.WithSessionTTL(50*time.Millisecond))
 
 	ctx := context.Background()
 	id, err := ss.Create(ctx, "ephemeral")

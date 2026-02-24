@@ -98,6 +98,8 @@ export interface CRDTClientConfig {
   auth?: AuthProvider;
   /** Storage adapter for persistence (passed through to CRDTStore). */
   storage?: StorageAdapter;
+  /** Presence configuration. When provided, enables presence features. */
+  presence?: PresenceConfig;
 }
 
 /** Configuration for SSE streaming. */
@@ -159,6 +161,43 @@ export interface SyncReport {
   conflicts: number;
 }
 
+// --- Presence Types ---
+
+/** A single client's presence data for a topic. Mirrors Go crdt.PresenceState. */
+export interface PresenceState<T = Record<string, unknown>> {
+  node_id: string;
+  topic: string;
+  data: T;
+  updated_at: number;
+}
+
+/** Request body for updating presence. Mirrors Go crdt.PresenceUpdate. */
+export interface PresenceUpdate<T = Record<string, unknown>> {
+  node_id: string;
+  topic: string;
+  data: T;
+}
+
+/** Presence event received via SSE. Mirrors Go crdt.PresenceEvent. */
+export interface PresenceEvent<T = Record<string, unknown>> {
+  type: "join" | "update" | "leave";
+  node_id: string;
+  topic: string;
+  data?: T;
+}
+
+/** Presence snapshot response. Mirrors Go crdt.PresenceSnapshot. */
+export interface PresenceSnapshot<T = Record<string, unknown>> {
+  topic: string;
+  states: PresenceState<T>[];
+}
+
+/** Configuration for presence behavior. */
+export interface PresenceConfig {
+  /** Heartbeat interval in ms (default: 10000). */
+  heartbeatInterval?: number;
+}
+
 // --- Plugin Interfaces ---
 
 /** Stream event handler callback type (re-exported from stream.ts for interface use). */
@@ -168,6 +207,7 @@ export type StreamEventHandler = (event: StreamEvent) => void;
 export type StreamEvent =
   | { type: "change"; data: ChangeRecord }
   | { type: "changes"; data: ChangeRecord[] }
+  | { type: "presence"; data: PresenceEvent }
   | { type: "error"; error: Error }
   | { type: "connected" }
   | { type: "disconnected" };
@@ -181,6 +221,10 @@ export type StreamEvent =
 export interface Transport {
   pull(req: PullRequest): Promise<PullResponse>;
   push(req: PushRequest): Promise<PushResponse>;
+  /** Update presence for a topic. Optional — only needed when presence is used. */
+  updatePresence?(update: PresenceUpdate): Promise<void>;
+  /** Get current presence snapshot for a topic. Optional. */
+  getPresence?(topic: string): Promise<PresenceState[]>;
 }
 
 /**

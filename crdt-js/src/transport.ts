@@ -16,6 +16,9 @@ import type {
   PushRequest,
   PushResponse,
   AuthProvider,
+  PresenceUpdate,
+  PresenceState,
+  PresenceSnapshot,
 } from "./types.js";
 import { TransportError } from "./errors.js";
 import { CRDTStream } from "./stream.js";
@@ -60,6 +63,36 @@ export class HttpTransport implements Transport {
 
   async push(req: PushRequest): Promise<PushResponse> {
     return this.request<PushResponse>("/push", req);
+  }
+
+  async updatePresence(update: PresenceUpdate): Promise<void> {
+    await this.request<unknown>("/presence", update);
+  }
+
+  async getPresence(topic: string): Promise<PresenceState[]> {
+    const authHeaders = this.auth
+      ? await Promise.resolve(this.auth.getHeaders())
+      : {};
+
+    const url = `${this.baseURL}/presence?topic=${encodeURIComponent(topic)}`;
+    const response = await this.fetchImpl(url, {
+      method: "GET",
+      headers: {
+        ...this.headers,
+        ...authHeaders,
+      },
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new TransportError(
+        `CRDT /presence returned ${response.status}: ${text}`,
+        response.status
+      );
+    }
+
+    const snapshot = (await response.json()) as PresenceSnapshot;
+    return snapshot.states;
   }
 
   protected async request<T>(path: string, body: unknown): Promise<T> {

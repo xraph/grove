@@ -1,4 +1,4 @@
-package extension_test
+package plugins_test
 
 import (
 	"context"
@@ -8,13 +8,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/xraph/grove/kv/extension"
 	"github.com/xraph/grove/kv/kvtest"
+	"github.com/xraph/grove/kv/plugins"
 )
 
 func TestRateLimiter_Allow_WithinLimit(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	rl := extension.NewRateLimiter(store, "api", 5, time.Minute)
+	rl := plugins.NewRateLimiter(store, "api", 5, time.Minute)
 
 	ctx := context.Background()
 	for i := 0; i < 5; i++ {
@@ -26,7 +26,7 @@ func TestRateLimiter_Allow_WithinLimit(t *testing.T) {
 
 func TestRateLimiter_Allow_ExceedsLimit(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	rl := extension.NewRateLimiter(store, "api", 3, time.Minute)
+	rl := plugins.NewRateLimiter(store, "api", 3, time.Minute)
 
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
@@ -43,7 +43,7 @@ func TestRateLimiter_Allow_ExceedsLimit(t *testing.T) {
 
 func TestRateLimiter_Allow_Remaining(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	rl := extension.NewRateLimiter(store, "api", 5, time.Minute)
+	rl := plugins.NewRateLimiter(store, "api", 5, time.Minute)
 
 	ctx := context.Background()
 	// Use 2 of the 5 allowed requests.
@@ -61,7 +61,7 @@ func TestRateLimiter_Allow_Remaining(t *testing.T) {
 
 func TestRateLimiter_Reset(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	rl := extension.NewRateLimiter(store, "api", 2, time.Minute)
+	rl := plugins.NewRateLimiter(store, "api", 2, time.Minute)
 
 	ctx := context.Background()
 	// Exhaust the limit.
@@ -85,7 +85,7 @@ func TestRateLimiter_Reset(t *testing.T) {
 
 func TestRateLimiter_DifferentKeys(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	rl := extension.NewRateLimiter(store, "api", 1, time.Minute)
+	rl := plugins.NewRateLimiter(store, "api", 1, time.Minute)
 
 	ctx := context.Background()
 	result1, err := rl.Allow(ctx, "user:1")
@@ -105,7 +105,7 @@ func TestRateLimiter_DifferentKeys(t *testing.T) {
 
 func TestRateLimiter_WindowExpiry(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	rl := extension.NewRateLimiter(store, "api", 1, 50*time.Millisecond)
+	rl := plugins.NewRateLimiter(store, "api", 1, 50*time.Millisecond)
 
 	ctx := context.Background()
 	result, err := rl.Allow(ctx, "user:1")

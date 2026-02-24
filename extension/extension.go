@@ -605,6 +605,25 @@ func (c *crdtForgeController) Routes(r forge.Router) error {
 		return fmt.Errorf("crdt: register stream route: %w", err)
 	}
 
+	// Presence routes (only registered when presence is enabled).
+	if c.ctrl.Presence() != nil {
+		// POST /sync/presence — update presence for a topic.
+		if err := sync.POST("/presence", c.handlePresenceUpdate,
+			forge.WithName("crdt.presence.update"),
+			forge.WithTags("crdt", "sync", "presence"),
+		); err != nil {
+			return fmt.Errorf("crdt: register presence update route: %w", err)
+		}
+
+		// GET /sync/presence — get current presence for a topic.
+		if err := sync.GET("/presence", c.handleGetPresence,
+			forge.WithName("crdt.presence.get"),
+			forge.WithTags("crdt", "sync", "presence"),
+		); err != nil {
+			return fmt.Errorf("crdt: register presence get route: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -638,6 +657,36 @@ func (c *crdtForgeController) handlePush(ctx forge.Context) error {
 	return ctx.JSON(200, resp)
 }
 
+// handlePresenceUpdate handles POST /sync/presence using Forge context.
+func (c *crdtForgeController) handlePresenceUpdate(ctx forge.Context) error {
+	var update crdt.PresenceUpdate
+	if err := ctx.Bind(&update); err != nil {
+		return ctx.JSON(400, map[string]string{"error": fmt.Sprintf("invalid request: %v", err)})
+	}
+
+	event, err := c.ctrl.HandlePresenceUpdate(ctx.Request().Context(), &update)
+	if err != nil {
+		return ctx.JSON(500, map[string]string{"error": err.Error()})
+	}
+
+	return ctx.JSON(200, event)
+}
+
+// handleGetPresence handles GET /sync/presence using Forge context.
+func (c *crdtForgeController) handleGetPresence(ctx forge.Context) error {
+	topic := ctx.Query("topic")
+	if topic == "" {
+		return ctx.JSON(400, map[string]string{"error": "missing topic query parameter"})
+	}
+
+	snapshot, err := c.ctrl.HandleGetPresence(ctx.Request().Context(), topic)
+	if err != nil {
+		return ctx.JSON(500, map[string]string{"error": err.Error()})
+	}
+
+	return ctx.JSON(200, snapshot)
+}
+
 // handleStream handles GET /sync/stream using Forge SSE streaming.
 func (c *crdtForgeController) handleStream(ctx forge.Context, stream forge.Stream) error {
 	// Parse query params.
@@ -661,11 +710,24 @@ func (c *crdtForgeController) handleStream(ctx forge.Context, stream forge.Strea
 	}
 	since.NodeID = ctx.Query("since_node")
 
+	// Parse node_id for presence cleanup on disconnect.
+	nodeID := ctx.Query("node_id")
+
 	// Start streaming changes.
 	ch, err := c.ctrl.StreamChangesSince(stream.Context(), tables, since)
 	if err != nil {
 		return stream.Send("error", []byte(err.Error()))
 	}
+
+	// Get presence channel (nil if presence is disabled).
+	presenceCh := c.ctrl.PresenceChannel()
+
+	// Clean up presence on disconnect.
+	defer func() {
+		if nodeID != "" && c.ctrl.Presence() != nil {
+			c.ctrl.Presence().RemoveNode(nodeID)
+		}
+	}()
 
 	for {
 		select {
@@ -680,6 +742,17 @@ func (c *crdtForgeController) handleStream(ctx forge.Context, stream forge.Strea
 				continue
 			}
 			if err := stream.Send("changes", data); err != nil {
+				return err
+			}
+		case event, ok := <-presenceCh:
+			if !ok {
+				continue // Channel closed, presence disabled.
+			}
+			data, err := crdt.MarshalPresenceEvent(event)
+			if err != nil {
+				continue
+			}
+			if err := stream.Send("presence", data); err != nil {
 				return err
 			}
 		}

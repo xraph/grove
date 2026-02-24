@@ -40,6 +40,7 @@ import type {
   CRDTClientConfig,
   StreamConfig,
   StreamSubscription,
+  PresenceState,
   ChangeRecord,
   SyncStatus,
   HLC,
@@ -163,6 +164,9 @@ export function useCRDT(config: UseCRDTConfig): UseCRDTReturn {
           break;
         case "changes":
           store.applyChanges(event.data);
+          break;
+        case "presence":
+          client.presence.applyEvent(event.data);
           break;
         case "error":
           // Don't change status to error for transient stream issues.
@@ -629,4 +633,109 @@ export function useStream(): UseStreamReturn {
   }, [stream]);
 
   return { connected, lastEvent, disconnect, reconnect };
+}
+
+// --- usePresence ---
+
+/** Return type for usePresence hook. */
+export interface UsePresenceReturn<T> {
+  /** All other peers' presence for this topic (excludes self). */
+  others: PresenceState<T>[];
+  /** Update your own presence data for this topic. */
+  updateMyPresence: (data: T) => void;
+  /** Leave this topic (stops heartbeat, notifies server). */
+  leave: () => void;
+}
+
+/**
+ * Subscribe to presence for a topic with automatic join/leave lifecycle.
+ *
+ * Provides reactive access to other peers' presence and a function to
+ * update your own presence. Automatically leaves the topic on unmount.
+ *
+ * @example
+ * ```tsx
+ * function Editor({ docId }: { docId: string }) {
+ *   const { others, updateMyPresence } = usePresence<{
+ *     name: string;
+ *     cursor: { x: number; y: number } | null;
+ *     isTyping: boolean;
+ *   }>("documents:" + docId);
+ *
+ *   return (
+ *     <div>
+ *       {others.map(p => (
+ *         <div key={p.node_id}>
+ *           {p.data.name} {p.data.isTyping ? "is typing..." : ""}
+ *         </div>
+ *       ))}
+ *       <textarea
+ *         onKeyDown={() => updateMyPresence({ name: "Alice", cursor: null, isTyping: true })}
+ *         onBlur={() => updateMyPresence({ name: "Alice", cursor: null, isTyping: false })}
+ *       />
+ *     </div>
+ *   );
+ * }
+ * ```
+ */
+export function usePresence<T = Record<string, unknown>>(
+  topic: string
+): UsePresenceReturn<T> {
+  const { client } = useCRDTContext();
+
+  const others = useSyncExternalStore(
+    (cb) => client.presence.subscribe(topic, cb),
+    () => client.presence.getPresence<T>(topic),
+    () => [] as PresenceState<T>[]
+  );
+
+  const updateMyPresence = useCallback(
+    (data: T) => {
+      client.updatePresence(topic, data).catch(() => {});
+    },
+    [client, topic]
+  );
+
+  const leave = useCallback(() => {
+    client.leavePresence(topic).catch(() => {});
+  }, [client, topic]);
+
+  // Auto-leave on unmount.
+  useEffect(() => {
+    return () => {
+      client.leavePresence(topic).catch(() => {});
+    };
+  }, [client, topic]);
+
+  return { others, updateMyPresence, leave };
+}
+
+// --- useDocumentPresence ---
+
+/**
+ * Convenience wrapper for usePresence scoped to a document (table + pk).
+ *
+ * Constructs the topic as "table:pk" automatically.
+ *
+ * @example
+ * ```tsx
+ * function DocEditor() {
+ *   const { others, updateMyPresence } = useDocumentPresence<{
+ *     name: string;
+ *     color: string;
+ *   }>("documents", "doc-1");
+ *
+ *   useEffect(() => {
+ *     updateMyPresence({ name: "Alice", color: "#ff0000" });
+ *   }, []);
+ *
+ *   return <AvatarStack users={others.map(p => p.data)} />;
+ * }
+ * ```
+ */
+export function useDocumentPresence<T = Record<string, unknown>>(
+  table: string,
+  pk: string
+): UsePresenceReturn<T> {
+  return usePresence<T>(`${table}:${pk}`);
 }

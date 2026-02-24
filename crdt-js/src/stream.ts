@@ -13,6 +13,7 @@ import type {
   AuthProvider,
   StreamEvent,
   StreamEventHandler,
+  PresenceEvent,
 } from "./types.js";
 import { hlcAfter, hlcIsZero } from "./hlc.js";
 
@@ -223,6 +224,9 @@ export class CRDTStream {
           this.updateLastHLC(change.hlc);
         }
         this.emit({ type: "changes", data: changes });
+      } else if (eventType === "presence") {
+        const event = JSON.parse(data) as PresenceEvent;
+        this.emit({ type: "presence", data: event });
       }
     } catch (err) {
       this.emit({

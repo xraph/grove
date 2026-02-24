@@ -8,19 +8,19 @@ The `SessionStore` extension provides HTTP session management on top of any Grov
 ## Installation
 
 ```go
-import "github.com/xraph/grove/kv/extension"
+import "github.com/xraph/grove/kv/plugins"
 ```
 
 ## Creating a Session Store
 
 ```go
-sessions := extension.NewSessionStore(store)
+sessions := plugins.NewSessionStore(store)
 ```
 
 By default, sessions use the key prefix `"sess"` and a TTL of **30 minutes**. Both are configurable via options:
 
 ```go
-sessions := extension.NewSessionStore(store,
+sessions := plugins.NewSessionStore(store,
     extension.WithSessionPrefix("mysess"),         // keys become "mysess:<id>"
     extension.WithSessionTTL(2 * time.Hour),       // sessions expire after 2 hours
 )
@@ -136,7 +136,7 @@ import (
     "context"
     "net/http"
 
-    "github.com/xraph/grove/kv/extension"
+    "github.com/xraph/grove/kv/plugins"
 )
 
 type contextKey string
@@ -148,7 +148,7 @@ type SessionData struct {
     Role     string `json:"role"`
 }
 
-func SessionMiddleware(sessions *extension.SessionStore) func(http.Handler) http.Handler {
+func SessionMiddleware(sessions *plugins.SessionStore) func(http.Handler) http.Handler {
     return func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
             cookie, err := r.Cookie("session_id")
@@ -173,7 +173,7 @@ func SessionMiddleware(sessions *extension.SessionStore) func(http.Handler) http
 }
 
 // Login handler that creates a new session.
-func LoginHandler(sessions *extension.SessionStore) http.HandlerFunc {
+func LoginHandler(sessions *plugins.SessionStore) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
         // ... authenticate user ...
 

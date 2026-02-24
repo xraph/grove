@@ -14,19 +14,19 @@ Each extension is a standalone Go struct that wraps a `*kv.Store` and provides a
 ```go
 import (
     "github.com/xraph/grove/kv"
-    "github.com/xraph/grove/kv/extension"
+    "github.com/xraph/grove/kv/plugins"
 )
 
 // Any Store, any driver.
 store, _ := kv.Open(driver)
 
 // Create extensions from the same store.
-sessions := extension.NewSessionStore(store)
-limiter  := extension.NewRateLimiter(store, "api", 100, time.Minute)
-lock     := extension.NewLock(store, "deploy", 10*time.Second)
-counter  := extension.NewAtomicCounter(store, "visitors")
-board    := extension.NewLeaderboard(store, "scores")
-queue    := extension.NewQueue(store, "tasks")
+sessions := plugins.NewSessionStore(store)
+limiter  := plugins.NewRateLimiter(store, "api", 100, time.Minute)
+lock     := plugins.NewLock(store, "deploy", 10*time.Second)
+counter  := plugins.NewAtomicCounter(store, "visitors")
+board    := plugins.NewLeaderboard(store, "scores")
+queue    := plugins.NewQueue(store, "tasks")
 ```
 
 ## Driver-Agnostic by Design

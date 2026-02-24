@@ -15,10 +15,13 @@ import type {
   PullResponse,
   PushResponse,
   ChangeRecord,
+  PresenceState,
+  PresenceConfig,
   HLC,
 } from "./types.js";
 import { HybridClock } from "./hlc.js";
 import { HttpStreamTransport, isStreamTransport } from "./transport.js";
+import { PresenceManager } from "./presence.js";
 
 // Re-export CRDTError for backward compatibility.
 export { CRDTError } from "./errors.js";
@@ -33,15 +36,21 @@ export { CRDTError } from "./errors.js";
 export class CRDTClient {
   readonly nodeID: string;
   readonly clock: HybridClock;
+  readonly presence: PresenceManager;
 
   private tables: string[];
   private transport: Transport;
   private streamTransport: StreamTransport | null;
+  private presenceConfig: PresenceConfig | undefined;
+  private heartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private lastPresenceData = new Map<string, unknown>();
 
   constructor(config: CRDTClientConfig) {
     this.nodeID = config.nodeID;
     this.tables = config.tables ?? [];
     this.clock = new HybridClock(config.nodeID);
+    this.presence = new PresenceManager(config.nodeID);
+    this.presenceConfig = config.presence;
 
     // Resolve transport.
     if (config.transport) {
@@ -134,5 +143,111 @@ export class CRDTClient {
       reconnectDelay: config?.reconnectDelay,
       since: config?.since,
     });
+  }
+
+  // --- Presence ---
+
+  /**
+   * Update your presence for a topic (e.g., "documents:doc-1").
+   * Automatically starts a heartbeat to keep presence alive on the server.
+   *
+   * @param topic - Presence scope (typically "table:pk" or a room name).
+   * @param data - User-defined presence payload (cursor, typing state, user info, etc.).
+   */
+  async updatePresence<T = Record<string, unknown>>(
+    topic: string,
+    data: T
+  ): Promise<void> {
+    if (!this.transport.updatePresence) {
+      throw new Error(
+        "Transport does not support presence. Use HttpTransport or implement updatePresence()."
+      );
+    }
+
+    this.lastPresenceData.set(topic, data);
+
+    await this.transport.updatePresence({
+      node_id: this.nodeID,
+      topic,
+      data: data as Record<string, unknown>,
+    });
+
+    // Start or reset heartbeat for this topic.
+    this.startHeartbeat(topic);
+  }
+
+  /**
+   * Leave a topic — stops the heartbeat and notifies the server.
+   *
+   * @param topic - The topic to leave.
+   */
+  async leavePresence(topic: string): Promise<void> {
+    this.stopHeartbeat(topic);
+    this.lastPresenceData.delete(topic);
+
+    if (this.transport.updatePresence) {
+      await this.transport.updatePresence({
+        node_id: this.nodeID,
+        topic,
+        data: null as unknown as Record<string, unknown>,
+      });
+    }
+  }
+
+  /**
+   * Get all current presence entries for a topic from the server.
+   *
+   * @param topic - The topic to query.
+   * @returns Array of presence states.
+   */
+  async getPresence<T = Record<string, unknown>>(
+    topic: string
+  ): Promise<PresenceState<T>[]> {
+    if (!this.transport.getPresence) {
+      throw new Error(
+        "Transport does not support presence. Use HttpTransport or implement getPresence()."
+      );
+    }
+
+    return this.transport.getPresence(topic) as Promise<PresenceState<T>[]>;
+  }
+
+  /**
+   * Leave all topics and stop all heartbeats. Call on cleanup/unmount.
+   */
+  async leaveAllPresence(): Promise<void> {
+    const topics = [...this.heartbeatTimers.keys()];
+    for (const topic of topics) {
+      await this.leavePresence(topic);
+    }
+  }
+
+  private startHeartbeat(topic: string): void {
+    this.stopHeartbeat(topic);
+
+    const interval = this.presenceConfig?.heartbeatInterval ?? 10_000;
+
+    const timer = setInterval(() => {
+      const lastData = this.lastPresenceData.get(topic);
+      if (lastData !== undefined && this.transport.updatePresence) {
+        this.transport
+          .updatePresence({
+            node_id: this.nodeID,
+            topic,
+            data: lastData as Record<string, unknown>,
+          })
+          .catch(() => {});
+      }
+    }, interval);
+
+    this.heartbeatTimers.set(topic, timer);
+  }
+
+  private stopHeartbeat(topic: string): void {
+    const timer = this.heartbeatTimers.get(topic);
+    if (timer) {
+      clearInterval(timer);
+      this.heartbeatTimers.delete(topic);
+    }
   }
 }

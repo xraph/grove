@@ -8,13 +8,13 @@ The `Leaderboard` extension provides a sorted leaderboard that stores member/sco
 ## Installation
 
 ```go
-import "github.com/xraph/grove/kv/extension"
+import "github.com/xraph/grove/kv/plugins"
 ```
 
 ## Creating a Leaderboard
 
 ```go
-board := extension.NewLeaderboard(store, "scores")
+board := plugins.NewLeaderboard(store, "scores")
 ```
 
 **Parameters:**
@@ -144,7 +144,7 @@ import (
     "net/http"
 
     "github.com/xraph/grove/kv"
-    "github.com/xraph/grove/kv/extension"
+    "github.com/xraph/grove/kv/plugins"
     "github.com/xraph/grove/kv/drivers/redisdriver"
 )
 
@@ -157,7 +157,7 @@ func main() {
     store, _ := kv.Open(rdb)
     defer store.Close()
 
-    board := extension.NewLeaderboard(store, "game-highscores")
+    board := plugins.NewLeaderboard(store, "game-highscores")
 
     mux := http.NewServeMux()
 

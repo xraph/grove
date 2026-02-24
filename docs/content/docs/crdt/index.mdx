@@ -70,6 +70,8 @@ grove/crdt/
   sync_hooks.go    SyncHook interface for intercepting sync data
   transport.go     Transport interface, HTTPClient, StreamingTransport
   server.go        SyncController + HTTPHandler (standalone)
+  presence.go      PresenceManager: in-memory ephemeral state with TTL
+  presence_types.go  Presence types: PresenceState, PresenceUpdate, PresenceEvent
   options.go       Functional options
   inspect.go       Debug/inspect utilities
   migrations.go    Shadow table DDL
@@ -82,6 +84,7 @@ grove/crdt/
 - **Tombstones** mark deleted records so deletions propagate during sync; they expire after a configurable TTL (default: 7 days)
 - **Sync hooks** intercept changes flowing between nodes for validation, filtering, transformation, or audit logging
 - **Transport** is pluggable: use HTTP, SSE streaming, or implement your own for WebSocket, gRPC, NATS, etc.
+- **Presence** provides ephemeral, real-time awareness (typing indicators, cursors, online users) with TTL-based cleanup, SSE broadcast, and React hooks
 
 ## Quick Example
 
@@ -118,4 +121,5 @@ report, err := syncer.Sync(ctx)
 - [CRDT Types](/docs/crdt/types) for deep dives into LWW, Counter, and Set semantics
 - [Sync Protocol](/docs/crdt/sync) for transport, syncer, and hook details
 - [SSE Streaming](/docs/crdt/streaming) for real-time change propagation
+- [Presence & Awareness](/docs/crdt/presence) for ephemeral real-time state (typing indicators, cursors, online users)
 - [TypeScript Client](/docs/crdt/typescript-client) for browser and React integration

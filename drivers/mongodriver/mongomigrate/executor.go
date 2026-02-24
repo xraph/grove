@@ -22,6 +22,12 @@ import (
 	"github.com/xraph/grove/migrate"
 )
 
+func init() {
+	migrate.RegisterExecutor("mongo", func(drv any) migrate.Executor {
+		return New(drv.(*mongodriver.MongoDB))
+	})
+}
+
 const (
 	migrationCollectionName = "grove_migrations"
 	lockCollectionName      = "grove_migration_locks"

@@ -165,6 +165,27 @@ data: [{"table":"documents","pk":"doc-1",...},{"table":"documents","pk":"doc-2",
 
 SSE comments (lines starting with `:`) are used as keep-alive signals to prevent connection timeouts.
 
+### Presence Event
+
+When [presence](/docs/crdt/presence) is enabled on the server, the stream also includes `"presence"` events:
+
+```
+event: presence
+data: {"type":"join","node_id":"browser-abc","topic":"documents:doc-1","data":{"name":"Alice"}}
+
+event: presence
+data: {"type":"update","node_id":"browser-abc","topic":"documents:doc-1","data":{"name":"Alice","isTyping":true}}
+
+event: presence
+data: {"type":"leave","node_id":"browser-abc","topic":"documents:doc-1"}
+```
+
+Event types: `"join"` (new node), `"update"` (data changed), `"leave"` (node left, disconnected, or TTL expired).
+
+### Automatic Disconnect Cleanup
+
+When a client's SSE connection drops, the server automatically removes all presence entries for that client and broadcasts `"leave"` events. This requires the `node_id` query parameter on the stream URL so the server knows which client disconnected.
+
 ## Query Parameters
 
 The SSE endpoint accepts query parameters to filter the stream:
@@ -175,6 +196,7 @@ The SSE endpoint accepts query parameters to filter the stream:
 | `since_ts` | `int64` | HLC timestamp (nanoseconds) |
 | `since_count` | `uint32` | HLC counter |
 | `since_node` | `string` | HLC node ID |
+| `node_id` | `string` | Client node ID (used for presence cleanup on disconnect) |
 
 Example URL:
 ```
@@ -200,6 +222,9 @@ stream.on((event) => {
             break;
         case "changes":
             console.log("Batch:", event.data.length, "changes");
+            break;
+        case "presence":
+            console.log("Presence:", event.data.type, event.data.node_id);
             break;
         case "connected":
             console.log("Connected to SSE stream");

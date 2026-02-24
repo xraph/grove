@@ -182,18 +182,22 @@ app.Use(groveext.New(
     groveext.WithSyncController(
         crdt.WithStreamPollInterval(2 * time.Second),
         crdt.WithStreamKeepAlive(30 * time.Second),
+        crdt.WithPresenceEnabled(true),              // Enable presence tracking
+        crdt.WithPresenceTTL(30 * time.Second),       // Entry expiry (default: 30s)
     ),
 ))
 app.Start(ctx)
 ```
 
-This automatically registers three sync endpoints:
+This automatically registers sync and presence endpoints:
 
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/sync/pull` | Remote nodes pull changes |
 | POST | `/sync/push` | Remote nodes push changes |
-| GET | `/sync/stream` | SSE stream of real-time changes |
+| GET | `/sync/stream` | SSE stream of real-time changes and presence events |
+| POST | `/sync/presence` | Update or leave a presence topic |
+| GET | `/sync/presence` | Get current presence snapshot for a topic |
 
 Use `groveext.WithBasePath("/api/sync")` to change the route prefix.
 
@@ -221,4 +225,5 @@ fmt.Println(result)
 - [CRDT Types](/docs/crdt/types) for detailed merge semantics of each type
 - [Sync Protocol](/docs/crdt/sync) for transport, multi-peer, and hook configuration
 - [SSE Streaming](/docs/crdt/streaming) for real-time change propagation
+- [Presence & Awareness](/docs/crdt/presence) for ephemeral real-time state (typing indicators, cursors, online users)
 - [TypeScript Client](/docs/crdt/typescript-client) for browser and React integration

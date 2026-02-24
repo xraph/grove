@@ -3,6 +3,8 @@ title: Forge Extension
 description: Use Grove as a first-class Forge extension with YAML configuration, DI, migrations, CRDT sync, multi-database support, and lifecycle management.
 ---
 
+import { Callout } from 'fumadocs-ui/components/callout';
+
 Grove provides a first-class Forge extension that handles configuration loading, driver creation, dependency injection, and lifecycle management. It follows the canonical Forge extension pattern with `BaseExtension` embedding.
 
 ## Installation
@@ -505,6 +507,93 @@ app.Use(notificationsExt.New())  // notification migrations
 
 // At startup: core -> billing -> notifications (topological order)
 ```
+
+## CLI Migration Commands
+
+Grove implements `forge.MigratableExtension`, so when your app is wrapped with `cli.RunApp()` you get migration CLI commands for free:
+
+```go
+package main
+
+import (
+    "github.com/xraph/forge"
+    "github.com/xraph/forge/cli"
+
+    groveext "github.com/xraph/grove/extension"
+    _ "github.com/xraph/grove/drivers/pgdriver/pgmigrate" // register pg executor
+
+    "myapp/migrations/core"
+)
+
+func main() {
+    grove := groveext.New(
+        groveext.WithDSN("postgres://localhost:5432/myapp"),
+        groveext.WithMigrations(core.Migrations),
+    )
+
+    app := forge.New(
+        forge.WithAppName("myapp"),
+        forge.WithExtensions(grove),
+    )
+
+    cli.RunApp(app)
+}
+```
+
+### Available Commands
+
+| Command | Description |
+|---------|-------------|
+| `myapp migrate up` | Run all pending migrations |
+| `myapp migrate down` | Rollback the last migration batch (with confirmation prompt) |
+| `myapp migrate down --force` | Rollback without confirmation |
+| `myapp migrate status` | Show applied/pending migrations per group |
+
+### Auto-Migration on Serve
+
+Enable `WithAutoMigrate()` to run pending migrations automatically before the HTTP server starts:
+
+```go
+cli.RunApp(app, cli.WithAutoMigrate())
+```
+
+Migrations run during `PhaseBeforeRun` (after extensions are initialized, before accepting requests).
+
+### Multi-Database Mode
+
+When using multi-database mode, migration names are prefixed with the database name for clarity:
+
+```bash
+$ myapp migrate status
+  Group: analytics:events
+  ┌────────────────┬──────────────────┬─────────┐
+  │ Version        │ Name             │ Status  │
+  ├────────────────┼──────────────────┼─────────┤
+  │ 20240101000000 │ create_events    │ applied │
+  └────────────────┴──────────────────┴─────────┘
+
+  Group: core
+  ┌────────────────┬──────────────────┬─────────┐
+  │ Version        │ Name             │ Status  │
+  ├────────────────┼──────────────────┼─────────┤
+  │ 20240101000000 │ create_users     │ applied │
+  │ 20240201000000 │ add_email_index  │ pending │
+  └────────────────┴──────────────────┴─────────┘
+```
+
+### Executor Auto-Registration
+
+Make sure to import the migrate package for your driver so the executor factory is registered:
+
+```go
+import _ "github.com/xraph/grove/drivers/pgdriver/pgmigrate"     // PostgreSQL
+import _ "github.com/xraph/grove/drivers/mysqldriver/mysqlmigrate" // MySQL
+import _ "github.com/xraph/grove/drivers/sqlitedriver/sqlitemigrate" // SQLite
+```
+
+<Callout type="warn">
+If you see `no executor registered for driver "pg"`, you're missing the driver's migrate package import. Add the blank import for your driver as shown above.
+</Callout>
 
 ## KV Store Integration
 

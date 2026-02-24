@@ -3,6 +3,8 @@ title: Migrations Overview
 description: Modular, Go-code migrations with dependency-aware ordering.
 ---
 
+import { Callout } from 'fumadocs-ui/components/callout';
+
 Grove migrations are Go code, not SQL files. Any Go module can register migrations into named groups with dependency-aware ordering. Forge extensions ship their own migrations that compose automatically.
 
 ## Key Concepts
@@ -81,4 +83,58 @@ CREATE TABLE grove_migrations (
     UNIQUE(group_name, version)
 );
 ```
+
+## Executor Registry
+
+The executor registry provides driver-agnostic executor creation through auto-registration. Each driver's migrate package registers its factory via `init()`, so a blank import is all you need.
+
+### Auto-Registration
+
+Import the driver's migrate package to register its executor factory:
+
+| Import | Registered Name |
+|--------|----------------|
+| `_ "github.com/xraph/grove/drivers/pgdriver/pgmigrate"` | `pg` |
+| `_ "github.com/xraph/grove/drivers/mysqldriver/mysqlmigrate"` | `mysql` |
+| `_ "github.com/xraph/grove/drivers/sqlitedriver/sqlitemigrate"` | `sqlite` |
+| `_ "github.com/xraph/grove/drivers/tursodriver/tursomigrate"` | `turso` |
+| `_ "github.com/xraph/grove/drivers/clickhousedriver/clickhousemigrate"` | `clickhouse` |
+| `_ "github.com/xraph/grove/drivers/mongodriver/mongomigrate"` | `mongo` |
+
+### Using the Registry
+
+Once registered, create executors from any driver dynamically:
+
+```go
+import "github.com/xraph/grove/migrate"
+
+executor, err := migrate.NewExecutorFor(db.Driver())
+if err != nil {
+    // No factory registered for this driver
+    log.Fatal(err)
+}
+
+orch := migrate.NewOrchestrator(executor, core.Migrations)
+```
+
+### Manual Registration
+
+Register a custom executor factory for drivers not included in Grove:
+
+```go
+migrate.RegisterExecutor("custom", func(drv any) migrate.Executor {
+    return myCustomExecutor(drv)
+})
+```
+
+### Listing Registered Executors
+
+```go
+names := migrate.Executors()
+fmt.Println("Registered executors:", names) // e.g. [pg mysql sqlite]
+```
+
+<Callout type="info">
+When using the Grove Forge extension, executor registration is handled automatically — you only need the blank import for your driver's migrate package.
+</Callout>
 

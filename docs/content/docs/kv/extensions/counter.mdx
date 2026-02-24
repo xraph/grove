@@ -8,13 +8,13 @@ The `AtomicCounter` extension provides a distributed counter that supports atomi
 ## Installation
 
 ```go
-import "github.com/xraph/grove/kv/extension"
+import "github.com/xraph/grove/kv/plugins"
 ```
 
 ## Creating a Counter
 
 ```go
-counter := extension.NewAtomicCounter(store, "visitors")
+counter := plugins.NewAtomicCounter(store, "visitors")
 ```
 
 **Parameters:**
@@ -109,7 +109,7 @@ import (
     "net/http"
 
     "github.com/xraph/grove/kv"
-    "github.com/xraph/grove/kv/extension"
+    "github.com/xraph/grove/kv/plugins"
     "github.com/xraph/grove/kv/drivers/redisdriver"
 )
 
@@ -122,7 +122,7 @@ func main() {
     store, _ := kv.Open(rdb)
     defer store.Close()
 
-    visitors := extension.NewAtomicCounter(store, "page-views")
+    visitors := plugins.NewAtomicCounter(store, "page-views")
 
     mux := http.NewServeMux()
 
@@ -161,7 +161,7 @@ Use multiple counters to track available stock per product.
 
 ```go
 func decrementStock(ctx context.Context, store *kv.Store, productID string, qty int64) error {
-    counter := extension.NewAtomicCounter(store, "stock:"+productID)
+    counter := plugins.NewAtomicCounter(store, "stock:"+productID)
 
     current, err := counter.Get(ctx)
     if err != nil {
@@ -177,7 +177,7 @@ func decrementStock(ctx context.Context, store *kv.Store, productID string, qty 
 }
 
 func restockProduct(ctx context.Context, store *kv.Store, productID string, qty int64) (int64, error) {
-    counter := extension.NewAtomicCounter(store, "stock:"+productID)
+    counter := plugins.NewAtomicCounter(store, "stock:"+productID)
     return counter.Increment(ctx, qty)
 }
 ```

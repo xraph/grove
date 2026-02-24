@@ -98,6 +98,21 @@ func WithStreamKeepAlive(d time.Duration) SyncControllerOption {
 	return func(c *SyncController) { c.streamKeepAlive = d }
 }
 
+// WithPresenceEnabled enables the presence subsystem on the controller.
+// When enabled, the controller creates an in-memory PresenceManager for
+// ephemeral awareness data (typing indicators, cursors, user info).
+// Disabled by default — zero overhead when not used.
+func WithPresenceEnabled(enabled bool) SyncControllerOption {
+	return func(c *SyncController) { c.presenceEnabled = enabled }
+}
+
+// WithPresenceTTL sets the TTL for presence entries. After this duration
+// without a heartbeat, presence entries are automatically removed and a
+// "leave" event is broadcast. Defaults to 30 seconds.
+func WithPresenceTTL(d time.Duration) SyncControllerOption {
+	return func(c *SyncController) { c.presenceTTL = d }
+}
+
 // --- StreamingTransport Options ---
 
 // StreamingOption configures a StreamingTransport.

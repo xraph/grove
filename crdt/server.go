@@ -22,6 +22,12 @@ type SyncController struct {
 	streamPollInterval time.Duration
 	streamKeepAlive    time.Duration
 	logger             *slog.Logger
+
+	// Presence subsystem (nil when disabled).
+	presenceEnabled bool
+	presenceTTL     time.Duration
+	presence        *PresenceManager
+	presenceCh      chan PresenceEvent // buffered channel for broadcasting to SSE streams
 }
 
 // NewSyncController creates a new sync controller for the given plugin.
@@ -43,6 +49,23 @@ func NewSyncController(plugin *Plugin, opts ...SyncControllerOption) *SyncContro
 	for _, opt := range opts {
 		opt(c)
 	}
+
+	// Initialize presence subsystem if enabled.
+	if c.presenceEnabled {
+		c.presenceCh = make(chan PresenceEvent, 64)
+		c.presence = NewPresenceManager(c.presenceTTL, func(event PresenceEvent) {
+			// Non-blocking send to the broadcast channel.
+			select {
+			case c.presenceCh <- event:
+			default:
+				c.logger.Warn("crdt: presence event dropped (channel full)",
+					slog.String("topic", event.Topic),
+					slog.String("node_id", event.NodeID),
+				)
+			}
+		}, c.logger)
+	}
+
 	return c
 }
 
@@ -228,6 +251,77 @@ func (c *SyncController) StreamChangesSince(ctx context.Context, tables []string
 	return ch, nil
 }
 
+// --- Presence ---
+
+// HandlePresenceUpdate processes a presence update and returns the resulting event.
+// Returns nil if presence is not enabled.
+func (c *SyncController) HandlePresenceUpdate(_ context.Context, update *PresenceUpdate) (*PresenceEvent, error) {
+	if c.presence == nil {
+		return nil, fmt.Errorf("crdt: presence is not enabled")
+	}
+	if update.NodeID == "" {
+		return nil, fmt.Errorf("crdt: presence update requires node_id")
+	}
+	if update.Topic == "" {
+		return nil, fmt.Errorf("crdt: presence update requires topic")
+	}
+
+	// A null data payload means the client is leaving.
+	if update.Data == nil || string(update.Data) == "null" {
+		event := c.presence.Remove(update.Topic, update.NodeID)
+		if event == nil {
+			// Node wasn't present — return a synthetic leave event.
+			ev := PresenceEvent{
+				Type:   PresenceLeave,
+				NodeID: update.NodeID,
+				Topic:  update.Topic,
+			}
+			return &ev, nil
+		}
+		return event, nil
+	}
+
+	event := c.presence.Update(*update)
+	return &event, nil
+}
+
+// HandleGetPresence returns a snapshot of all active presence for a topic.
+func (c *SyncController) HandleGetPresence(_ context.Context, topic string) (*PresenceSnapshot, error) {
+	if c.presence == nil {
+		return nil, fmt.Errorf("crdt: presence is not enabled")
+	}
+	if topic == "" {
+		return nil, fmt.Errorf("crdt: presence query requires topic")
+	}
+
+	states := c.presence.Get(topic)
+	if states == nil {
+		states = []PresenceState{}
+	}
+	return &PresenceSnapshot{
+		Topic:  topic,
+		States: states,
+	}, nil
+}
+
+// Presence returns the presence manager, or nil if presence is disabled.
+func (c *SyncController) Presence() *PresenceManager {
+	return c.presence
+}
+
+// PresenceChannel returns the channel for receiving presence events to
+// broadcast over SSE streams. Returns nil if presence is disabled.
+func (c *SyncController) PresenceChannel() <-chan PresenceEvent {
+	return c.presenceCh
+}
+
+// Close cleans up the controller's resources (presence manager, etc.).
+func (c *SyncController) Close() {
+	if c.presence != nil {
+		c.presence.Close()
+	}
+}
+
 // --- HTTP Handler (backward-compatible, no Forge dependency) ---
 
 // NewHTTPHandler creates a standard http.Handler for sync endpoints.
@@ -242,6 +336,10 @@ func NewHTTPHandler(plugin *Plugin, opts ...SyncControllerOption) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /pull", ctrl.httpHandlePull)
 	mux.HandleFunc("POST /push", ctrl.httpHandlePush)
+	if ctrl.presence != nil {
+		mux.HandleFunc("POST /presence", ctrl.httpHandlePresenceUpdate)
+		mux.HandleFunc("GET /presence", ctrl.httpHandleGetPresence)
+	}
 	return mux
 }
 
@@ -277,6 +375,40 @@ func (c *SyncController) httpHandlePush(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp) //nolint:errcheck // HTTP response write
+}
+
+func (c *SyncController) httpHandlePresenceUpdate(w http.ResponseWriter, r *http.Request) {
+	var update PresenceUpdate
+	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("crdt: invalid request: %v", err))
+		return
+	}
+
+	event, err := c.HandlePresenceUpdate(r.Context(), &update)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(event) //nolint:errcheck // HTTP response write
+}
+
+func (c *SyncController) httpHandleGetPresence(w http.ResponseWriter, r *http.Request) {
+	topic := r.URL.Query().Get("topic")
+	if topic == "" {
+		writeError(w, http.StatusBadRequest, "crdt: missing topic query parameter")
+		return
+	}
+
+	snapshot, err := c.HandleGetPresence(r.Context(), topic)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(snapshot) //nolint:errcheck // HTTP response write
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

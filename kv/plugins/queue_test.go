@@ -1,4 +1,4 @@
-package extension_test
+package plugins_test
 
 import (
 	"context"
@@ -8,13 +8,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/xraph/grove/kv/extension"
 	"github.com/xraph/grove/kv/kvtest"
+	"github.com/xraph/grove/kv/plugins"
 )
 
 func TestQueue_Enqueue(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	q := extension.NewQueue(store, "jobs")
+	q := plugins.NewQueue(store, "jobs")
 
 	id, err := q.Enqueue(context.Background(), map[string]string{"task": "send_email"})
 	require.NoError(t, err)
@@ -23,7 +23,7 @@ func TestQueue_Enqueue(t *testing.T) {
 
 func TestQueue_Dequeue_Success(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	q := extension.NewQueue(store, "jobs")
+	q := plugins.NewQueue(store, "jobs")
 
 	ctx := context.Background()
 	payload := map[string]string{"task": "send_email"}
@@ -43,7 +43,7 @@ func TestQueue_Dequeue_Success(t *testing.T) {
 
 func TestQueue_Dequeue_FIFO(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	q := extension.NewQueue(store, "jobs")
+	q := plugins.NewQueue(store, "jobs")
 
 	ctx := context.Background()
 	idA, err := q.Enqueue(ctx, "A")
@@ -61,7 +61,7 @@ func TestQueue_Dequeue_FIFO(t *testing.T) {
 
 func TestQueue_Dequeue_EmptyQueue(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	q := extension.NewQueue(store, "jobs")
+	q := plugins.NewQueue(store, "jobs")
 
 	job, err := q.Dequeue(context.Background())
 	require.NoError(t, err)
@@ -70,7 +70,7 @@ func TestQueue_Dequeue_EmptyQueue(t *testing.T) {
 
 func TestQueue_Ack(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	q := extension.NewQueue(store, "jobs")
+	q := plugins.NewQueue(store, "jobs")
 
 	ctx := context.Background()
 	_, err := q.Enqueue(ctx, "do-work")
@@ -86,7 +86,7 @@ func TestQueue_Ack(t *testing.T) {
 
 func TestQueue_Size(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	q := extension.NewQueue(store, "jobs")
+	q := plugins.NewQueue(store, "jobs")
 
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
@@ -101,7 +101,7 @@ func TestQueue_Size(t *testing.T) {
 
 func TestQueue_Size_Empty(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	q := extension.NewQueue(store, "jobs")
+	q := plugins.NewQueue(store, "jobs")
 
 	size, err := q.Size(context.Background())
 	require.NoError(t, err)
@@ -111,7 +111,7 @@ func TestQueue_Size_Empty(t *testing.T) {
 func TestQueue_VisibilityTimeout(t *testing.T) {
 	store := kvtest.SetupStore(t)
 	timeout := 45 * time.Second
-	q := extension.NewQueue(store, "jobs", extension.WithVisibilityTimeout(timeout))
+	q := plugins.NewQueue(store, "jobs", plugins.WithVisibilityTimeout(timeout))
 
 	// Verify the queue was constructed without error; the option is accepted.
 	ctx := context.Background()
@@ -125,7 +125,7 @@ func TestQueue_VisibilityTimeout(t *testing.T) {
 
 func TestQueue_CustomVisibilityTimeout(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	q := extension.NewQueue(store, "jobs", extension.WithVisibilityTimeout(10*time.Second))
+	q := plugins.NewQueue(store, "jobs", plugins.WithVisibilityTimeout(10*time.Second))
 
 	// Enqueue and dequeue to verify the custom timeout does not break behavior.
 	ctx := context.Background()

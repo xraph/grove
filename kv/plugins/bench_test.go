@@ -1,4 +1,4 @@
-package extension_test
+package plugins_test
 
 import (
 	"context"
@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xraph/grove/kv/extension"
 	"github.com/xraph/grove/kv/kvtest"
+	"github.com/xraph/grove/kv/plugins"
 )
 
 func BenchmarkAtomicCounter_Increment(b *testing.B) {
 	store := kvtest.BenchStore(b)
-	ctr := extension.NewAtomicCounter(store, "bench")
+	ctr := plugins.NewAtomicCounter(store, "bench")
 	ctx := context.Background()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -24,7 +24,7 @@ func BenchmarkLeaderboard_Add(b *testing.B) {
 	for _, n := range []int{10, 100} {
 		b.Run(fmt.Sprintf("%d_members", n), func(b *testing.B) {
 			store := kvtest.BenchStore(b)
-			lb := extension.NewLeaderboard(store, "bench")
+			lb := plugins.NewLeaderboard(store, "bench")
 			ctx := context.Background()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -38,7 +38,7 @@ func BenchmarkLeaderboard_TopN(b *testing.B) {
 	for _, total := range []int{100, 1000} {
 		b.Run(fmt.Sprintf("Top10_from_%d", total), func(b *testing.B) {
 			store := kvtest.BenchStore(b)
-			lb := extension.NewLeaderboard(store, "bench")
+			lb := plugins.NewLeaderboard(store, "bench")
 			ctx := context.Background()
 			for i := 0; i < total; i++ {
 				_ = lb.Add(ctx, fmt.Sprintf("player:%d", i), float64(i))
@@ -53,7 +53,7 @@ func BenchmarkLeaderboard_TopN(b *testing.B) {
 
 func BenchmarkQueue_EnqueueDequeue(b *testing.B) {
 	store := kvtest.BenchStore(b)
-	q := extension.NewQueue(store, "bench")
+	q := plugins.NewQueue(store, "bench")
 	ctx := context.Background()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -65,7 +65,7 @@ func BenchmarkQueue_EnqueueDequeue(b *testing.B) {
 
 func BenchmarkSessionStore_CreateGet(b *testing.B) {
 	store := kvtest.BenchStore(b)
-	ss := extension.NewSessionStore(store)
+	ss := plugins.NewSessionStore(store)
 	ctx := context.Background()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -77,7 +77,7 @@ func BenchmarkSessionStore_CreateGet(b *testing.B) {
 
 func BenchmarkRateLimiter_Allow(b *testing.B) {
 	store := kvtest.BenchStore(b)
-	rl := extension.NewRateLimiter(store, "bench", 1000000, time.Minute)
+	rl := plugins.NewRateLimiter(store, "bench", 1000000, time.Minute)
 	ctx := context.Background()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

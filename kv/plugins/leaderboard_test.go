@@ -1,4 +1,4 @@
-package extension_test
+package plugins_test
 
 import (
 	"context"
@@ -8,13 +8,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/xraph/grove/kv"
-	"github.com/xraph/grove/kv/extension"
 	"github.com/xraph/grove/kv/kvtest"
+	"github.com/xraph/grove/kv/plugins"
 )
 
 func TestLeaderboard_Add_Score(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	lb := extension.NewLeaderboard(store, "game")
+	lb := plugins.NewLeaderboard(store, "game")
 
 	ctx := context.Background()
 	err := lb.Add(ctx, "alice", 100.0)
@@ -27,7 +27,7 @@ func TestLeaderboard_Add_Score(t *testing.T) {
 
 func TestLeaderboard_Add_UpdateScore(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	lb := extension.NewLeaderboard(store, "game")
+	lb := plugins.NewLeaderboard(store, "game")
 
 	ctx := context.Background()
 	err := lb.Add(ctx, "alice", 100.0)
@@ -43,7 +43,7 @@ func TestLeaderboard_Add_UpdateScore(t *testing.T) {
 
 func TestLeaderboard_Score_NotFound(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	lb := extension.NewLeaderboard(store, "game")
+	lb := plugins.NewLeaderboard(store, "game")
 
 	_, err := lb.Score(context.Background(), "nonexistent")
 	require.Error(t, err)
@@ -52,7 +52,7 @@ func TestLeaderboard_Score_NotFound(t *testing.T) {
 
 func TestLeaderboard_TopN(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	lb := extension.NewLeaderboard(store, "game")
+	lb := plugins.NewLeaderboard(store, "game")
 
 	ctx := context.Background()
 	members := []struct {
@@ -84,7 +84,7 @@ func TestLeaderboard_TopN(t *testing.T) {
 
 func TestLeaderboard_TopN_LessThanN(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	lb := extension.NewLeaderboard(store, "game")
+	lb := plugins.NewLeaderboard(store, "game")
 
 	ctx := context.Background()
 	require.NoError(t, lb.Add(ctx, "alice", 50))
@@ -97,7 +97,7 @@ func TestLeaderboard_TopN_LessThanN(t *testing.T) {
 
 func TestLeaderboard_Rank(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	lb := extension.NewLeaderboard(store, "game")
+	lb := plugins.NewLeaderboard(store, "game")
 
 	ctx := context.Background()
 	require.NoError(t, lb.Add(ctx, "alice", 50))
@@ -119,7 +119,7 @@ func TestLeaderboard_Rank(t *testing.T) {
 
 func TestLeaderboard_Rank_NotFound(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	lb := extension.NewLeaderboard(store, "game")
+	lb := plugins.NewLeaderboard(store, "game")
 
 	_, err := lb.Rank(context.Background(), "nonexistent")
 	require.Error(t, err)
@@ -128,7 +128,7 @@ func TestLeaderboard_Rank_NotFound(t *testing.T) {
 
 func TestLeaderboard_Remove(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	lb := extension.NewLeaderboard(store, "game")
+	lb := plugins.NewLeaderboard(store, "game")
 
 	ctx := context.Background()
 	require.NoError(t, lb.Add(ctx, "alice", 100))
@@ -143,7 +143,7 @@ func TestLeaderboard_Remove(t *testing.T) {
 
 func TestLeaderboard_Size(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	lb := extension.NewLeaderboard(store, "game")
+	lb := plugins.NewLeaderboard(store, "game")
 
 	ctx := context.Background()
 	require.NoError(t, lb.Add(ctx, "alice", 10))
@@ -157,7 +157,7 @@ func TestLeaderboard_Size(t *testing.T) {
 
 func TestLeaderboard_Size_Empty(t *testing.T) {
 	store := kvtest.SetupStore(t)
-	lb := extension.NewLeaderboard(store, "game")
+	lb := plugins.NewLeaderboard(store, "game")
 
 	size, err := lb.Size(context.Background())
 	require.NoError(t, err)

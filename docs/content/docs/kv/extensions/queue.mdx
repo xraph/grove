@@ -8,19 +8,19 @@ The `Queue` extension provides a distributed FIFO job queue built on the KV stor
 ## Installation
 
 ```go
-import "github.com/xraph/grove/kv/extension"
+import "github.com/xraph/grove/kv/plugins"
 ```
 
 ## Creating a Queue
 
 ```go
-queue := extension.NewQueue(store, "tasks")
+queue := plugins.NewQueue(store, "tasks")
 ```
 
 With a custom visibility timeout:
 
 ```go
-queue := extension.NewQueue(store, "emails",
+queue := plugins.NewQueue(store, "emails",
     extension.WithVisibilityTimeout(2 * time.Minute),
 )
 ```
@@ -141,7 +141,7 @@ The visibility timeout is the key mechanism that prevents double-processing:
 Set the visibility timeout to be **longer than the expected processing time** for your jobs. The default of 30 seconds works well for fast tasks. For longer-running jobs, increase it:
 
 ```go
-queue := extension.NewQueue(store, "video-transcode",
+queue := plugins.NewQueue(store, "video-transcode",
     extension.WithVisibilityTimeout(10 * time.Minute),
 )
 ```
@@ -161,7 +161,7 @@ import (
     "time"
 
     "github.com/xraph/grove/kv"
-    "github.com/xraph/grove/kv/extension"
+    "github.com/xraph/grove/kv/plugins"
     "github.com/xraph/grove/kv/drivers/redisdriver"
 )
 
@@ -180,7 +180,7 @@ func main() {
     store, _ := kv.Open(rdb)
     defer store.Close()
 
-    queue := extension.NewQueue(store, "emails",
+    queue := plugins.NewQueue(store, "emails",
         extension.WithVisibilityTimeout(time.Minute),
     )
 

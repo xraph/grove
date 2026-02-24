@@ -68,6 +68,15 @@ export type {
   AuthProvider,
 } from "./types.js";
 
+// Presence types
+export type {
+  PresenceState,
+  PresenceUpdate,
+  PresenceEvent,
+  PresenceSnapshot,
+  PresenceConfig,
+} from "./types.js";
+
 // HLC clock
 export {
   HLC_ZERO,
@@ -105,6 +114,9 @@ export { CRDTStream } from "./stream.js";
 
 // State store
 export { CRDTStore } from "./store.js";
+
+// Presence
+export { PresenceManager } from "./presence.js";
 
 // Default implementations
 export { HttpTransport, HttpStreamTransport, isStreamTransport } from "./transport.js";
