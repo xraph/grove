@@ -452,7 +452,8 @@ func TestHTTPHandler_GetPresence_MissingTopic(t *testing.T) {
 		WithPresenceEnabled(true),
 	)
 
-	req := httptest.NewRequest("GET", "/presence", nil)
+	req, err := http.NewRequestWithContext(context.Background(), "GET", "/presence", nil)
+	require.NoError(t, err)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
