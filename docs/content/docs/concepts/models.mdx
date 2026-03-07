@@ -1,0 +1,283 @@
+---
+title: Schema & Models
+description: Complete reference for Grove model definitions, field options, relations, the schema registry, and driver-specific behavior.
+---
+
+Grove models are plain Go structs annotated with struct tags. At registration time, Grove uses reflection to build a `schema.Table` that caches all metadata -- field names, types, constraints, relations, and indexes. After that initial pass, the [hot path uses zero reflection](/docs/concepts/zero-reflection).
+
+See [Dual Tag System](/docs/concepts/dual-tags) for the full tag resolution rules (`grove` > `bun` > snake_case).
+
+## BaseModel
+
+Embed `grove.BaseModel` to declare table-level options:
+
+```go
+import "github.com/xraph/grove"
+
+type User struct {
+    grove.BaseModel `grove:"table:users,alias:u"`
+
+    ID    int64  `grove:"id,pk,autoincrement"`
+    Name  string `grove:"name,notnull"`
+    Email string `grove:"email,notnull,unique"`
+}
+```
+
+| Option | Description | Example |
+|--------|-------------|---------|
+| `table:name` | Table or collection name | `grove:"table:users"` |
+| `alias:a` | Table alias for queries | `grove:"table:users,alias:u"` |
+
+If no `table:` option is provided, the name defaults to the snake-cased, pluralized struct name (e.g., `UserProfile` becomes `user_profiles`).
+
+## Field Options
+
+### Flags
+
+| Tag | Description | Example |
+|-----|-------------|---------|
+| `pk` | Primary key | `grove:"id,pk"` |
+| `autoincrement` | Auto-incrementing column | `grove:"id,pk,autoincrement"` |
+| `notnull` | NOT NULL constraint | `grove:"name,notnull"` |
+| `nullzero` | Go zero value treated as SQL NULL | `grove:"deleted_at,nullzero"` |
+| `unique` | UNIQUE constraint | `grove:"email,unique"` |
+| `soft_delete` | Soft delete timestamp | `grove:"deleted_at,soft_delete,nullzero"` |
+| `scanonly` | Read-only; excluded from INSERT/UPDATE | `grove:"computed,scanonly"` |
+| `-` | Skip field entirely | `grove:"-"` |
+
+### Key-Value Options
+
+| Tag | Description | Example |
+|-----|-------------|---------|
+| `type:X` | Override SQL/BSON type | `grove:"data,type:jsonb"` |
+| `default:X` | DEFAULT value expression | `grove:"status,default:'active'"` |
+| `privacy:X` | Privacy classification for hooks | `grove:"ssn,privacy:pii"` |
+| `driver:X` | Restrict to specific driver(s) | `grove:"pg_field,driver:pg"` |
+| `index:X` | Named index | `grove:"email,index:idx_email"` |
+| `composite:X` | Composite index group | `grove:"first_name,composite:idx_name"` |
+| `crdt:X` | CRDT type annotation | `grove:"counter,crdt:counter"` |
+
+## Column Name Resolution
+
+Column names follow a three-step fallback:
+
+1. **Explicit name in tag** -- `grove:"my_col"` uses `my_col`
+2. **Tag present, no name** -- `grove:",notnull"` uses `ToSnakeCase(GoFieldName)`
+3. **No tag at all** -- uses `ToSnakeCase(GoFieldName)`
+
+The `ToSnakeCase` function handles acronyms correctly:
+
+| Go Name | Column Name |
+|---------|-------------|
+| `UserID` | `user_id` |
+| `HTMLParser` | `html_parser` |
+| `APIKeyURL` | `api_key_url` |
+| `SimpleTest` | `simple_test` |
+
+## Soft Delete
+
+Fields tagged with `soft_delete` change how deletion works:
+
+- `DELETE` becomes an `UPDATE` that sets the timestamp field
+- `SELECT` queries automatically filter `WHERE deleted_at IS NULL`
+- Call `ForceDelete()` on the query builder to bypass soft delete and issue a real `DELETE`
+
+```go
+type Post struct {
+    grove.BaseModel `grove:"table:posts"`
+
+    ID        int64      `grove:"id,pk,autoincrement"`
+    Title     string     `grove:"title,notnull"`
+    DeletedAt *time.Time `grove:"deleted_at,soft_delete,nullzero"`
+}
+```
+
+Use `*time.Time` or `time.Time` with `nullzero` so the zero value maps to `NULL` (meaning "not deleted").
+
+## ScanOnly Fields
+
+Fields tagged `scanonly` are populated when scanning SELECT results but excluded from INSERT and UPDATE statements. Use this for computed columns, database-generated values, or aggregates:
+
+```go
+type UserStats struct {
+    grove.BaseModel `grove:"table:users"`
+
+    ID        int64  `grove:"id,pk"`
+    Name      string `grove:"name"`
+    PostCount int    `grove:"post_count,scanonly"`
+}
+```
+
+## Privacy Classifications
+
+The `privacy:` tag annotates fields with a classification that hooks can inspect. The classification string is stored in `QueryContext.PrivacyColumns` as a `map[string]string` mapping column name to classification.
+
+```go
+type Customer struct {
+    grove.BaseModel `grove:"table:customers"`
+
+    ID    int64  `grove:"id,pk"`
+    Email string `grove:"email,privacy:pii"`
+    SSN   string `grove:"ssn,privacy:pii"`
+    Notes string `grove:"notes,privacy:sensitive"`
+}
+```
+
+See the [PII Redaction Hook example](/docs/hooks/overview#example-pii-redaction-hook) for how to use this in practice.
+
+## Driver Hints
+
+The `driver:` tag restricts a field to one or more specific drivers. When building queries for a driver that does not match the hint, the field is excluded. Comma-separate multiple drivers:
+
+```go
+type Record struct {
+    grove.BaseModel `grove:"table:records"`
+
+    ID       int64  `grove:"id,pk"`
+    Data     string `grove:"data,type:jsonb,driver:pg"`
+    MongoMeta string `grove:"mongo_meta,type:object,driver:mongo"`
+}
+```
+
+## Relations
+
+Declare relations using the `rel:` tag option with a `join:` mapping of `base_col=join_col`.
+
+### Has One
+
+```go
+type User struct {
+    grove.BaseModel `grove:"table:users"`
+
+    ID      int64    `grove:"id,pk"`
+    Profile *Profile `grove:"rel:has-one,join:id=user_id"`
+}
+```
+
+### Has Many
+
+```go
+type User struct {
+    grove.BaseModel `grove:"table:users"`
+
+    ID    int64   `grove:"id,pk"`
+    Posts []*Post `grove:"rel:has-many,join:id=author_id"`
+}
+```
+
+### Belongs To
+
+```go
+type Post struct {
+    grove.BaseModel `grove:"table:posts"`
+
+    ID       int64 `grove:"id,pk"`
+    AuthorID int64 `grove:"author_id"`
+    Author   *User `grove:"rel:belongs-to,join:author_id=id"`
+}
+```
+
+### Many-to-Many
+
+Many-to-many relations require a `join_table:` option:
+
+```go
+type User struct {
+    grove.BaseModel `grove:"table:users"`
+
+    ID    int64   `grove:"id,pk"`
+    Roles []*Role `grove:"rel:many-to-many,join_table:user_roles,join:id=user_id"`
+}
+```
+
+### Relation Type Aliases
+
+The following spellings are accepted for the `rel:` value:
+
+| Canonical | Aliases |
+|-----------|---------|
+| `has-one` | `hasone` |
+| `has-many` | `hasmany` |
+| `belongs-to` | `belongsto` |
+| `many-to-many` | `manytomany`, `m2m` |
+
+## Embedded Structs
+
+Anonymous (embedded) struct fields are flattened into the parent table. This is useful for reusable field groups:
+
+```go
+type Timestamps struct {
+    CreatedAt time.Time `grove:"created_at,notnull,default:current_timestamp"`
+    UpdatedAt time.Time `grove:"updated_at,nullzero"`
+}
+
+type User struct {
+    grove.BaseModel `grove:"table:users"`
+
+    ID   int64  `grove:"id,pk,autoincrement"`
+    Name string `grove:"name,notnull"`
+    Timestamps // fields are flattened into the users table
+}
+```
+
+Unexported embedded fields are skipped.
+
+## Composite Indexes
+
+Multiple fields sharing the same `composite:` group name are combined into a single composite index:
+
+```go
+type User struct {
+    grove.BaseModel `grove:"table:users"`
+
+    ID        int64  `grove:"id,pk"`
+    FirstName string `grove:"first_name,composite:idx_full_name"`
+    LastName  string `grove:"last_name,composite:idx_full_name"`
+}
+```
+
+## Schema Registry
+
+Grove caches `schema.Table` metadata per model type in a thread-safe registry. Users interact with it through `db.RegisterModel()`:
+
+```go
+db.RegisterModel((*User)(nil))
+db.RegisterModel((*Post)(nil))
+```
+
+For advanced introspection, the internal `schema.Registry` exposes:
+
+| Method | Description |
+|--------|-------------|
+| `Register(model) (*Table, error)` | Registers and caches; returns cached on subsequent calls |
+| `Get(model) *Table` | Returns `nil` if not registered |
+| `MustGet(model) *Table` | Panics if not registered |
+
+## MongoDB: `id` to `_id` Mapping
+
+When using the MongoDB driver, a primary key field with column name `id` is automatically mapped to MongoDB's `_id` field in both queries and `$jsonSchema` validation. This applies to both `bson.ObjectID` and other PK types:
+
+```go
+type User struct {
+    ID   mongodriver.ObjectID `grove:"id,pk"`    // stored as _id in MongoDB
+    Name string               `grove:"name,notnull"`
+}
+```
+
+See the [MongoDB driver page](/docs/drivers/mongodb) for full driver-specific documentation.
+
+## CRDT Types
+
+The `crdt:` tag annotates fields for CRDT (Conflict-free Replicated Data Type) conflict resolution. Supported values include `lww` (last-writer-wins), `counter`, and `set`:
+
+```go
+type Document struct {
+    grove.BaseModel `grove:"table:documents"`
+
+    ID      string `grove:"id,pk"`
+    Title   string `grove:"title,crdt:lww"`
+    Views   int64  `grove:"views,crdt:counter"`
+}
+```
+
+See the [CRDT documentation](/docs/crdt) for full details on conflict resolution and sync.

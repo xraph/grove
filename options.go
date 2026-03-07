@@ -1,8 +1,9 @@
 package grove
 
 import (
-	"log/slog"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 )
 
 // Option configures a DB instance.
@@ -11,7 +12,7 @@ type Option func(*options)
 type options struct {
 	poolSize     int
 	queryTimeout time.Duration
-	logger       *slog.Logger
+	logger       log.Logger
 }
 
 func defaultOptions() *options {
@@ -48,7 +49,7 @@ func WithQueryTimeout(d time.Duration) Option {
 }
 
 // WithLogger sets a structured logger for the DB instance.
-func WithLogger(l *slog.Logger) Option {
+func WithLogger(l log.Logger) Option {
 	return func(o *options) {
 		o.logger = l
 	}

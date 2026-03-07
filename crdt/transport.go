@@ -7,10 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 )
 
 // Transport is the interface for sync communication between nodes.
@@ -176,7 +177,7 @@ type StreamingTransport struct {
 	streamURL      string
 	tables         []string
 	reconnectDelay time.Duration
-	logger         *slog.Logger
+	logger         log.Logger
 }
 
 // NewStreamingTransport creates a streaming transport that supports both
@@ -189,7 +190,7 @@ func NewStreamingTransport(baseURL string, opts ...StreamingOption) *StreamingTr
 		HTTPClient:     HTTPTransport(baseURL),
 		streamURL:      baseURL + "/stream",
 		reconnectDelay: 5 * time.Second,
-		logger:         slog.Default(),
+		logger:         log.NewNoopLogger(),
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -227,7 +228,7 @@ func (t *StreamingTransport) StreamChanges(ctx context.Context, since HLC, handl
 
 		if err != nil {
 			t.logger.Error("crdt: SSE stream disconnected",
-				slog.String("error", err.Error()),
+				log.String("error", err.Error()),
 			)
 		}
 
@@ -237,7 +238,7 @@ func (t *StreamingTransport) StreamChanges(ctx context.Context, since HLC, handl
 			return ctx.Err()
 		case <-time.After(t.reconnectDelay):
 			t.logger.Info("crdt: SSE reconnecting",
-				slog.String("stream_url", t.streamURL),
+				log.String("stream_url", t.streamURL),
 			)
 		}
 	}
@@ -346,7 +347,7 @@ func (t *StreamingTransport) handleChangeEvent(data string, handler func(ChangeR
 	var change ChangeRecord
 	if err := json.Unmarshal([]byte(data), &change); err != nil {
 		t.logger.Error("crdt: SSE parse change event",
-			slog.String("error", err.Error()),
+			log.String("error", err.Error()),
 		)
 		return
 	}
@@ -358,7 +359,7 @@ func (t *StreamingTransport) handleChangesEvent(data string, handler func(Change
 	var changes []ChangeRecord
 	if err := json.Unmarshal([]byte(data), &changes); err != nil {
 		t.logger.Error("crdt: SSE parse changes event",
-			slog.String("error", err.Error()),
+			log.String("error", err.Error()),
 		)
 		return
 	}

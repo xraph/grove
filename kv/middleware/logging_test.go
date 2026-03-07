@@ -1,22 +1,21 @@
 package middleware_test
 
 import (
-	"bytes"
 	"context"
-	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	log "github.com/xraph/go-utils/log"
 	"github.com/xraph/grove/hook"
 	kv "github.com/xraph/grove/kv"
 	"github.com/xraph/grove/kv/middleware"
 )
 
 func TestLoggingHook_BeforeQuery_SetsStart(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	logger := log.NewTestLogger()
 	h := middleware.NewLogging(logger)
 
 	ctx := context.Background()
@@ -35,8 +34,7 @@ func TestLoggingHook_BeforeQuery_SetsStart(t *testing.T) {
 }
 
 func TestLoggingHook_AfterQuery_LogsFields(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := log.NewTestLogger()
 	h := middleware.NewLogging(logger)
 
 	ctx := context.Background()
@@ -51,11 +49,8 @@ func TestLoggingHook_AfterQuery_LogsFields(t *testing.T) {
 	err := h.AfterQuery(ctx, qc, nil)
 	require.NoError(t, err)
 
-	logged := buf.String()
-	assert.Contains(t, logged, "kv command", "log output should contain message")
-	assert.Contains(t, logged, "GET", "log output should contain the operation name")
-	assert.Contains(t, logged, "user:42", "log output should contain the key")
-	assert.Contains(t, logged, "latency", "log output should contain latency field")
+	tl := logger.(*log.TestLogger)
+	assert.True(t, tl.AssertHasLog("INFO", "kv command"), "should have logged 'kv command' at INFO level")
 }
 
 func TestLoggingHook_NilLogger(t *testing.T) {

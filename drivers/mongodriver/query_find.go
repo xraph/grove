@@ -9,6 +9,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
+	"github.com/xraph/grove/hook"
 	"github.com/xraph/grove/schema"
 )
 
@@ -120,6 +121,23 @@ func (q *FindQuery) GetCollection() string {
 	return q.collection
 }
 
+// buildFindHookContext creates a hook.QueryContext for find operations.
+func (q *FindQuery) buildFindHookContext() *hook.QueryContext {
+	var modelType reflect.Type
+	if q.table != nil {
+		modelType = q.table.ModelType
+	}
+	tableName := ""
+	if q.table != nil {
+		tableName = q.table.Name
+	}
+	return &hook.QueryContext{
+		Operation: hook.OpSelect,
+		Table:     tableName,
+		ModelType: modelType,
+	}
+}
+
 // Scan executes the find query and decodes results into the model.
 // For slice pointers, it decodes all matching documents.
 // For struct pointers, it decodes the first matching document.
@@ -136,17 +154,71 @@ func (q *FindQuery) Scan(ctx context.Context) error {
 		return fmt.Errorf("mongodriver: Scan requires a model; pass a model to NewFind")
 	}
 
-	coll := q.db.Collection(q.collection)
+	qc := q.buildFindHookContext()
 
-	targetType := reflect.TypeOf(target)
-	if targetType.Kind() == reflect.Ptr {
-		innerType := targetType.Elem()
-		if innerType.Kind() == reflect.Slice {
-			return q.scanMany(ctx, coll, target)
+	// Run model BeforeScan hooks.
+	if err := hook.RunModelBeforeScan(ctx, qc, target); err != nil {
+		return err
+	}
+
+	// Run operation-level pre-query hooks.
+	if q.db.hooks != nil {
+		result, err := q.db.hooks.RunPreQuery(ctx, qc)
+		if err != nil {
+			return err
+		}
+		if result != nil && result.Decision == hook.Deny {
+			if result.Error != nil {
+				return result.Error
+			}
+			return fmt.Errorf("mongodriver: query denied by hook")
+		}
+
+		// Inject native filters from hooks into the query filter.
+		if result != nil && len(result.Filters) > 0 {
+			for _, f := range result.Filters {
+				if f.NativeFilter != nil {
+					if nf, ok := f.NativeFilter.(bson.M); ok {
+						for k, v := range nf {
+							q.filter[k] = v
+						}
+					}
+				}
+			}
 		}
 	}
 
-	return q.scanOne(ctx, coll, target)
+	coll := q.db.Collection(q.collection)
+
+	targetType := reflect.TypeOf(target)
+	var scanErr error
+	if targetType.Kind() == reflect.Ptr {
+		innerType := targetType.Elem()
+		if innerType.Kind() == reflect.Slice {
+			scanErr = q.scanMany(ctx, coll, target)
+		} else {
+			scanErr = q.scanOne(ctx, coll, target)
+		}
+	} else {
+		scanErr = q.scanOne(ctx, coll, target)
+	}
+	if scanErr != nil {
+		return scanErr
+	}
+
+	// Run operation-level post-query hooks.
+	if q.db.hooks != nil {
+		if err := q.db.hooks.RunPostQuery(ctx, qc, target); err != nil {
+			return err
+		}
+	}
+
+	// Run model AfterScan hooks.
+	if err := hook.RunModelAfterScan(ctx, qc, target); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // scanMany executes a find and decodes all results into a slice.

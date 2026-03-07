@@ -2,9 +2,10 @@ package crdt
 
 import (
 	"encoding/json"
-	"log/slog"
 	"sync"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 )
 
 // PresenceManager manages ephemeral presence state for connected clients.
@@ -15,7 +16,7 @@ type PresenceManager struct {
 	states   map[string]map[string]*PresenceState // topic → nodeID → state
 	ttl      time.Duration
 	onChange func(event PresenceEvent)
-	logger   *slog.Logger
+	logger   log.Logger
 	done     chan struct{}
 }
 
@@ -23,12 +24,12 @@ type PresenceManager struct {
 // change callback. The callback is invoked on join, update, and leave
 // events (including TTL-based expiry). It starts a background goroutine
 // for TTL cleanup; call Close() to stop it.
-func NewPresenceManager(ttl time.Duration, onChange func(PresenceEvent), logger *slog.Logger) *PresenceManager {
+func NewPresenceManager(ttl time.Duration, onChange func(PresenceEvent), logger log.Logger) *PresenceManager {
 	if ttl <= 0 {
 		ttl = 30 * time.Second
 	}
 	if logger == nil {
-		logger = slog.Default()
+		logger = log.NewNoopLogger()
 	}
 	pm := &PresenceManager{
 		states:   make(map[string]map[string]*PresenceState),
@@ -206,8 +207,8 @@ func (pm *PresenceManager) cleanup() {
 				delete(topicMap, nodeID)
 
 				pm.logger.Debug("presence expired",
-					slog.String("topic", topic),
-					slog.String("node_id", nodeID),
+					log.String("topic", topic),
+					log.String("node_id", nodeID),
 				)
 
 				if pm.onChange != nil {

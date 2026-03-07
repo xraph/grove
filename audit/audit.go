@@ -6,9 +6,9 @@ package audit
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
+	log "github.com/xraph/go-utils/log"
 	"github.com/xraph/grove/hook"
 )
 
@@ -30,17 +30,17 @@ type Writer interface {
 
 // LogWriter writes audit entries to a structured logger.
 type LogWriter struct {
-	Logger *slog.Logger
+	Logger log.Logger
 }
 
-// WriteEntry logs the audit entry using slog.
-func (w *LogWriter) WriteEntry(ctx context.Context, entry *AuditEntry) error {
-	w.Logger.InfoContext(ctx, "audit",
-		slog.String("table", entry.Table),
-		slog.String("operation", entry.Operation),
-		slog.Time("timestamp", entry.Timestamp),
-		slog.String("tenant_id", entry.TenantID),
-		slog.String("query", entry.Query),
+// WriteEntry logs the audit entry.
+func (w *LogWriter) WriteEntry(_ context.Context, entry *AuditEntry) error {
+	w.Logger.Info("audit",
+		log.String("table", entry.Table),
+		log.String("operation", entry.Operation),
+		log.Time("timestamp", entry.Timestamp),
+		log.String("tenant_id", entry.TenantID),
+		log.String("query", entry.Query),
 	)
 	return nil
 }
@@ -57,10 +57,10 @@ func NewHook(w Writer) *Hook {
 	return &Hook{writer: w}
 }
 
-// NewLogHook creates an audit hook that logs to slog.
-func NewLogHook(logger *slog.Logger) *Hook {
+// NewLogHook creates an audit hook that logs to a structured logger.
+func NewLogHook(logger log.Logger) *Hook {
 	if logger == nil {
-		logger = slog.Default()
+		logger = log.NewNoopLogger()
 	}
 	return &Hook{writer: &LogWriter{Logger: logger}}
 }

@@ -8,6 +8,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
+	"github.com/xraph/grove/hook"
 	"github.com/xraph/grove/schema"
 )
 
@@ -51,6 +52,35 @@ func (q *InsertQuery) GetCollection() string {
 	return q.collection
 }
 
+// buildInsertHookContext creates a hook.QueryContext for insert operations.
+func (q *InsertQuery) buildInsertHookContext() *hook.QueryContext {
+	var modelType reflect.Type
+	if q.table != nil {
+		modelType = q.table.ModelType
+	}
+	tableName := ""
+	if q.table != nil {
+		tableName = q.table.Name
+	}
+	op := hook.OpInsert
+	// Detect bulk insert.
+	val := reflect.ValueOf(q.model)
+	for val.Kind() == reflect.Ptr {
+		if val.IsNil() {
+			break
+		}
+		val = val.Elem()
+	}
+	if val.Kind() == reflect.Slice {
+		op = hook.OpBulkInsert
+	}
+	return &hook.QueryContext{
+		Operation: op,
+		Table:     tableName,
+		ModelType: modelType,
+	}
+}
+
 // Exec executes the insert operation.
 // For single documents, uses InsertOne.
 // For slices, uses InsertMany.
@@ -60,6 +90,27 @@ func (q *InsertQuery) Exec(ctx context.Context) (*mongoResult, error) {
 	}
 	if q.collection == "" {
 		return nil, fmt.Errorf("mongodriver: no collection specified")
+	}
+
+	qc := q.buildInsertHookContext()
+
+	// Run model BeforeInsert hooks.
+	if err := hook.RunModelBeforeInsert(ctx, qc, q.model); err != nil {
+		return nil, err
+	}
+
+	// Run operation-level pre-mutation hooks.
+	if q.db.hooks != nil {
+		result, err := q.db.hooks.RunPreMutation(ctx, qc, q.model)
+		if err != nil {
+			return nil, err
+		}
+		if result != nil && result.Decision == hook.Deny {
+			if result.Error != nil {
+				return nil, result.Error
+			}
+			return nil, fmt.Errorf("mongodriver: insert denied by hook")
+		}
 	}
 
 	coll := q.db.Collection(q.collection)
@@ -76,11 +127,30 @@ func (q *InsertQuery) Exec(ctx context.Context) (*mongoResult, error) {
 		val = val.Elem()
 	}
 
+	var res *mongoResult
+	var execErr error
 	if val.Kind() == reflect.Slice {
-		return q.insertMany(ctx, coll, val)
+		res, execErr = q.insertMany(ctx, coll, val)
+	} else {
+		res, execErr = q.insertOne(ctx, coll)
+	}
+	if execErr != nil {
+		return nil, execErr
 	}
 
-	return q.insertOne(ctx, coll)
+	// Run operation-level post-mutation hooks.
+	if q.db.hooks != nil {
+		if err := q.db.hooks.RunPostMutation(ctx, qc, q.model, res); err != nil {
+			return nil, err
+		}
+	}
+
+	// Run model AfterInsert hooks.
+	if err := hook.RunModelAfterInsert(ctx, qc, q.model); err != nil {
+		return nil, err
+	}
+
+	return res, nil
 }
 
 // insertOne inserts a single document.

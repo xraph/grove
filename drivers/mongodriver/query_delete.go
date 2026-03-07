@@ -3,10 +3,12 @@ package mongodriver
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
+	"github.com/xraph/grove/hook"
 	"github.com/xraph/grove/schema"
 )
 
@@ -77,6 +79,27 @@ func (q *DeleteQuery) IsMany() bool {
 	return q.many
 }
 
+// buildDeleteHookContext creates a hook.QueryContext for delete operations.
+func (q *DeleteQuery) buildDeleteHookContext() *hook.QueryContext {
+	var modelType reflect.Type
+	if q.table != nil {
+		modelType = q.table.ModelType
+	}
+	tableName := ""
+	if q.table != nil {
+		tableName = q.table.Name
+	}
+	op := hook.OpDelete
+	if q.many {
+		op = hook.OpBulkDelete
+	}
+	return &hook.QueryContext{
+		Operation: op,
+		Table:     tableName,
+		ModelType: modelType,
+	}
+}
+
 // Exec executes the delete operation.
 func (q *DeleteQuery) Exec(ctx context.Context) (*mongoResult, error) {
 	if q.err != nil {
@@ -86,16 +109,57 @@ func (q *DeleteQuery) Exec(ctx context.Context) (*mongoResult, error) {
 		return nil, fmt.Errorf("mongodriver: no collection specified")
 	}
 
+	qc := q.buildDeleteHookContext()
+
+	// Run model BeforeDelete hooks.
+	if err := hook.RunModelBeforeDelete(ctx, qc, q.model); err != nil {
+		return nil, err
+	}
+
+	// Run operation-level pre-mutation hooks.
+	if q.db.hooks != nil {
+		result, err := q.db.hooks.RunPreMutation(ctx, qc, q.model)
+		if err != nil {
+			return nil, err
+		}
+		if result != nil && result.Decision == hook.Deny {
+			if result.Error != nil {
+				return nil, result.Error
+			}
+			return nil, fmt.Errorf("mongodriver: delete denied by hook")
+		}
+	}
+
 	coll := q.db.Collection(q.collection)
 
 	if q.session != nil {
 		ctx = mongo.NewSessionContext(ctx, q.session)
 	}
 
+	var res *mongoResult
+	var execErr error
 	if q.many {
-		return q.deleteMany(ctx, coll)
+		res, execErr = q.deleteMany(ctx, coll)
+	} else {
+		res, execErr = q.deleteOne(ctx, coll)
 	}
-	return q.deleteOne(ctx, coll)
+	if execErr != nil {
+		return nil, execErr
+	}
+
+	// Run operation-level post-mutation hooks.
+	if q.db.hooks != nil {
+		if err := q.db.hooks.RunPostMutation(ctx, qc, q.model, res); err != nil {
+			return nil, err
+		}
+	}
+
+	// Run model AfterDelete hooks.
+	if err := hook.RunModelAfterDelete(ctx, qc, q.model); err != nil {
+		return nil, err
+	}
+
+	return res, nil
 }
 
 // deleteOne deletes the first matching document.

@@ -235,10 +235,15 @@ func (q *DeleteQuery) buildDeleteHookContext() *hook.QueryContext {
 
 // Exec executes the DELETE (or soft-delete UPDATE).
 func (q *DeleteQuery) Exec(ctx context.Context) (driver.Result, error) {
-	// Run pre-mutation hooks.
-	var qc *hook.QueryContext
+	qc := q.buildDeleteHookContext()
+
+	// Run model BeforeDelete hooks.
+	if err := hook.RunModelBeforeDelete(ctx, qc, q.model); err != nil {
+		return nil, err
+	}
+
+	// Run operation-level pre-mutation hooks.
 	if q.db.hooks != nil {
-		qc = q.buildDeleteHookContext()
 		result, err := q.db.hooks.RunPreMutation(ctx, qc, q.model)
 		if err != nil {
 			return nil, err
@@ -257,22 +262,78 @@ func (q *DeleteQuery) Exec(ctx context.Context) (driver.Result, error) {
 	}
 
 	// Populate raw query info into QueryContext.
-	if qc != nil {
-		qc.RawQuery = query
-		qc.RawArgs = args
-	}
+	qc.RawQuery = query
+	qc.RawArgs = args
 
 	res, err := q.db.Exec(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 
-	// Run post-mutation hooks.
-	if q.db.hooks != nil && qc != nil {
+	// Run operation-level post-mutation hooks.
+	if q.db.hooks != nil {
 		if err := q.db.hooks.RunPostMutation(ctx, qc, q.model, res); err != nil {
 			return nil, err
 		}
 	}
 
+	// Run model AfterDelete hooks.
+	if err := hook.RunModelAfterDelete(ctx, qc, q.model); err != nil {
+		return nil, err
+	}
+
 	return res, nil
+}
+
+// Scan executes the DELETE and scans results. Since MySQL does not support
+// RETURNING, this executes the delete and passes dest to post-mutation hooks.
+func (q *DeleteQuery) Scan(ctx context.Context, dest ...any) error {
+	qc := q.buildDeleteHookContext()
+
+	// Run model BeforeDelete hooks.
+	if err := hook.RunModelBeforeDelete(ctx, qc, q.model); err != nil {
+		return err
+	}
+
+	// Run operation-level pre-mutation hooks.
+	if q.db.hooks != nil {
+		result, err := q.db.hooks.RunPreMutation(ctx, qc, q.model)
+		if err != nil {
+			return err
+		}
+		if result != nil && result.Decision == hook.Deny {
+			if result.Error != nil {
+				return result.Error
+			}
+			return fmt.Errorf("mysqldriver: delete denied by hook")
+		}
+	}
+
+	query, args, err := q.Build()
+	if err != nil {
+		return err
+	}
+
+	// Populate raw query info into QueryContext.
+	qc.RawQuery = query
+	qc.RawArgs = args
+
+	_, err = q.db.Exec(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+
+	// Run operation-level post-mutation hooks.
+	if q.db.hooks != nil {
+		if err := q.db.hooks.RunPostMutation(ctx, qc, q.model, dest); err != nil {
+			return err
+		}
+	}
+
+	// Run model AfterDelete hooks.
+	if err := hook.RunModelAfterDelete(ctx, qc, q.model); err != nil {
+		return err
+	}
+
+	return nil
 }

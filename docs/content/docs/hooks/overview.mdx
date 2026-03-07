@@ -194,6 +194,85 @@ When no `Scope` is provided, the hook applies to all tables and all operations w
 5. **PostQuery / PostMutation** hooks run in priority order
 6. For streams, `StreamRowHook` runs per-row after the stream is opened; a `Skip` decision drops the row, a `Deny` decision stops iteration
 
+## Model-Level Hooks
+
+In addition to operation-level hooks registered on the engine, models can define their own lifecycle hooks by implementing interfaces from the `hook` package. Model hooks are scoped to the specific model being operated on and run around the operation-level hooks.
+
+### Interfaces
+
+| Interface | Method | When Called |
+|-----------|--------|------------|
+| `BeforeInsertHook` | `BeforeInsert(ctx, qc) error` | Before INSERT |
+| `AfterInsertHook` | `AfterInsert(ctx, qc) error` | After INSERT |
+| `BeforeUpdateHook` | `BeforeUpdate(ctx, qc) error` | Before UPDATE |
+| `AfterUpdateHook` | `AfterUpdate(ctx, qc) error` | After UPDATE |
+| `BeforeDeleteHook` | `BeforeDelete(ctx, qc) error` | Before DELETE |
+| `AfterDeleteHook` | `AfterDelete(ctx, qc) error` | After DELETE |
+| `BeforeScanHook` | `BeforeScan(ctx, qc) error` | Before scanning results |
+| `AfterScanHook` | `AfterScan(ctx, qc) error` | After scanning results |
+
+### Example
+
+```go
+type User struct {
+    grove.BaseModel `grove:"table:users"`
+
+    ID        int64     `grove:"id,pk,autoincrement"`
+    Name      string    `grove:"name,notnull"`
+    CreatedAt time.Time `grove:"created_at"`
+    UpdatedAt time.Time `grove:"updated_at"`
+}
+
+// BeforeInsert sets timestamps on new records.
+func (u *User) BeforeInsert(ctx context.Context, qc *hook.QueryContext) error {
+    now := time.Now()
+    u.CreatedAt = now
+    u.UpdatedAt = now
+    return nil
+}
+
+// BeforeUpdate refreshes the updated_at timestamp.
+func (u *User) BeforeUpdate(ctx context.Context, qc *hook.QueryContext) error {
+    u.UpdatedAt = time.Now()
+    return nil
+}
+
+// AfterScan runs post-load transformations (e.g., decryption).
+func (u *User) AfterScan(ctx context.Context, qc *hook.QueryContext) error {
+    // post-load logic here
+    return nil
+}
+```
+
+### Execution Order
+
+Model hooks and operation-level hooks compose in a fixed order:
+
+**Mutations (INSERT / UPDATE / DELETE):**
+
+```
+1. Model BeforeX hook       (e.g., BeforeInsert on the struct)
+2. Engine PreMutation hooks  (operation-level, priority-ordered)
+3. Execute query
+4. Engine PostMutation hooks (operation-level, priority-ordered)
+5. Model AfterX hook        (e.g., AfterInsert on the struct)
+```
+
+**Queries (SELECT):**
+
+```
+1. Engine PreQuery hooks     (operation-level, priority-ordered)
+2. Execute query
+3. Model BeforeScan hook
+4. Scan results into model
+5. Model AfterScan hook
+6. Engine PostQuery hooks    (operation-level, priority-ordered)
+```
+
+### Slice Handling
+
+When operating on a slice (e.g., bulk insert), model hooks are called on each element individually. Nil pointers in pointer slices are skipped. If a hook returns an error, the operation aborts immediately and the error includes the element index (e.g., `"model hook (element 2): validation failed"`).
+
 ## Example: Custom Audit Hook
 
 ```go

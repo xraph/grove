@@ -142,10 +142,15 @@ func (q *DeleteQuery) buildDeleteHookContext() *hook.QueryContext {
 
 // Exec executes the DELETE (ALTER TABLE ... DELETE WHERE).
 func (q *DeleteQuery) Exec(ctx context.Context) (driver.Result, error) {
-	// Run pre-mutation hooks.
-	var qc *hook.QueryContext
+	qc := q.buildDeleteHookContext()
+
+	// Run model BeforeDelete hooks.
+	if err := hook.RunModelBeforeDelete(ctx, qc, q.model); err != nil {
+		return nil, err
+	}
+
+	// Run operation-level pre-mutation hooks.
 	if q.db.hooks != nil {
-		qc = q.buildDeleteHookContext()
 		result, err := q.db.hooks.RunPreMutation(ctx, qc, q.model)
 		if err != nil {
 			return nil, err
@@ -164,21 +169,24 @@ func (q *DeleteQuery) Exec(ctx context.Context) (driver.Result, error) {
 	}
 
 	// Populate raw query info into QueryContext.
-	if qc != nil {
-		qc.RawQuery = query
-		qc.RawArgs = args
-	}
+	qc.RawQuery = query
+	qc.RawArgs = args
 
 	res, err := q.db.Exec(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 
-	// Run post-mutation hooks.
-	if q.db.hooks != nil && qc != nil {
+	// Run operation-level post-mutation hooks.
+	if q.db.hooks != nil {
 		if err := q.db.hooks.RunPostMutation(ctx, qc, q.model, res); err != nil {
 			return nil, err
 		}
+	}
+
+	// Run model AfterDelete hooks.
+	if err := hook.RunModelAfterDelete(ctx, qc, q.model); err != nil {
+		return nil, err
 	}
 
 	return res, nil

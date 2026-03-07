@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"sync"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 )
 
 // Syncer orchestrates the push-pull sync protocol between nodes.
@@ -31,7 +32,7 @@ type Syncer struct {
 	tables         []string
 	interval       time.Duration
 	gossipInterval time.Duration
-	logger         *slog.Logger
+	logger         log.Logger
 
 	// lastSync tracks the last sync HLC per peer (index-based for peers array).
 	mu       sync.Mutex
@@ -44,7 +45,7 @@ func NewSyncer(plugin *Plugin, opts ...SyncerOption) *Syncer {
 		plugin:   plugin,
 		metadata: plugin.metadata,
 		interval: 30 * time.Second,
-		logger:   slog.Default(),
+		logger:   log.NewNoopLogger(),
 		lastSync: make(map[string]HLC),
 	}
 	for _, opt := range opts {
@@ -68,8 +69,8 @@ func (s *Syncer) Sync(ctx context.Context) (*SyncReport, error) {
 		r, err := s.syncWithPeer(ctx, t, peerID)
 		if err != nil {
 			s.logger.Error("crdt: sync failed",
-				slog.String("peer", peerID),
-				slog.String("error", err.Error()),
+				log.String("peer", peerID),
+				log.String("error", err.Error()),
 			)
 			continue
 		}
@@ -92,7 +93,7 @@ func (s *Syncer) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			if _, err := s.Sync(ctx); err != nil {
-				s.logger.Error("crdt: background sync error", slog.String("error", err.Error()))
+				s.logger.Error("crdt: background sync error", log.String("error", err.Error()))
 			}
 		}
 	}
@@ -159,9 +160,9 @@ func (s *Syncer) syncWithPeer(ctx context.Context, t Transport, peerID string) (
 	for _, change := range pullResp.Changes {
 		if err := s.mergeRemoteChange(ctx, change); err != nil {
 			s.logger.Error("crdt: merge remote change failed",
-				slog.String("table", change.Table),
-				slog.String("pk", change.PK),
-				slog.String("error", err.Error()),
+				log.String("table", change.Table),
+				log.String("pk", change.PK),
+				log.String("error", err.Error()),
 			)
 			continue
 		}
@@ -194,7 +195,7 @@ func (s *Syncer) syncWithPeer(ctx context.Context, t Transport, peerID string) (
 			processed, err := s.plugin.syncHooks.BeforeOutboundChange(ctx, &c)
 			if err != nil {
 				s.logger.Error("crdt: outbound change hook error",
-					slog.String("error", err.Error()),
+					log.String("error", err.Error()),
 				)
 				continue
 			}
@@ -339,8 +340,8 @@ func (s *Syncer) StreamSync(ctx context.Context) error {
 			err := st.StreamChanges(ctx, since, func(change ChangeRecord) {
 				if err := s.mergeRemoteChange(ctx, change); err != nil {
 					s.logger.Error("crdt: stream merge error",
-						slog.String("peer", pid),
-						slog.String("error", err.Error()),
+						log.String("peer", pid),
+						log.String("error", err.Error()),
 					)
 					return
 				}
@@ -366,8 +367,8 @@ func (s *Syncer) StreamSync(ctx context.Context) error {
 		r := <-results
 		if r.err != nil && ctx.Err() == nil {
 			s.logger.Error("crdt: stream ended",
-				slog.String("peer", r.peerID),
-				slog.String("error", r.err.Error()),
+				log.String("peer", r.peerID),
+				log.String("error", r.err.Error()),
 			)
 		}
 	}

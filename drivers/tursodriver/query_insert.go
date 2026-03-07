@@ -213,10 +213,15 @@ func (q *InsertQuery) buildInsertHookContext() *hook.QueryContext {
 
 // Exec executes the INSERT.
 func (q *InsertQuery) Exec(ctx context.Context) (driver.Result, error) {
-	// Run pre-mutation hooks.
-	var qc *hook.QueryContext
+	qc := q.buildInsertHookContext()
+
+	// Run model BeforeInsert hooks.
+	if err := hook.RunModelBeforeInsert(ctx, qc, q.model); err != nil {
+		return nil, err
+	}
+
+	// Run operation-level pre-mutation hooks.
 	if q.db.hooks != nil {
-		qc = q.buildInsertHookContext()
 		result, err := q.db.hooks.RunPreMutation(ctx, qc, q.model)
 		if err != nil {
 			return nil, err
@@ -246,21 +251,24 @@ func (q *InsertQuery) Exec(ctx context.Context) (driver.Result, error) {
 	}
 
 	// Populate raw query info into QueryContext.
-	if qc != nil {
-		qc.RawQuery = query
-		qc.RawArgs = args
-	}
+	qc.RawQuery = query
+	qc.RawArgs = args
 
 	res, err := q.db.Exec(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 
-	// Run post-mutation hooks.
-	if q.db.hooks != nil && qc != nil {
+	// Run operation-level post-mutation hooks.
+	if q.db.hooks != nil {
 		if err := q.db.hooks.RunPostMutation(ctx, qc, q.model, res); err != nil {
 			return nil, err
 		}
+	}
+
+	// Run model AfterInsert hooks.
+	if err := hook.RunModelAfterInsert(ctx, qc, q.model); err != nil {
+		return nil, err
 	}
 
 	return res, nil
@@ -268,10 +276,15 @@ func (q *InsertQuery) Exec(ctx context.Context) (driver.Result, error) {
 
 // Scan executes the INSERT with RETURNING and scans results into dest.
 func (q *InsertQuery) Scan(ctx context.Context, dest ...any) error {
-	// Run pre-mutation hooks.
-	var qc *hook.QueryContext
+	qc := q.buildInsertHookContext()
+
+	// Run model BeforeInsert hooks.
+	if err := hook.RunModelBeforeInsert(ctx, qc, q.model); err != nil {
+		return err
+	}
+
+	// Run operation-level pre-mutation hooks.
 	if q.db.hooks != nil {
-		qc = q.buildInsertHookContext()
 		result, err := q.db.hooks.RunPreMutation(ctx, qc, q.model)
 		if err != nil {
 			return err
@@ -290,21 +303,24 @@ func (q *InsertQuery) Scan(ctx context.Context, dest ...any) error {
 	}
 
 	// Populate raw query info into QueryContext.
-	if qc != nil {
-		qc.RawQuery = query
-		qc.RawArgs = args
-	}
+	qc.RawQuery = query
+	qc.RawArgs = args
 
 	row := q.db.QueryRow(ctx, query, args...)
 	if err := row.Scan(dest...); err != nil {
 		return err
 	}
 
-	// Run post-mutation hooks.
-	if q.db.hooks != nil && qc != nil {
+	// Run operation-level post-mutation hooks.
+	if q.db.hooks != nil {
 		if err := q.db.hooks.RunPostMutation(ctx, qc, q.model, dest); err != nil {
 			return err
 		}
+	}
+
+	// Run model AfterInsert hooks.
+	if err := hook.RunModelAfterInsert(ctx, qc, q.model); err != nil {
+		return err
 	}
 
 	return nil
@@ -331,11 +347,15 @@ func (q *InsertQuery) execPrepared(ctx context.Context, qc *hook.QueryContext) (
 		if execErr != nil {
 			return nil, execErr
 		}
-		// Run post-mutation hooks.
-		if q.db.hooks != nil && qc != nil {
+		// Run operation-level post-mutation hooks.
+		if q.db.hooks != nil {
 			if err := q.db.hooks.RunPostMutation(ctx, qc, q.model, result); err != nil {
 				return nil, err
 			}
+		}
+		// Run model AfterInsert hooks.
+		if err := hook.RunModelAfterInsert(ctx, qc, q.model); err != nil {
+			return nil, err
 		}
 		return result, nil
 	}
@@ -359,11 +379,16 @@ func (q *InsertQuery) execPrepared(ctx context.Context, qc *hook.QueryContext) (
 		return nil, fmt.Errorf("tursodriver: bulk insert commit: %w", err)
 	}
 
-	// Run post-mutation hooks.
-	if q.db.hooks != nil && qc != nil {
+	// Run operation-level post-mutation hooks.
+	if q.db.hooks != nil {
 		if err := q.db.hooks.RunPostMutation(ctx, qc, q.model, result); err != nil {
 			return nil, err
 		}
+	}
+
+	// Run model AfterInsert hooks.
+	if err := hook.RunModelAfterInsert(ctx, qc, q.model); err != nil {
+		return nil, err
 	}
 
 	return result, nil

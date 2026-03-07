@@ -15,7 +15,10 @@ require (
 require (
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
+	github.com/xraph/go-utils v1.0.0 // indirect
 	github.com/xraph/grove v0.0.0 // indirect
-	golang.org/x/sys v0.31.0 // indirect
+	go.uber.org/multierr v1.11.0 // indirect
+	go.uber.org/zap v1.27.1 // indirect
+	golang.org/x/sys v0.39.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
 )

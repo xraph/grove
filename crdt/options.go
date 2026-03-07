@@ -1,8 +1,9 @@
 package crdt
 
 import (
-	"log/slog"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 )
 
 // Option configures the CRDT plugin.
@@ -130,6 +131,6 @@ func WithStreamReconnect(d time.Duration) StreamingOption {
 }
 
 // WithStreamLogger sets the logger for the streaming transport.
-func WithStreamLogger(l *slog.Logger) StreamingOption {
+func WithStreamLogger(l log.Logger) StreamingOption {
 	return func(t *StreamingTransport) { t.logger = l }
 }

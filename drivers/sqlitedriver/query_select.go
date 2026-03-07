@@ -427,26 +427,40 @@ func (q *SelectQuery) BuildCount() (string, []any, error) {
 	return buf.String(), q.args, nil
 }
 
+// buildSelectHookContext creates a hook.QueryContext for select operations.
+func (q *SelectQuery) buildSelectHookContext() *hook.QueryContext {
+	var modelType reflect.Type
+	if q.table != nil {
+		modelType = q.table.ModelType
+	}
+	tableName := ""
+	if q.table != nil {
+		tableName = q.table.Name
+	}
+	return &hook.QueryContext{
+		Operation: hook.OpSelect,
+		Table:     tableName,
+		ModelType: modelType,
+	}
+}
+
 // Scan executes the query and scans results into the model.
 func (q *SelectQuery) Scan(ctx context.Context, dest ...any) error {
-	// Build the QueryContext for hooks.
-	var qc *hook.QueryContext
-	if q.db.hooks != nil {
-		var modelType reflect.Type
-		if q.table != nil {
-			modelType = q.table.ModelType
-		}
-		tableName := ""
-		if q.table != nil {
-			tableName = q.table.Name
-		}
-		qc = &hook.QueryContext{
-			Operation: hook.OpSelect,
-			Table:     tableName,
-			ModelType: modelType,
-		}
+	qc := q.buildSelectHookContext()
 
-		// Run pre-query hooks.
+	// Determine scan target early for model hooks.
+	target := q.model
+	if len(dest) > 0 {
+		target = dest[0]
+	}
+
+	// Run model BeforeScan hooks.
+	if err := hook.RunModelBeforeScan(ctx, qc, target); err != nil {
+		return err
+	}
+
+	// Run operation-level pre-query hooks.
+	if q.db.hooks != nil {
 		result, err := q.db.hooks.RunPreQuery(ctx, qc)
 		if err != nil {
 			return err
@@ -474,16 +488,8 @@ func (q *SelectQuery) Scan(ctx context.Context, dest ...any) error {
 	}
 
 	// Populate raw query info into QueryContext for post-query hooks.
-	if qc != nil {
-		qc.RawQuery = sqlStr
-		qc.RawArgs = args
-	}
-
-	// Determine scan target.
-	target := q.model
-	if len(dest) > 0 {
-		target = dest[0]
-	}
+	qc.RawQuery = sqlStr
+	qc.RawArgs = args
 
 	if target == nil {
 		return fmt.Errorf("sqlitedriver: Scan requires a destination; pass a model to NewSelect or provide dest")
@@ -516,11 +522,15 @@ func (q *SelectQuery) Scan(ctx context.Context, dest ...any) error {
 			if err := q.loadRelations(ctx, target); err != nil {
 				return err
 			}
-			// Run post-query hooks.
-			if q.db.hooks != nil && qc != nil {
+			// Run operation-level post-query hooks.
+			if q.db.hooks != nil {
 				if err := q.db.hooks.RunPostQuery(ctx, qc, target); err != nil {
 					return err
 				}
+			}
+			// Run model AfterScan hooks.
+			if err := hook.RunModelAfterScan(ctx, qc, target); err != nil {
+				return err
 			}
 			return nil
 		}
@@ -535,11 +545,15 @@ func (q *SelectQuery) Scan(ctx context.Context, dest ...any) error {
 	if err := q.loadRelations(ctx, target); err != nil {
 		return err
 	}
-	// Run post-query hooks.
-	if q.db.hooks != nil && qc != nil {
+	// Run operation-level post-query hooks.
+	if q.db.hooks != nil {
 		if err := q.db.hooks.RunPostQuery(ctx, qc, target); err != nil {
 			return err
 		}
+	}
+	// Run model AfterScan hooks.
+	if err := hook.RunModelAfterScan(ctx, qc, target); err != nil {
+		return err
 	}
 	return nil
 }

@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 )
 
 // SyncController handles CRDT sync operations. It provides handlers for
@@ -21,7 +22,7 @@ type SyncController struct {
 	hooks              *SyncHookChain
 	streamPollInterval time.Duration
 	streamKeepAlive    time.Duration
-	logger             *slog.Logger
+	logger             log.Logger
 
 	// Presence subsystem (nil when disabled).
 	presenceEnabled bool
@@ -38,7 +39,7 @@ func NewSyncController(plugin *Plugin, opts ...SyncControllerOption) *SyncContro
 		hooks:              NewSyncHookChain(),
 		streamPollInterval: 1 * time.Second,
 		streamKeepAlive:    15 * time.Second,
-		logger:             slog.Default(),
+		logger:             log.NewNoopLogger(),
 	}
 	// Include plugin-level sync hooks.
 	if plugin.syncHooks != nil {
@@ -59,8 +60,8 @@ func NewSyncController(plugin *Plugin, opts ...SyncControllerOption) *SyncContro
 			case c.presenceCh <- event:
 			default:
 				c.logger.Warn("crdt: presence event dropped (channel full)",
-					slog.String("topic", event.Topic),
-					slog.String("node_id", event.NodeID),
+					log.String("topic", event.Topic),
+					log.String("node_id", event.NodeID),
 				)
 			}
 		}, c.logger)
@@ -210,7 +211,7 @@ func (c *SyncController) StreamChangesSince(ctx context.Context, tables []string
 					changes, err := c.metadata.ReadChangesSince(ctx, table, lastHLC)
 					if err != nil {
 						c.logger.Error("crdt: stream read error",
-							slog.String("error", err.Error()),
+							log.String("error", err.Error()),
 						)
 						continue
 					}
@@ -225,7 +226,7 @@ func (c *SyncController) StreamChangesSince(ctx context.Context, tables []string
 				filtered, err := c.hooks.BeforeOutboundRead(ctx, allChanges)
 				if err != nil {
 					c.logger.Error("crdt: stream outbound hook error",
-						slog.String("error", err.Error()),
+						log.String("error", err.Error()),
 					)
 					continue
 				}

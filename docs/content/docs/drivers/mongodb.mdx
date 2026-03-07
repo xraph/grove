@@ -116,6 +116,85 @@ type User struct {
 
 The `id` field is automatically mapped to MongoDB's `_id` field. If the primary key has a zero value on insert, it is omitted so MongoDB generates an `_id` automatically.
 
+## Collection Management
+
+### Create Collection with Schema Validation
+
+`NewCreateCollection` creates a MongoDB collection with `$jsonSchema` validation derived from the model. This is the MongoDB equivalent of `CREATE TABLE` in SQL drivers.
+
+```go
+mdb := mongodriver.Unwrap(db)
+
+err := mdb.NewCreateCollection((*User)(nil)).
+    ValidationLevel("strict").
+    ValidationAction("error").
+    AdditionalProperties(false).
+    IfNotExists().
+    Exec(ctx)
+```
+
+| Method | Default | Description |
+|--------|---------|-------------|
+| `Collection(name)` | derived from model | Override collection name |
+| `ValidationLevel(level)` | `"strict"` | `"strict"`, `"moderate"`, or `"off"` |
+| `ValidationAction(action)` | `"error"` | `"error"` or `"warn"` |
+| `AdditionalProperties(bool)` | unset (MongoDB default: true) | Whether documents can have fields not in the schema |
+| `IfNotExists()` | false | No-op if the collection already exists |
+
+### Inspect the Generated Schema
+
+Use `BuildSchema()` to get the `$jsonSchema` document without executing:
+
+```go
+q := mdb.NewCreateCollection((*User)(nil)).
+    AdditionalProperties(false)
+
+schema, err := q.BuildSchema()
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("%+v\n", schema)
+```
+
+### Go Type to BSON Type Mapping
+
+The schema generator maps Go types to BSON types automatically:
+
+| Go Type | BSON Type |
+|---------|-----------|
+| `string` | `"string"` |
+| `bool` | `"bool"` |
+| `int`, `int8`, `int16`, `int32` | `"int"` |
+| `int64` | `"long"` |
+| `uint`, `uint8`, `uint16`, `uint32` | `"int"` |
+| `uint64` | `"long"` |
+| `float32`, `float64` | `"double"` |
+| `time.Time` | `"date"` |
+| `bson.ObjectID` | `"objectId"` |
+| `[]byte` | `"binData"` |
+| other slices | `"array"` |
+| maps, structs | `"object"` |
+
+The `type:` tag overrides this mapping. For example, `grove:"data,type:decimal"` forces the BSON type to `"decimal"` regardless of Go type.
+
+### Schema Behavior
+
+- Fields tagged `pk` or `notnull` become entries in the `required` array
+- A primary key with column name `id` is remapped to `_id`
+- Fields tagged `scanonly` or `-` are excluded from the schema
+- Pointer types are dereferenced before mapping (e.g., `*string` maps to `"string"`)
+
+### Drop Collection
+
+```go
+err := mdb.NewDropCollection((*User)(nil)).Exec(ctx)
+
+// With a custom collection name:
+err = mdb.NewDropCollection((*User)(nil)).
+    Collection("archived_users").
+    Exec(ctx)
+```
+
 ## Find Queries
 
 Create find queries with `NewFind`. Pass a pointer to a struct (single result) or a pointer to a slice (multiple results).

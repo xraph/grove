@@ -1,6 +1,7 @@
 {
   "title": "Core Concepts",
   "pages": [
+    "models",
     "dual-tags",
     "native-syntax",
     "zero-reflection",

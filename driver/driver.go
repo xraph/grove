@@ -7,8 +7,9 @@ package driver
 
 import (
 	"context"
-	"log/slog"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 )
 
 // Driver is the core interface every database backend implements.
@@ -51,7 +52,7 @@ type Option func(*DriverOptions)
 type DriverOptions struct { //nolint:revive // DriverOptions is the established public API name
 	PoolSize     int
 	QueryTimeout time.Duration
-	Logger       *slog.Logger
+	Logger       log.Logger
 	Extra        map[string]any // driver-specific options
 }
 
@@ -60,7 +61,7 @@ func DefaultDriverOptions() *DriverOptions {
 	return &DriverOptions{
 		PoolSize:     10,
 		QueryTimeout: 30 * time.Second,
-		Logger:       slog.Default(),
+		Logger:       log.NewNoopLogger(),
 	}
 }
 
@@ -79,7 +80,7 @@ func WithQueryTimeout(d time.Duration) Option {
 }
 
 // WithLogger returns an Option that sets the structured logger.
-func WithLogger(l *slog.Logger) Option {
+func WithLogger(l log.Logger) Option {
 	return func(o *DriverOptions) {
 		o.Logger = l
 	}

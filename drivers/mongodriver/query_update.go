@@ -3,11 +3,13 @@ package mongodriver
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
+	"github.com/xraph/grove/hook"
 	"github.com/xraph/grove/schema"
 )
 
@@ -116,6 +118,27 @@ func (q *UpdateQuery) IsMany() bool {
 	return q.many
 }
 
+// buildUpdateHookContext creates a hook.QueryContext for update operations.
+func (q *UpdateQuery) buildUpdateHookContext() *hook.QueryContext {
+	var modelType reflect.Type
+	if q.table != nil {
+		modelType = q.table.ModelType
+	}
+	tableName := ""
+	if q.table != nil {
+		tableName = q.table.Name
+	}
+	op := hook.OpUpdate
+	if q.many {
+		op = hook.OpBulkUpdate
+	}
+	return &hook.QueryContext{
+		Operation: op,
+		Table:     tableName,
+		ModelType: modelType,
+	}
+}
+
 // Exec executes the update operation.
 func (q *UpdateQuery) Exec(ctx context.Context) (*mongoResult, error) {
 	if q.err != nil {
@@ -134,16 +157,57 @@ func (q *UpdateQuery) Exec(ctx context.Context) (*mongoResult, error) {
 		q.update = bson.M{"$set": setDoc}
 	}
 
+	qc := q.buildUpdateHookContext()
+
+	// Run model BeforeUpdate hooks.
+	if err := hook.RunModelBeforeUpdate(ctx, qc, q.model); err != nil {
+		return nil, err
+	}
+
+	// Run operation-level pre-mutation hooks.
+	if q.db.hooks != nil {
+		result, err := q.db.hooks.RunPreMutation(ctx, qc, q.model)
+		if err != nil {
+			return nil, err
+		}
+		if result != nil && result.Decision == hook.Deny {
+			if result.Error != nil {
+				return nil, result.Error
+			}
+			return nil, fmt.Errorf("mongodriver: update denied by hook")
+		}
+	}
+
 	coll := q.db.Collection(q.collection)
 
 	if q.session != nil {
 		ctx = mongo.NewSessionContext(ctx, q.session)
 	}
 
+	var res *mongoResult
+	var execErr error
 	if q.many {
-		return q.updateMany(ctx, coll)
+		res, execErr = q.updateMany(ctx, coll)
+	} else {
+		res, execErr = q.updateOne(ctx, coll)
 	}
-	return q.updateOne(ctx, coll)
+	if execErr != nil {
+		return nil, execErr
+	}
+
+	// Run operation-level post-mutation hooks.
+	if q.db.hooks != nil {
+		if err := q.db.hooks.RunPostMutation(ctx, qc, q.model, res); err != nil {
+			return nil, err
+		}
+	}
+
+	// Run model AfterUpdate hooks.
+	if err := hook.RunModelAfterUpdate(ctx, qc, q.model); err != nil {
+		return nil, err
+	}
+
+	return res, nil
 }
 
 // updateOne updates a single document.

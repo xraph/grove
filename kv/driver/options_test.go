@@ -2,12 +2,12 @@ package driver_test
 
 import (
 	"crypto/tls"
-	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 
+	log "github.com/xraph/go-utils/log"
 	"github.com/xraph/grove/kv/driver"
 )
 
@@ -61,7 +61,7 @@ func TestApplyOptions_TLSConfig(t *testing.T) {
 }
 
 func TestApplyOptions_Logger(t *testing.T) {
-	logger := slog.Default()
+	logger := log.NewNoopLogger()
 	opts := driver.ApplyOptions([]driver.Option{
 		driver.WithLogger(logger),
 	})
@@ -69,7 +69,7 @@ func TestApplyOptions_Logger(t *testing.T) {
 }
 
 func TestApplyOptions_Combined(t *testing.T) {
-	logger := slog.Default()
+	logger := log.NewNoopLogger()
 	cfg := &tls.Config{MinVersion: tls.VersionTLS13}
 
 	opts := driver.ApplyOptions([]driver.Option{

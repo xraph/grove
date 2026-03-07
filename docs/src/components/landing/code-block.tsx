@@ -3,105 +3,145 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/cn";
 
-// Simple Go syntax highlighter
+// HTML-escape a plain text string.
+function esc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Tokenize-then-render Go syntax highlighter.
+// Pass 1: a single regex with alternation matches tokens in priority order.
+// Pass 2: each token maps to an HTML span; unmatched text is plain (escaped).
 function highlightGo(code: string): string {
-  // Order matters: do strings first to avoid highlighting keywords inside strings
-  let result = code;
+  const goKeywords = new Set([
+    "package", "import", "func", "return", "if", "else", "for", "range",
+    "var", "const", "type", "struct", "interface", "map", "chan", "go",
+    "defer", "select", "case", "switch", "default", "break", "continue",
+    "fallthrough", "nil", "true", "false", "err",
+  ]);
+  const goTypes = new Set([
+    "string", "int", "int64", "float64", "bool", "error", "byte", "rune", "any",
+  ]);
 
-  // Escape HTML first
-  result = result
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  // Groups: 1=comment, 2=string, 3=backtick-string, 4=word, 5=func-call (UpperWord before '(')
+  const tokenRe =
+    /(\/\/.*$)|("(?:[^"\\]|\\.)*")|(`[^`]*`)|(\b[a-zA-Z_]\w*(?:\.\w+)*\b)|\b([A-Z]\w*)\s*(?=\()/gm;
 
-  // Comments (single-line)
-  result = result.replace(
-    /(\/\/.*$)/gm,
-    '<span className="text-fd-muted-foreground/60 italic">$1</span>',
-  );
+  let out = "";
+  let last = 0;
+  let m: RegExpExecArray | null;
 
-  // Strings (double-quoted)
-  result = result.replace(
-    /("(?:[^"\\]|\\.)*")/g,
-    '<span className="text-teal-400">$1</span>',
-  );
+  while ((m = tokenRe.exec(code)) !== null) {
+    // Append any unmatched text before this token.
+    if (m.index > last) {
+      out += esc(code.slice(last, m.index));
+    }
+    last = m.index + m[0].length;
 
-  // Backtick strings
-  result = result.replace(
-    /(`[^`]*`)/g,
-    '<span className="text-teal-400">$1</span>',
-  );
+    if (m[1] != null) {
+      // Comment
+      out += `<span class="text-fd-muted-foreground/60 italic">${esc(m[1])}</span>`;
+    } else if (m[2] != null) {
+      // Double-quoted string
+      out += `<span class="text-teal-400">${esc(m[2])}</span>`;
+    } else if (m[3] != null) {
+      // Backtick string
+      out += `<span class="text-teal-400">${esc(m[3])}</span>`;
+    } else if (m[4] != null) {
+      const word = m[4];
+      // Check for "context.Context" style compound types
+      if (word === "context.Context") {
+        out += `<span class="text-cyan-400">${esc(word)}</span>`;
+      } else if (goKeywords.has(word)) {
+        out += `<span class="text-purple-400 font-medium">${esc(word)}</span>`;
+      } else if (goTypes.has(word)) {
+        out += `<span class="text-cyan-400">${esc(word)}</span>`;
+      } else if (/^[A-Z]/.test(word) && code.slice(last).trimStart().startsWith("(")) {
+        // Uppercase word followed by '(' — function/method call
+        out += `<span class="text-blue-400">${esc(word)}</span>`;
+      } else {
+        out += esc(word);
+      }
+    } else if (m[5] != null) {
+      out += `<span class="text-blue-400">${esc(m[5])}</span>`;
+    }
+  }
 
-  // Keywords
-  const keywords = [
-    "package",
-    "import",
-    "func",
-    "return",
-    "if",
-    "else",
-    "for",
-    "range",
-    "var",
-    "const",
-    "type",
-    "struct",
-    "interface",
-    "map",
-    "chan",
-    "go",
-    "defer",
-    "select",
-    "case",
-    "switch",
-    "default",
-    "break",
-    "continue",
-    "fallthrough",
-    "nil",
-    "true",
-    "false",
-    "err",
-  ];
-  keywords.forEach((kw) => {
-    const regex = new RegExp(`\\b(${kw})\\b`, "g");
-    result = result.replace(
-      regex,
-      '<span class="text-purple-400 font-medium">$1</span>',
-    );
-  });
+  // Append remaining text.
+  if (last < code.length) {
+    out += esc(code.slice(last));
+  }
 
-  // Types
-  const types = [
-    "string",
-    "int",
-    "int64",
-    "float64",
-    "bool",
-    "error",
-    "byte",
-    "rune",
-    "any",
-    "context\\.Context",
-  ];
-  types.forEach((t) => {
-    const regex = new RegExp(`\\b(${t})\\b`, "g");
-    result = result.replace(regex, '<span class="text-cyan-400">$1</span>');
-  });
+  return out;
+}
 
-  // Function calls
-  result = result.replace(
-    /\b([A-Z]\w*)\s*\(/g,
-    '<span class="text-blue-400">$1</span>(',
-  );
+// Tokenize-then-render TSX/JSX syntax highlighter.
+function highlightTSX(code: string): string {
+  const tsxKeywords = new Set([
+    "import", "export", "from", "const", "let", "var", "function", "return",
+    "if", "else", "for", "while", "default", "new", "this", "class",
+    "extends", "async", "await", "typeof", "instanceof", "null", "undefined",
+    "true", "false",
+  ]);
 
-  // Method calls (after dot)
-  result = result.replace(
-    /\.([A-Z]\w*)\s*\(/g,
-    '.<span class="text-blue-400">$1</span>(',
-  );
+  // Tokenize: groups in priority order.
+  // 1=comment, 2=double-string, 3=single-string, 4=backtick-string,
+  // 5=arrow (=>), 6=JSX tag (<Tag or </Tag), 7=word, 8=curly block {…}
+  const tokenRe =
+    /(\/\/.*$)|("(?:[^"\\]|\\.)*")|('(?:[^'\\]|\\.)*')|(`[^`]*`)|(=>)|(<\/?)([\w.]+)|(\b[a-zA-Z_][\w]*\b)|(\{[^}]*\})/gm;
 
-  return result;
+  let out = "";
+  let last = 0;
+  let m: RegExpExecArray | null;
+
+  // Track whether we're inside a JSX tag (between < and >) for prop detection.
+  while ((m = tokenRe.exec(code)) !== null) {
+    if (m.index > last) {
+      out += esc(code.slice(last, m.index));
+    }
+    last = m.index + m[0].length;
+
+    if (m[1] != null) {
+      // Comment
+      out += `<span class="text-fd-muted-foreground/60 italic">${esc(m[1])}</span>`;
+    } else if (m[2] != null) {
+      // Double-quoted string
+      out += `<span class="text-teal-400">${esc(m[2])}</span>`;
+    } else if (m[3] != null) {
+      // Single-quoted string
+      out += `<span class="text-teal-400">${esc(m[3])}</span>`;
+    } else if (m[4] != null) {
+      // Backtick string
+      out += `<span class="text-teal-400">${esc(m[4])}</span>`;
+    } else if (m[5] != null) {
+      // Arrow function =>
+      out += `<span class="text-purple-400">${esc(m[5])}</span>`;
+    } else if (m[6] != null && m[7] != null) {
+      // JSX tag: <Tag or </Tag
+      out += `${esc(m[6])}<span class="text-blue-400">${esc(m[7])}</span>`;
+    } else if (m[8] != null) {
+      const word = m[8];
+      // Check if this word is followed by '=' (JSX prop)
+      const afterWord = code.slice(last);
+      if (afterWord.startsWith("=") && !afterWord.startsWith("==")) {
+        out += `<span class="text-cyan-400">${esc(word)}</span>`;
+      } else if (tsxKeywords.has(word)) {
+        out += `<span class="text-purple-400 font-medium">${esc(word)}</span>`;
+      } else {
+        out += esc(word);
+      }
+    } else if (m[9] != null) {
+      // Curly block {…} — highlight inner content
+      const block = m[9];
+      const inner = block.slice(1, -1);
+      out += `{<span class="text-amber-300">${esc(inner)}</span>}`;
+    }
+  }
+
+  if (last < code.length) {
+    out += esc(code.slice(last));
+  }
+
+  return out;
 }
 
 interface CodeBlockProps {
@@ -109,6 +149,7 @@ interface CodeBlockProps {
   filename?: string;
   className?: string;
   showLineNumbers?: boolean;
+  language?: "go" | "tsx";
 }
 
 export function CodeBlock({
@@ -116,6 +157,7 @@ export function CodeBlock({
   filename,
   className,
   showLineNumbers = true,
+  language = "go",
 }: CodeBlockProps) {
   const [copied, setCopied] = useState(false);
   const codeRef = useRef<HTMLPreElement>(null);
@@ -132,8 +174,9 @@ export function CodeBlock({
     setCopied(true);
   };
 
+  const highlighter = language === "tsx" ? highlightTSX : highlightGo;
   const lines = code.split("\n");
-  const highlighted = lines.map((line) => highlightGo(line));
+  const highlighted = lines.map((line) => highlighter(line));
 
   return (
     <div

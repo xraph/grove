@@ -1,10 +1,10 @@
 package driver
 
 import (
-	"log/slog"
-	"os"
 	"testing"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 )
 
 func TestDefaultDriverOptions(t *testing.T) {
@@ -43,7 +43,7 @@ func TestWithQueryTimeout(t *testing.T) {
 }
 
 func TestWithLogger(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := log.NewNoopLogger()
 	opts := ApplyOptions([]Option{WithLogger(logger)})
 	if opts.Logger != logger {
 		t.Error("expected Logger to be the one provided")
@@ -51,7 +51,7 @@ func TestWithLogger(t *testing.T) {
 }
 
 func TestApplyOptionsMultiple(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	logger := log.NewNoopLogger()
 	opts := ApplyOptions([]Option{
 		WithPoolSize(50),
 		WithQueryTimeout(10 * time.Second),

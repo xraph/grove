@@ -2,8 +2,9 @@ package driver
 
 import (
 	"crypto/tls"
-	"log/slog"
 	"time"
+
+	log "github.com/xraph/go-utils/log"
 )
 
 // Option configures driver-level settings.
@@ -16,7 +17,7 @@ type DriverOptions struct {
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	TLSConfig    *tls.Config
-	Logger       *slog.Logger
+	Logger       log.Logger
 	Extra        map[string]any
 }
 
@@ -66,6 +67,6 @@ func WithTLSConfig(cfg *tls.Config) Option {
 }
 
 // WithLogger sets the logger.
-func WithLogger(l *slog.Logger) Option {
+func WithLogger(l log.Logger) Option {
 	return func(o *DriverOptions) { o.Logger = l }
 }

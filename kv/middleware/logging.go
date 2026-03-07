@@ -6,16 +6,16 @@ package middleware
 
 import (
 	"context"
-	"log/slog"
 	"time"
 
+	log "github.com/xraph/go-utils/log"
 	"github.com/xraph/grove/hook"
 	kv "github.com/xraph/grove/kv"
 )
 
 // LoggingHook logs every KV operation with structured fields.
 type LoggingHook struct {
-	logger *slog.Logger
+	logger log.Logger
 }
 
 var (
@@ -24,7 +24,7 @@ var (
 )
 
 // NewLogging creates a new logging middleware.
-func NewLogging(logger *slog.Logger) *LoggingHook {
+func NewLogging(logger log.Logger) *LoggingHook {
 	return &LoggingHook{logger: logger}
 }
 
@@ -39,9 +39,9 @@ func (h *LoggingHook) BeforeQuery(ctx context.Context, qc *hook.QueryContext) (*
 func (h *LoggingHook) AfterQuery(ctx context.Context, qc *hook.QueryContext, result any) error {
 	start, _ := qc.Values["_log_start"].(time.Time)
 	h.logger.Info("kv command",
-		slog.String("op", kv.CommandName(qc.Operation)),
-		slog.String("key", qc.RawQuery),
-		slog.Duration("latency", time.Since(start)),
+		log.String("op", kv.CommandName(qc.Operation)),
+		log.String("key", qc.RawQuery),
+		log.Duration("latency", time.Since(start)),
 	)
 	return nil
 }

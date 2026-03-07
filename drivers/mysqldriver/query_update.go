@@ -240,10 +240,15 @@ func (q *UpdateQuery) buildUpdateHookContext() *hook.QueryContext {
 
 // Exec executes the UPDATE.
 func (q *UpdateQuery) Exec(ctx context.Context) (driver.Result, error) {
-	// Run pre-mutation hooks.
-	var qc *hook.QueryContext
+	qc := q.buildUpdateHookContext()
+
+	// Run model BeforeUpdate hooks.
+	if err := hook.RunModelBeforeUpdate(ctx, qc, q.model); err != nil {
+		return nil, err
+	}
+
+	// Run operation-level pre-mutation hooks.
 	if q.db.hooks != nil {
-		qc = q.buildUpdateHookContext()
 		result, err := q.db.hooks.RunPreMutation(ctx, qc, q.model)
 		if err != nil {
 			return nil, err
@@ -262,21 +267,24 @@ func (q *UpdateQuery) Exec(ctx context.Context) (driver.Result, error) {
 	}
 
 	// Populate raw query info into QueryContext.
-	if qc != nil {
-		qc.RawQuery = query
-		qc.RawArgs = args
-	}
+	qc.RawQuery = query
+	qc.RawArgs = args
 
 	res, err := q.db.Exec(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 
-	// Run post-mutation hooks.
-	if q.db.hooks != nil && qc != nil {
+	// Run operation-level post-mutation hooks.
+	if q.db.hooks != nil {
 		if err := q.db.hooks.RunPostMutation(ctx, qc, q.model, res); err != nil {
 			return nil, err
 		}
+	}
+
+	// Run model AfterUpdate hooks.
+	if err := hook.RunModelAfterUpdate(ctx, qc, q.model); err != nil {
+		return nil, err
 	}
 
 	return res, nil
@@ -285,10 +293,15 @@ func (q *UpdateQuery) Exec(ctx context.Context) (driver.Result, error) {
 // Scan executes the UPDATE and scans results. Since MySQL does not support
 // RETURNING, this falls back to a separate SELECT query after the UPDATE.
 func (q *UpdateQuery) Scan(ctx context.Context, dest ...any) error {
-	// Run pre-mutation hooks.
-	var qc *hook.QueryContext
+	qc := q.buildUpdateHookContext()
+
+	// Run model BeforeUpdate hooks.
+	if err := hook.RunModelBeforeUpdate(ctx, qc, q.model); err != nil {
+		return err
+	}
+
+	// Run operation-level pre-mutation hooks.
 	if q.db.hooks != nil {
-		qc = q.buildUpdateHookContext()
 		result, err := q.db.hooks.RunPreMutation(ctx, qc, q.model)
 		if err != nil {
 			return err
@@ -307,21 +320,24 @@ func (q *UpdateQuery) Scan(ctx context.Context, dest ...any) error {
 	}
 
 	// Populate raw query info into QueryContext.
-	if qc != nil {
-		qc.RawQuery = query
-		qc.RawArgs = args
-	}
+	qc.RawQuery = query
+	qc.RawArgs = args
 
 	_, err = q.db.Exec(ctx, query, args...)
 	if err != nil {
 		return err
 	}
 
-	// Run post-mutation hooks.
-	if q.db.hooks != nil && qc != nil {
+	// Run operation-level post-mutation hooks.
+	if q.db.hooks != nil {
 		if err := q.db.hooks.RunPostMutation(ctx, qc, q.model, dest); err != nil {
 			return err
 		}
+	}
+
+	// Run model AfterUpdate hooks.
+	if err := hook.RunModelAfterUpdate(ctx, qc, q.model); err != nil {
+		return err
 	}
 
 	return nil
