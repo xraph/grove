@@ -177,14 +177,15 @@ func runModelHook(ctx context.Context, qc *QueryContext, model any, fn hookFn) e
 		for i := 0; i < val.Len(); i++ {
 			elem := val.Index(i)
 			var iface any
-			if elem.Kind() == reflect.Ptr {
+			switch {
+			case elem.Kind() == reflect.Ptr:
 				if elem.IsNil() {
 					continue
 				}
 				iface = elem.Interface()
-			} else if elem.CanAddr() {
+			case elem.CanAddr():
 				iface = elem.Addr().Interface()
-			} else {
+			default:
 				continue
 			}
 			if err := fn(ctx, qc, iface); err != nil {
