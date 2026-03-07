@@ -13,13 +13,45 @@ function esc(s: string): string {
 // Pass 2: each token maps to an HTML span; unmatched text is plain (escaped).
 function highlightGo(code: string): string {
   const goKeywords = new Set([
-    "package", "import", "func", "return", "if", "else", "for", "range",
-    "var", "const", "type", "struct", "interface", "map", "chan", "go",
-    "defer", "select", "case", "switch", "default", "break", "continue",
-    "fallthrough", "nil", "true", "false", "err",
+    "package",
+    "import",
+    "func",
+    "return",
+    "if",
+    "else",
+    "for",
+    "range",
+    "var",
+    "const",
+    "type",
+    "struct",
+    "interface",
+    "map",
+    "chan",
+    "go",
+    "defer",
+    "select",
+    "case",
+    "switch",
+    "default",
+    "break",
+    "continue",
+    "fallthrough",
+    "nil",
+    "true",
+    "false",
+    "err",
   ]);
   const goTypes = new Set([
-    "string", "int", "int64", "float64", "bool", "error", "byte", "rune", "any",
+    "string",
+    "int",
+    "int64",
+    "float64",
+    "bool",
+    "error",
+    "byte",
+    "rune",
+    "any",
   ]);
 
   // Groups: 1=comment, 2=string, 3=backtick-string, 4=word, 5=func-call (UpperWord before '(')
@@ -28,9 +60,8 @@ function highlightGo(code: string): string {
 
   let out = "";
   let last = 0;
-  let m: RegExpExecArray | null;
 
-  while ((m = tokenRe.exec(code)) !== null) {
+  for (let m = tokenRe.exec(code); m !== null; m = tokenRe.exec(code)) {
     // Append any unmatched text before this token.
     if (m.index > last) {
       out += esc(code.slice(last, m.index));
@@ -55,7 +86,10 @@ function highlightGo(code: string): string {
         out += `<span class="text-purple-400 font-medium">${esc(word)}</span>`;
       } else if (goTypes.has(word)) {
         out += `<span class="text-cyan-400">${esc(word)}</span>`;
-      } else if (/^[A-Z]/.test(word) && code.slice(last).trimStart().startsWith("(")) {
+      } else if (
+        /^[A-Z]/.test(word) &&
+        code.slice(last).trimStart().startsWith("(")
+      ) {
         // Uppercase word followed by '(' — function/method call
         out += `<span class="text-blue-400">${esc(word)}</span>`;
       } else {
@@ -77,10 +111,31 @@ function highlightGo(code: string): string {
 // Tokenize-then-render TSX/JSX syntax highlighter.
 function highlightTSX(code: string): string {
   const tsxKeywords = new Set([
-    "import", "export", "from", "const", "let", "var", "function", "return",
-    "if", "else", "for", "while", "default", "new", "this", "class",
-    "extends", "async", "await", "typeof", "instanceof", "null", "undefined",
-    "true", "false",
+    "import",
+    "export",
+    "from",
+    "const",
+    "let",
+    "var",
+    "function",
+    "return",
+    "if",
+    "else",
+    "for",
+    "while",
+    "default",
+    "new",
+    "this",
+    "class",
+    "extends",
+    "async",
+    "await",
+    "typeof",
+    "instanceof",
+    "null",
+    "undefined",
+    "true",
+    "false",
   ]);
 
   // Tokenize: groups in priority order.
@@ -91,10 +146,9 @@ function highlightTSX(code: string): string {
 
   let out = "";
   let last = 0;
-  let m: RegExpExecArray | null;
 
   // Track whether we're inside a JSX tag (between < and >) for prop detection.
-  while ((m = tokenRe.exec(code)) !== null) {
+  for (let m = tokenRe.exec(code); m !== null; m = tokenRe.exec(code)) {
     if (m.index > last) {
       out += esc(code.slice(last, m.index));
     }

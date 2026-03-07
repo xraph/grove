@@ -403,7 +403,8 @@ func TestHTTPHandler_PresenceUpdate(t *testing.T) {
 	)
 
 	body := `{"node_id":"node-1","topic":"docs:1","data":{"name":"Alice"}}`
-	req := httptest.NewRequest("POST", "/presence", bytes.NewBufferString(body))
+	req, err := http.NewRequestWithContext(context.Background(), "POST", "/presence", bytes.NewBufferString(body))
+	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -424,14 +425,16 @@ func TestHTTPHandler_GetPresence(t *testing.T) {
 
 	// First, update presence.
 	body := `{"node_id":"node-1","topic":"docs:1","data":{"name":"Alice"}}`
-	req := httptest.NewRequest("POST", "/presence", bytes.NewBufferString(body))
+	req, err := http.NewRequestWithContext(context.Background(), "POST", "/presence", bytes.NewBufferString(body))
+	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	// Now get presence.
-	req2 := httptest.NewRequest("GET", "/presence?topic=docs:1", nil)
+	req2, err := http.NewRequestWithContext(context.Background(), "GET", "/presence?topic=docs:1", nil)
+	require.NoError(t, err)
 	w2 := httptest.NewRecorder()
 	handler.ServeHTTP(w2, req2)
 
