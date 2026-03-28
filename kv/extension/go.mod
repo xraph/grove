@@ -7,7 +7,7 @@ replace github.com/xraph/grove => ../../
 replace github.com/xraph/grove/kv => ../
 
 require (
-	github.com/xraph/forge v1.3.1
+	github.com/xraph/forge v1.4.0
 	github.com/xraph/grove v0.0.0
 	github.com/xraph/grove/kv v0.0.0-00010101000000-000000000000
 	github.com/xraph/vessel v1.0.0
@@ -67,7 +67,7 @@ require (
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xraph/confy v0.1.0 // indirect
-	github.com/xraph/go-utils v1.0.0 // indirect
+	github.com/xraph/go-utils v1.1.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
@@ -78,7 +78,7 @@ require (
 	golang.org/x/oauth2 v0.34.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/term v0.39.0 // indirect
-	golang.org/x/text v0.33.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect

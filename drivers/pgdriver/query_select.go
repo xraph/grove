@@ -310,8 +310,12 @@ func (q *SelectQuery) Build() (string, []any, error) {
 			if idx > 0 {
 				buf.WriteString(", ")
 			}
-			buf.WriteString(ce.expr)
-			q.args = append(q.args, ce.args...)
+			expr := ce.expr
+			for _, arg := range ce.args {
+				q.args = append(q.args, arg)
+				expr = replaceFirstPlaceholder(expr, q.db.dialect.Placeholder(len(q.args)))
+			}
+			buf.WriteString(expr)
 			idx++
 		}
 		hasColumns = true
@@ -337,8 +341,12 @@ func (q *SelectQuery) Build() (string, []any, error) {
 	// FROM
 	if q.tableExpr != "" {
 		buf.WriteString(" FROM ")
-		buf.WriteString(q.tableExpr)
-		q.args = append(q.args, q.tableExprArgs...)
+		expr := q.tableExpr
+		for _, arg := range q.tableExprArgs {
+			q.args = append(q.args, arg)
+			expr = replaceFirstPlaceholder(expr, q.db.dialect.Placeholder(len(q.args)))
+		}
+		buf.WriteString(expr)
 	} else if q.table != nil {
 		buf.WriteString(" FROM ")
 		buf.WriteString(q.db.dialect.Quote(q.table.Name))
@@ -353,12 +361,16 @@ func (q *SelectQuery) Build() (string, []any, error) {
 		_ = buf.WriteByte(' ')
 		buf.WriteString(j.joinType)
 		_ = buf.WriteByte(' ')
-		buf.WriteString(j.table)
+		table := j.table
+		for _, arg := range j.args {
+			q.args = append(q.args, arg)
+			table = replaceFirstPlaceholder(table, q.db.dialect.Placeholder(len(q.args)))
+		}
+		buf.WriteString(table)
 		if j.on != "" {
 			buf.WriteString(" ON ")
 			buf.WriteString(j.on)
 		}
-		q.args = append(q.args, j.args...)
 	}
 
 	// Auto-add soft delete filter if applicable.
@@ -387,8 +399,12 @@ func (q *SelectQuery) Build() (string, []any, error) {
 				buf.WriteString(h.sep)
 				_ = buf.WriteByte(' ')
 			}
-			buf.WriteString(h.query)
-			q.args = append(q.args, h.args...)
+			clause := h.query
+			for _, arg := range h.args {
+				q.args = append(q.args, arg)
+				clause = replaceFirstPlaceholder(clause, q.db.dialect.Placeholder(len(q.args)))
+			}
+			buf.WriteString(clause)
 		}
 	}
 
@@ -453,8 +469,12 @@ func (q *SelectQuery) BuildCount() (string, []any, error) {
 	// FROM
 	if q.tableExpr != "" {
 		buf.WriteString(" FROM ")
-		buf.WriteString(q.tableExpr)
-		q.args = append(q.args, q.tableExprArgs...)
+		expr := q.tableExpr
+		for _, arg := range q.tableExprArgs {
+			q.args = append(q.args, arg)
+			expr = replaceFirstPlaceholder(expr, q.db.dialect.Placeholder(len(q.args)))
+		}
+		buf.WriteString(expr)
 	} else if q.table != nil {
 		buf.WriteString(" FROM ")
 		buf.WriteString(q.db.dialect.Quote(q.table.Name))
@@ -469,12 +489,16 @@ func (q *SelectQuery) BuildCount() (string, []any, error) {
 		_ = buf.WriteByte(' ')
 		buf.WriteString(j.joinType)
 		_ = buf.WriteByte(' ')
-		buf.WriteString(j.table)
+		table := j.table
+		for _, arg := range j.args {
+			q.args = append(q.args, arg)
+			table = replaceFirstPlaceholder(table, q.db.dialect.Placeholder(len(q.args)))
+		}
+		buf.WriteString(table)
 		if j.on != "" {
 			buf.WriteString(" ON ")
 			buf.WriteString(j.on)
 		}
-		q.args = append(q.args, j.args...)
 	}
 
 	// Auto-add soft delete filter if applicable.
@@ -503,8 +527,12 @@ func (q *SelectQuery) BuildCount() (string, []any, error) {
 				buf.WriteString(h.sep)
 				_ = buf.WriteByte(' ')
 			}
-			buf.WriteString(h.query)
-			q.args = append(q.args, h.args...)
+			clause := h.query
+			for _, arg := range h.args {
+				q.args = append(q.args, arg)
+				clause = replaceFirstPlaceholder(clause, q.db.dialect.Placeholder(len(q.args)))
+			}
+			buf.WriteString(clause)
 		}
 	}
 

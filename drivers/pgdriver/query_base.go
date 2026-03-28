@@ -31,6 +31,9 @@ func (q *baseQuery) addWhere(sep, query string, args []any) {
 }
 
 // appendWheres appends all WHERE clauses to the buffer.
+// It supports "?" placeholders which are automatically replaced with
+// positional PostgreSQL parameters ($1, $2, ...) based on the current
+// position in q.args. Existing "$N" placeholders pass through unchanged.
 func (q *baseQuery) appendWheres(buf *pool.Buffer) {
 	if len(q.wheres) == 0 {
 		return
@@ -42,8 +45,12 @@ func (q *baseQuery) appendWheres(buf *pool.Buffer) {
 			buf.WriteString(w.sep)
 			_ = buf.WriteByte(' ')
 		}
-		buf.WriteString(w.query)
-		q.args = append(q.args, w.args...)
+		clause := w.query
+		for _, arg := range w.args {
+			q.args = append(q.args, arg)
+			clause = replaceFirstPlaceholder(clause, q.db.dialect.Placeholder(len(q.args)))
+		}
+		buf.WriteString(clause)
 	}
 }
 
