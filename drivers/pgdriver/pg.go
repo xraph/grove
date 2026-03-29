@@ -30,6 +30,7 @@ type PgDB struct {
 var _ driver.Driver = (*PgDB)(nil)
 var _ driver.StreamCapable = (*PgDB)(nil)
 var _ driver.Preparer = (*PgDB)(nil)
+var _ driver.ConnAcquirer = (*PgDB)(nil)
 
 // New creates a new unconnected PgDB. Call Open to establish a connection pool.
 func New() *PgDB {
@@ -199,6 +200,54 @@ func (db *PgDB) Prepare(ctx context.Context, query string) (driver.Stmt, error) 
 		return nil, fmt.Errorf("pgdriver: prepare: %w", err)
 	}
 	return &pgPoolStmt{conn: conn, sd: sd}, nil
+}
+
+// AcquireConn acquires a dedicated connection from the pool.
+// All operations on the returned DedicatedConn execute on the same
+// underlying PostgreSQL session, making it safe for session-level state
+// such as advisory locks.
+func (db *PgDB) AcquireConn(ctx context.Context) (driver.DedicatedConn, error) {
+	conn, err := db.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("pgdriver: acquire dedicated conn: %w", err)
+	}
+	return &pgDedicatedConn{conn: conn}, nil
+}
+
+// pgDedicatedConn wraps a single pgxpool.Conn to implement driver.DedicatedConn.
+// All queries execute on the same underlying connection.
+type pgDedicatedConn struct {
+	conn *pgxpool.Conn
+}
+
+var _ driver.DedicatedConn = (*pgDedicatedConn)(nil)
+
+func (c *pgDedicatedConn) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
+	ct, err := c.conn.Exec(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("pgdriver: dedicated exec: %w", err)
+	}
+	return &pgResult{ct: ct}, nil
+}
+
+func (c *pgDedicatedConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	rows, err := c.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("pgdriver: dedicated query: %w", err)
+	}
+	return &pgRows{rows: rows}, nil
+}
+
+func (c *pgDedicatedConn) QueryRow(ctx context.Context, query string, args ...any) driver.Row {
+	row := c.conn.QueryRow(ctx, query, args...)
+	return &pgRow{row: row}
+}
+
+func (c *pgDedicatedConn) Release() {
+	if c.conn != nil {
+		c.conn.Release()
+		c.conn = nil
+	}
 }
 
 // mapIsolationLevel converts a driver.IsolationLevel to the corresponding

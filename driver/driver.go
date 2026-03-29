@@ -121,3 +121,25 @@ type Stmt interface {
 	Exec(ctx context.Context, args ...any) (Result, error)
 	Close() error
 }
+
+// ConnAcquirer is an optional interface that pool-based drivers implement
+// to provide a dedicated connection from the pool. This is needed for
+// operations that require session-level state (e.g., advisory locks)
+// to remain on a single connection across multiple queries.
+type ConnAcquirer interface {
+	// AcquireConn acquires a dedicated connection from the pool.
+	// The returned DedicatedConn provides Exec/Query/QueryRow methods
+	// that are guaranteed to run on the same underlying connection.
+	// The caller MUST call Release() when done.
+	AcquireConn(ctx context.Context) (DedicatedConn, error)
+}
+
+// DedicatedConn represents a single, dedicated database connection
+// acquired from a pool. All operations execute on the same underlying
+// connection, making it safe for session-level state like advisory locks.
+type DedicatedConn interface {
+	Exec(ctx context.Context, query string, args ...any) (Result, error)
+	Query(ctx context.Context, query string, args ...any) (Rows, error)
+	QueryRow(ctx context.Context, query string, args ...any) Row
+	Release()
+}

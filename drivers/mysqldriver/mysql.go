@@ -29,6 +29,7 @@ type MysqlDB struct {
 
 var _ driver.Driver = (*MysqlDB)(nil)
 var _ driver.Preparer = (*MysqlDB)(nil)
+var _ driver.ConnAcquirer = (*MysqlDB)(nil)
 
 // New creates a new unconnected MysqlDB. Call Open to establish a connection pool.
 func New() *MysqlDB {
@@ -176,6 +177,54 @@ func (db *MysqlDB) Prepare(ctx context.Context, query string) (driver.Stmt, erro
 		return nil, fmt.Errorf("mysqldriver: prepare: %w", err)
 	}
 	return &mysqlStmt{stmt: stmt}, nil
+}
+
+// AcquireConn acquires a dedicated connection from the pool.
+// All operations on the returned DedicatedConn execute on the same
+// underlying MySQL session, making it safe for session-level state
+// such as GET_LOCK advisory locks.
+func (db *MysqlDB) AcquireConn(ctx context.Context) (driver.DedicatedConn, error) {
+	conn, err := db.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("mysqldriver: acquire dedicated conn: %w", err)
+	}
+	return &mysqlDedicatedConn{conn: conn}, nil
+}
+
+// mysqlDedicatedConn wraps a single *sql.Conn to implement driver.DedicatedConn.
+// All queries execute on the same underlying connection.
+type mysqlDedicatedConn struct {
+	conn *sql.Conn
+}
+
+var _ driver.DedicatedConn = (*mysqlDedicatedConn)(nil)
+
+func (c *mysqlDedicatedConn) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
+	res, err := c.conn.ExecContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("mysqldriver: dedicated exec: %w", err)
+	}
+	return &mysqlResult{res: res}, nil
+}
+
+func (c *mysqlDedicatedConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	rows, err := c.conn.QueryContext(ctx, query, args...) //nolint:rowserrcheck // caller checks Err() via driver.Rows
+	if err != nil {
+		return nil, fmt.Errorf("mysqldriver: dedicated query: %w", err)
+	}
+	return &mysqlRows{rows: rows}, nil
+}
+
+func (c *mysqlDedicatedConn) QueryRow(ctx context.Context, query string, args ...any) driver.Row {
+	row := c.conn.QueryRowContext(ctx, query, args...)
+	return &mysqlRow{row: row}
+}
+
+func (c *mysqlDedicatedConn) Release() {
+	if c.conn != nil {
+		_ = c.conn.Close()
+		c.conn = nil
+	}
 }
 
 // mapIsolationLevel converts a driver.IsolationLevel to the corresponding
