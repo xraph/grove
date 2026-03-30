@@ -135,7 +135,7 @@ func (e *Executor) AcquireLock(ctx context.Context, lockedBy string) error {
 	}
 	if acquired != 1 {
 		e.releaseDedicated()
-		return fmt.Errorf("mysqlmigrate: migration lock is held by another process")
+		return fmt.Errorf("mysqlmigrate: %w", migrate.ErrLockHeld)
 	}
 
 	// Record who holds the lock for debugging.

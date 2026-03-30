@@ -3,7 +3,10 @@ package migrate
 import (
 	"context"
 	"fmt"
+	"math"
+	"math/rand/v2"
 	"os"
+	"time"
 )
 
 // MigrateResult holds the result of a Migrate or Rollback operation.
@@ -46,7 +49,7 @@ func (o *Orchestrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	hostname, _ := os.Hostname() //nolint:errcheck // hostname is best-effort for lock identifier
 	lockedBy := fmt.Sprintf("%s:%d", hostname, os.Getpid())
 
-	if err := o.executor.AcquireLock(ctx, lockedBy); err != nil {
+	if err := o.acquireLockWithRetry(ctx, lockedBy); err != nil {
 		return nil, fmt.Errorf("migrate: acquire lock: %w", err)
 	}
 	defer func() {
@@ -108,7 +111,7 @@ func (o *Orchestrator) Rollback(ctx context.Context) (*MigrateResult, error) {
 	hostname, _ := os.Hostname() //nolint:errcheck // hostname is best-effort for lock identifier
 	lockedBy := fmt.Sprintf("%s:%d", hostname, os.Getpid())
 
-	if err := o.executor.AcquireLock(ctx, lockedBy); err != nil {
+	if err := o.acquireLockWithRetry(ctx, lockedBy); err != nil {
 		return nil, fmt.Errorf("migrate: acquire lock: %w", err)
 	}
 	defer func() {
@@ -196,4 +199,49 @@ func (o *Orchestrator) Status(ctx context.Context) ([]*GroupStatus, error) {
 	}
 
 	return statuses, nil
+}
+
+// acquireLockWithRetry attempts to acquire the migration lock with
+// exponential backoff. It retries only when the error is a lock-held
+// error (another migration is in progress). Other errors are returned
+// immediately. The total retry window is capped at 30 seconds.
+func (o *Orchestrator) acquireLockWithRetry(ctx context.Context, lockedBy string) error {
+	const (
+		maxWait     = 30 * time.Second
+		initialWait = 100 * time.Millisecond
+		maxInterval = 2 * time.Second
+	)
+
+	deadline := time.Now().Add(maxWait)
+
+	for attempt := 0; ; attempt++ {
+		err := o.executor.AcquireLock(ctx, lockedBy)
+		if err == nil {
+			return nil
+		}
+
+		// Only retry on lock-held errors. Any other error (connection
+		// failure, permission denied, etc.) is returned immediately.
+		if !IsLockError(err) {
+			return err
+		}
+
+		// Check if we have exceeded the time budget.
+		if time.Now().After(deadline) {
+			return err
+		}
+
+		// Exponential backoff with jitter (matches kv/middleware/retry.go).
+		backoff := time.Duration(float64(initialWait) * math.Pow(2, float64(attempt)))
+		if backoff > maxInterval {
+			backoff = maxInterval
+		}
+		backoff = time.Duration(float64(backoff) * (0.5 + rand.Float64()*0.5)) //nolint:gosec // jitter does not need crypto-grade randomness
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+	}
 }

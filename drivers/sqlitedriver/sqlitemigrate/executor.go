@@ -95,7 +95,7 @@ func (e *Executor) AcquireLock(ctx context.Context, lockedBy string) error {
 		return fmt.Errorf("sqlitemigrate: check lock acquisition: %w", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("sqlitemigrate: migration lock is held by another process")
+		return fmt.Errorf("sqlitemigrate: %w", migrate.ErrLockHeld)
 	}
 
 	return nil

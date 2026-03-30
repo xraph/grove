@@ -139,7 +139,7 @@ func (e *Executor) AcquireLock(ctx context.Context, lockedBy string) error {
 
 	if result.Err() != nil {
 		if errors.Is(result.Err(), mongo.ErrNoDocuments) {
-			return fmt.Errorf("mongomigrate: migration lock is held by another process")
+			return fmt.Errorf("mongomigrate: %w", migrate.ErrLockHeld)
 		}
 		return fmt.Errorf("mongomigrate: acquire lock: %w", result.Err())
 	}

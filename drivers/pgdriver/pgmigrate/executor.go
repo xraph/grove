@@ -133,7 +133,7 @@ func (e *Executor) AcquireLock(ctx context.Context, lockedBy string) error {
 	}
 	if !acquired {
 		e.releaseDedicated()
-		return fmt.Errorf("pgmigrate: migration lock is held by another process")
+		return fmt.Errorf("pgmigrate: %w", migrate.ErrLockHeld)
 	}
 
 	// Record who holds the lock for debugging.
