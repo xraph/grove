@@ -65,6 +65,10 @@ func (e *Executor) queryRow(ctx context.Context, query string, args ...any) driv
 
 func (e *Executor) releaseDedicated() {
 	if e.dedicated != nil {
+		// Safety net: release ALL advisory locks held on this session before
+		// returning the connection to the pool. This prevents lock leaks if
+		// pg_advisory_unlock(1) failed or was skipped for any reason.
+		_, _ = e.dedicated.Exec(context.Background(), "SELECT pg_advisory_unlock_all()") //nolint:errcheck // best-effort cleanup
 		e.dedicated.Release()
 		e.dedicated = nil
 	}
@@ -142,8 +146,9 @@ func (e *Executor) AcquireLock(ctx context.Context, lockedBy string) error {
 		ON CONFLICT (id) DO UPDATE SET locked_at = NOW(), locked_by = $1`,
 		lockTableName)
 	if _, err := e.exec(ctx, query, lockedBy); err != nil {
-		// Best-effort unlock before releasing the connection.
-		_, _ = e.exec(ctx, "SELECT pg_advisory_unlock(1)") //nolint:errcheck // best-effort cleanup on error path
+		// Best-effort unlock before releasing the connection. Use a
+		// background context so the unlock succeeds even if ctx is cancelled.
+		_, _ = e.exec(context.Background(), "SELECT pg_advisory_unlock(1)") //nolint:errcheck // best-effort cleanup on error path
 		e.releaseDedicated()
 		return err
 	}
@@ -156,13 +161,17 @@ func (e *Executor) AcquireLock(ctx context.Context, lockedBy string) error {
 // is released on that same connection before the connection is returned to
 // the pool.
 func (e *Executor) ReleaseLock(ctx context.Context) error {
+	// Use an uncancellable context so the advisory lock is always released,
+	// even if the caller's context was cancelled mid-migration.
+	cleanCtx := context.WithoutCancel(ctx)
+
 	// Clear the lock record.
 	query := fmt.Sprintf(`UPDATE %s SET locked_at = NULL, locked_by = NULL WHERE id = 1`,
 		lockTableName)
-	_, _ = e.exec(ctx, query) //nolint:errcheck // best-effort lock record clearing
+	_, _ = e.exec(cleanCtx, query) //nolint:errcheck // best-effort lock record clearing
 
 	// Release the advisory lock (on the SAME connection that acquired it).
-	_, err := e.exec(ctx, "SELECT pg_advisory_unlock(1)")
+	_, err := e.exec(cleanCtx, "SELECT pg_advisory_unlock(1)")
 
 	// Release the dedicated connection back to the pool.
 	e.releaseDedicated()

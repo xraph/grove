@@ -53,7 +53,9 @@ func (o *Orchestrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 		return nil, fmt.Errorf("migrate: acquire lock: %w", err)
 	}
 	defer func() {
-		o.executor.ReleaseLock(ctx) //nolint:errcheck // best-effort lock release in defer
+		// Use an uncancellable context so the advisory lock is always
+		// released, even if the caller's context was cancelled mid-migration.
+		o.executor.ReleaseLock(context.WithoutCancel(ctx)) //nolint:errcheck // best-effort lock release in defer
 	}()
 
 	applied, err := o.executor.ListApplied(ctx)
@@ -115,7 +117,9 @@ func (o *Orchestrator) Rollback(ctx context.Context) (*MigrateResult, error) {
 		return nil, fmt.Errorf("migrate: acquire lock: %w", err)
 	}
 	defer func() {
-		o.executor.ReleaseLock(ctx) //nolint:errcheck // best-effort lock release in defer
+		// Use an uncancellable context so the advisory lock is always
+		// released, even if the caller's context was cancelled mid-rollback.
+		o.executor.ReleaseLock(context.WithoutCancel(ctx)) //nolint:errcheck // best-effort lock release in defer
 	}()
 
 	applied, err := o.executor.ListApplied(ctx)

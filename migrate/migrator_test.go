@@ -18,6 +18,7 @@ import (
 // Only AcquireLock behaviour is configurable; other methods are no-ops.
 type retryMockExecutor struct {
 	acquireFn func() error
+	releaseFn func(ctx context.Context) error
 	calls     atomic.Int32
 }
 
@@ -26,7 +27,12 @@ func (m *retryMockExecutor) AcquireLock(_ context.Context, _ string) error {
 	return m.acquireFn()
 }
 
-func (m *retryMockExecutor) ReleaseLock(context.Context) error { return nil }
+func (m *retryMockExecutor) ReleaseLock(ctx context.Context) error {
+	if m.releaseFn != nil {
+		return m.releaseFn(ctx)
+	}
+	return nil
+}
 func (m *retryMockExecutor) Exec(context.Context, string, ...any) (driver.Result, error) {
 	return nil, nil
 }
@@ -102,4 +108,44 @@ func TestAcquireLockWithRetry_ContextCancellation(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Less(t, elapsed, 1*time.Second, "should return promptly on cancelled context")
+}
+
+func TestMigrate_ReleaseLockCalledWithUncancelledContext(t *testing.T) {
+	// Verify that ReleaseLock receives an uncancelled context even when
+	// the caller's context is cancelled during migration execution.
+	var releaseCtxCancelled atomic.Bool
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	mock := &retryMockExecutor{
+		acquireFn: func() error { return nil },
+		releaseFn: func(rctx context.Context) error {
+			// Record whether the context passed to ReleaseLock is cancelled.
+			if rctx.Err() != nil {
+				releaseCtxCancelled.Store(true)
+			}
+			return nil
+		},
+	}
+
+	// Create a group with a migration whose Up function cancels the context,
+	// simulating a shutdown signal arriving while migrations are in progress.
+	g := NewGroup("test")
+	g.MustRegister(&Migration{
+		Version: "00000000000001",
+		Name:    "cancel_context",
+		Group:   "test",
+		Up: func(_ context.Context, _ Executor) error {
+			cancel() // simulate shutdown signal
+			return nil
+		},
+	})
+	orch := NewOrchestrator(mock, g)
+
+	_, err := orch.Migrate(ctx)
+	require.NoError(t, err)
+
+	// The context passed to ReleaseLock must NOT be cancelled.
+	assert.False(t, releaseCtxCancelled.Load(),
+		"ReleaseLock should receive an uncancelled context (context.WithoutCancel)")
 }
