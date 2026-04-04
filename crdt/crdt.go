@@ -35,12 +35,22 @@ const (
 	// Concurrent add and remove of the same element results in the element
 	// being present (add wins).
 	TypeSet CRDTType = "set"
+
+	// TypeList is a Replicated Growable Array (RGA) for ordered sequences.
+	// Elements have stable positions and can be inserted, deleted, or moved
+	// concurrently without conflicts.
+	TypeList CRDTType = "list"
+
+	// TypeDocument is a recursive CRDT map that supports nested paths.
+	// Each nested field is independently mergeable with its own CRDT type,
+	// enabling JSON-like nested structures.
+	TypeDocument CRDTType = "document"
 )
 
 // ValidCRDTType returns true if t is a recognized CRDT type.
 func ValidCRDTType(t string) bool {
 	switch CRDTType(t) {
-	case TypeLWW, TypeCounter, TypeSet:
+	case TypeLWW, TypeCounter, TypeSet, TypeList, TypeDocument:
 		return true
 	default:
 		return false
@@ -93,6 +103,12 @@ type FieldState struct {
 
 	// SetState holds the OR-Set state (Set only).
 	SetState *ORSetState `json:"set_state,omitempty"`
+
+	// ListState holds the RGA list state (List only).
+	ListState *RGAListState `json:"list_state,omitempty"`
+
+	// DocState holds nested document CRDT state (Document only).
+	DocState *DocumentCRDTState `json:"doc_state,omitempty"`
 }
 
 // ChangeRecord represents a single field-level change for sync transport.
@@ -109,6 +125,7 @@ type ChangeRecord struct {
 	// Type-specific payloads (only one is set based on CRDTType).
 	CounterDelta *CounterDelta `json:"counter_delta,omitempty"`
 	SetOp        *SetOperation `json:"set_op,omitempty"`
+	ListOp       *ListOp       `json:"list_op,omitempty"`
 }
 
 // CounterDelta represents a single node's counter change.

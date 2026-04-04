@@ -29,6 +29,21 @@ type SyncController struct {
 	presenceTTL     time.Duration
 	presence        *PresenceManager
 	presenceCh      chan PresenceEvent // buffered channel for broadcasting to SSE streams
+
+	// Time-travel configuration (nil when disabled).
+	timeTravel *TimeTravelConfig
+
+	// Room manager (nil when disabled).
+	roomManager *RoomManager
+
+	// Plugin chain for CRDT-level interceptors.
+	pluginChain *PluginChain
+
+	// Validation config (nil = no validation).
+	validation *ValidationConfig
+
+	// Metrics (nil = no metrics collection).
+	metrics *Metrics
 }
 
 // NewSyncController creates a new sync controller for the given plugin.
@@ -37,6 +52,7 @@ func NewSyncController(plugin *Plugin, opts ...SyncControllerOption) *SyncContro
 		plugin:             plugin,
 		metadata:           plugin.metadata,
 		hooks:              NewSyncHookChain(),
+		pluginChain:        NewPluginChain(),
 		streamPollInterval: 1 * time.Second,
 		streamKeepAlive:    15 * time.Second,
 		logger:             log.NewNoopLogger(),
@@ -67,6 +83,11 @@ func NewSyncController(plugin *Plugin, opts ...SyncControllerOption) *SyncContro
 		}, c.logger)
 	}
 
+	// Initialize room manager if enabled (requires presence).
+	if c.roomManager != nil && c.presence != nil {
+		c.roomManager = NewRoomManager(c.presence, c.logger)
+	}
+
 	return c
 }
 
@@ -76,6 +97,11 @@ func (c *SyncController) HandlePull(ctx context.Context, req *PullRequest) (*Pul
 	if c.metadata == nil {
 		return nil, fmt.Errorf("crdt: metadata store not initialized")
 	}
+
+	if c.metrics != nil {
+		c.metrics.PullCount.Add(1)
+	}
+	pullStart := time.Now()
 
 	var allChanges []ChangeRecord
 	var latestHLC HLC
@@ -97,10 +123,20 @@ func (c *SyncController) HandlePull(ctx context.Context, req *PullRequest) (*Pul
 	// Update our clock with the remote node's timestamp.
 	c.plugin.clock.Update(req.Since)
 
+	// Apply selective sync filter if provided.
+	if req.Filter != nil {
+		allChanges = applySyncFilter(allChanges, req.Filter)
+	}
+
 	// Run BeforeOutboundRead hook.
 	filtered, err := c.hooks.BeforeOutboundRead(ctx, allChanges)
 	if err != nil {
 		return nil, fmt.Errorf("crdt: outbound read hook: %w", err)
+	}
+
+	if c.metrics != nil {
+		c.metrics.ChangesPulled.Add(int64(len(filtered)))
+		c.metrics.PullLatencyNs.Store(time.Since(pullStart).Nanoseconds())
 	}
 
 	return &PullResponse{
@@ -109,12 +145,62 @@ func (c *SyncController) HandlePull(ctx context.Context, req *PullRequest) (*Pul
 	}, nil
 }
 
+// applySyncFilter filters changes based on selective sync criteria.
+func applySyncFilter(changes []ChangeRecord, filter *SyncFilter) []ChangeRecord {
+	if filter == nil {
+		return changes
+	}
+
+	var pkSet map[string]bool
+	if len(filter.PKFilter) > 0 {
+		pkSet = make(map[string]bool, len(filter.PKFilter))
+		for _, pk := range filter.PKFilter {
+			pkSet[pk] = true
+		}
+	}
+
+	var fieldSet map[string]bool
+	if len(filter.FieldFilter) > 0 {
+		fieldSet = make(map[string]bool, len(filter.FieldFilter))
+		for _, f := range filter.FieldFilter {
+			fieldSet[f] = true
+		}
+	}
+
+	result := make([]ChangeRecord, 0, len(changes))
+	for _, ch := range changes {
+		if pkSet != nil && !pkSet[ch.PK] {
+			continue
+		}
+		if fieldSet != nil && ch.Field != "" && !fieldSet[ch.Field] {
+			continue
+		}
+		result = append(result, ch)
+	}
+	return result
+}
+
 // HandlePush processes a push request, merging remote changes locally.
 // This is the core logic used by both Forge and HTTP handlers.
 func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*PushResponse, error) {
 	if c.metadata == nil {
 		return nil, fmt.Errorf("crdt: metadata store not initialized")
 	}
+
+	// Validate push request.
+	if c.validation != nil {
+		if err := c.validation.ValidatePushRequest(req); err != nil {
+			if c.metrics != nil {
+				c.metrics.ValidationErrors.Add(1)
+			}
+			return nil, err
+		}
+	}
+
+	if c.metrics != nil {
+		c.metrics.PushCount.Add(1)
+	}
+	pushStart := time.Now()
 
 	merged := 0
 
@@ -166,18 +252,69 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 			localFS = localState.Fields[processedChange.Field]
 		}
 
+		// Run BeforeMerge plugin hooks.
+		mergeEv := &MergeEvent{
+			Table:            processedChange.Table,
+			PK:               processedChange.PK,
+			Field:            processedChange.Field,
+			Local:            localFS,
+			Remote:           remoteFS,
+			ConflictDetected: localFS != nil,
+		}
+		interceptedRemote, mergeErr := c.pluginChain.DispatchBeforeMerge(ctx, mergeEv)
+		if mergeErr != nil {
+			return nil, fmt.Errorf("crdt: before merge plugin: %w", mergeErr)
+		}
+		if interceptedRemote == nil {
+			continue // Plugin says skip this merge.
+		}
+		remoteFS = interceptedRemote
+
 		mergedFS, err := c.plugin.merge.MergeField(localFS, remoteFS)
 		if err != nil {
 			return nil, fmt.Errorf("crdt: merge field: %w", err)
 		}
 
+		// Run AfterMerge plugin hooks.
+		mergeEv.Result = mergedFS
+		if mergedFS != nil {
+			mergeEv.WinnerNodeID = mergedFS.NodeID
+		}
+		c.pluginChain.DispatchAfterMerge(ctx, mergeEv)
+
+		// Run BeforeMetadataWrite plugin hooks.
+		writeEv := &MetadataWriteEvent{
+			Table:  processedChange.Table,
+			PK:     processedChange.PK,
+			Field:  processedChange.Field,
+			State:  mergedFS,
+			NodeID: processedChange.NodeID,
+		}
+		mergedFS, err = c.pluginChain.DispatchBeforeMetadataWrite(ctx, writeEv)
+		if err != nil {
+			return nil, fmt.Errorf("crdt: before metadata write plugin: %w", err)
+		}
+		if mergedFS == nil {
+			continue // Plugin says skip this write.
+		}
+
 		if err := c.metadata.WriteFieldState(ctx, processedChange.Table, processedChange.PK, processedChange.Field, mergedFS); err != nil {
 			return nil, fmt.Errorf("crdt: write state: %w", err)
 		}
+
+		// Run AfterMetadataWrite plugin hooks.
+		writeEv.State = mergedFS
+		c.pluginChain.DispatchAfterMetadataWrite(ctx, writeEv)
 		merged++
 
 		// Run AfterInboundChange hook.
 		c.hooks.AfterInboundChange(ctx, processedChange) //nolint:errcheck // fire-and-forget post-hook
+	}
+
+	if c.metrics != nil {
+		c.metrics.ChangesMerged.Add(int64(merged))
+		c.metrics.ChangesPushed.Add(int64(len(req.Changes)))
+		c.metrics.PushLatencyNs.Store(time.Since(pushStart).Nanoseconds())
 	}
 
 	return &PushResponse{
@@ -256,7 +393,7 @@ func (c *SyncController) StreamChangesSince(ctx context.Context, tables []string
 
 // HandlePresenceUpdate processes a presence update and returns the resulting event.
 // Returns nil if presence is not enabled.
-func (c *SyncController) HandlePresenceUpdate(_ context.Context, update *PresenceUpdate) (*PresenceEvent, error) {
+func (c *SyncController) HandlePresenceUpdate(ctx context.Context, update *PresenceUpdate) (*PresenceEvent, error) {
 	if c.presence == nil {
 		return nil, fmt.Errorf("crdt: presence is not enabled")
 	}
@@ -267,22 +404,34 @@ func (c *SyncController) HandlePresenceUpdate(_ context.Context, update *Presenc
 		return nil, fmt.Errorf("crdt: presence update requires topic")
 	}
 
+	// Run BeforePresenceUpdate plugin hooks.
+	intercepted, presenceErr := c.pluginChain.DispatchBeforePresenceUpdate(ctx, update)
+	if presenceErr != nil {
+		return nil, fmt.Errorf("crdt: before presence plugin: %w", presenceErr)
+	}
+	if intercepted == nil {
+		return nil, fmt.Errorf("crdt: presence update rejected by plugin")
+	}
+	update = intercepted
+
 	// A null data payload means the client is leaving.
 	if update.Data == nil || string(update.Data) == "null" {
 		event := c.presence.Remove(update.Topic, update.NodeID)
 		if event == nil {
-			// Node wasn't present — return a synthetic leave event.
 			ev := PresenceEvent{
 				Type:   PresenceLeave,
 				NodeID: update.NodeID,
 				Topic:  update.Topic,
 			}
+			c.pluginChain.DispatchAfterPresenceEvent(ctx, &ev)
 			return &ev, nil
 		}
+		c.pluginChain.DispatchAfterPresenceEvent(ctx, event)
 		return event, nil
 	}
 
 	event := c.presence.Update(*update)
+	c.pluginChain.DispatchAfterPresenceEvent(ctx, &event)
 	return &event, nil
 }
 
@@ -308,6 +457,33 @@ func (c *SyncController) HandleGetPresence(_ context.Context, topic string) (*Pr
 // Presence returns the presence manager, or nil if presence is disabled.
 func (c *SyncController) Presence() *PresenceManager {
 	return c.presence
+}
+
+// Rooms returns the room manager, or nil if room management is disabled.
+func (c *SyncController) Rooms() *RoomManager {
+	return c.roomManager
+}
+
+// TimeTravelEnabled returns true if the time-travel feature is enabled.
+func (c *SyncController) TimeTravelEnabled() bool {
+	return c.timeTravel != nil && c.timeTravel.Enabled
+}
+
+// AddPlugin registers a CRDT plugin for intercepting operations.
+// Plugins are called in registration order. The plugin only needs to
+// implement the interceptor interfaces it cares about.
+func (c *SyncController) AddPlugin(p CRDTPlugin) {
+	c.pluginChain.Add(p)
+}
+
+// PluginChain returns the plugin chain for inspection or testing.
+func (c *SyncController) PluginChain() *PluginChain {
+	return c.pluginChain
+}
+
+// Metrics returns the metrics collector, or nil if metrics are disabled.
+func (c *SyncController) Metrics() *Metrics {
+	return c.metrics
 }
 
 // PresenceChannel returns the channel for receiving presence events to
@@ -340,6 +516,16 @@ func NewHTTPHandler(plugin *Plugin, opts ...SyncControllerOption) http.Handler {
 	if ctrl.presence != nil {
 		mux.HandleFunc("POST /presence", ctrl.httpHandlePresenceUpdate)
 		mux.HandleFunc("GET /presence", ctrl.httpHandleGetPresence)
+	}
+	if ctrl.timeTravel != nil && ctrl.timeTravel.Enabled {
+		mux.HandleFunc("GET /history", ctrl.httpHandleHistory)
+		mux.HandleFunc("POST /history", ctrl.httpHandleHistory)
+		mux.HandleFunc("GET /field-history", ctrl.httpHandleFieldHistory)
+		mux.HandleFunc("POST /field-history", ctrl.httpHandleFieldHistory)
+	}
+	if ctrl.roomManager != nil {
+		roomHandler := RoomHTTPHandler(ctrl.roomManager)
+		mux.Handle("/", roomHandler)
 	}
 	return mux
 }

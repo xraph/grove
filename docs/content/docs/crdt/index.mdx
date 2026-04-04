@@ -16,15 +16,17 @@ Grove CRDTs are useful for:
 - **Real-time collaboration** where multiple users edit the same document
 - **Event sourcing** with guaranteed convergence across replicas
 
-## Three CRDT Types
+## Five CRDT Types
 
-Grove supports three field-level CRDT types. Tag struct fields to opt in:
+Grove supports five field-level CRDT types. Tag struct fields to opt in:
 
 | Type | Tag | Merge Strategy | Use Case |
 |------|-----|---------------|----------|
 | **LWW-Register** | `crdt:lww` | Highest HLC timestamp wins | Strings, booleans, JSON objects |
 | **PN-Counter** | `crdt:counter` | Per-node max of increments/decrements | View counts, scores, balances |
 | **OR-Set** | `crdt:set` | Add-wins union with observed-remove | Tags, categories, member lists |
+| **RGA List** | `crdt:list` | Union all nodes, DFS traversal sorted by HLC | Ordered collections, task lists, kanban boards |
+| **Nested Document** | `crdt:document` | Per-path field merge via MergeEngine | JSON-like nested structures, forms, user profiles |
 
 Fields without `crdt:` tags work normally with zero overhead.
 
@@ -41,9 +43,11 @@ Fields without `crdt:` tags work normally with zero overhead.
        |
   Syncer (pull/push protocol)
        |
-  Transport (HTTP / SSE / custom)
+  Transport (HTTP / SSE / WebSocket / custom)
        |
-  Remote Node
+  Rooms / Presence ── Remote Node
+       |
+  Time-Travel (optional history)
 ```
 
 1. **Struct tags** declare which fields are CRDT-enabled and their type
@@ -51,30 +55,40 @@ Fields without `crdt:` tags work normally with zero overhead.
 3. **Shadow tables** store per-field CRDT state alongside the primary table without modifying its schema
 4. **HLC clock** generates causally-ordered timestamps without coordination between nodes
 5. **Syncer** orchestrates two-phase sync: pull remote changes and merge, then push local changes
-6. **Transport** handles the network layer (HTTP, SSE streaming, or custom protocols)
+6. **Transport** handles the network layer (HTTP, SSE streaming, WebSocket, or custom protocols)
+7. **Rooms** provide scoped collaborative spaces with participant management, cursor tracking, and typing indicators
+8. **Time-Travel** optionally records field-level history for audit trails, undo, and debugging
 
 ## Architecture
 
 ```
 grove/crdt/
-  crdt.go          Core types: CRDTType, State, FieldState, ChangeRecord
-  clock.go         HLC implementation
-  register.go      LWW-Register merge
-  counter.go       PN-Counter merge
-  set.go           OR-Set merge (add-wins)
-  merge.go         MergeEngine: field + state merging
-  plugin.go        Plugin (Grove hook integration)
-  hooks.go         PostMutation/PreQuery hooks
-  metadata.go      Shadow table read/write
-  sync.go          Syncer: push/pull orchestration + StreamSync
-  sync_hooks.go    SyncHook interface for intercepting sync data
-  transport.go     Transport interface, HTTPClient, StreamingTransport
-  server.go        SyncController + HTTPHandler (standalone)
-  presence.go      PresenceManager: in-memory ephemeral state with TTL
+  crdt.go            Core types: CRDTType, State, FieldState, ChangeRecord
+  clock.go           HLC implementation
+  register.go        LWW-Register merge
+  counter.go         PN-Counter merge
+  set.go             OR-Set merge (add-wins)
+  list.go            RGA List merge (ordered collections)
+  document.go        Nested Document merge (per-path heterogeneous)
+  merge.go           MergeEngine: field + state merging
+  plugin.go          Plugin (Grove hook integration)
+  plugin_hooks.go    CRDTPlugin interface + interceptors
+  hooks.go           PostMutation/PreQuery hooks
+  metadata.go        Shadow table read/write
+  sync.go            Syncer: push/pull orchestration + StreamSync
+  sync_hooks.go      SyncHook interface for intercepting sync data
+  transport.go       Transport interface, HTTPClient, StreamingTransport
+  transport_ws.go    WebSocket transport (bidirectional multiplexed)
+  server.go          SyncController + HTTPHandler (standalone)
+  presence.go        PresenceManager: in-memory ephemeral state with TTL
   presence_types.go  Presence types: PresenceState, PresenceUpdate, PresenceEvent
-  options.go       Functional options
-  inspect.go       Debug/inspect utilities
-  migrations.go    Shadow table DDL
+  room.go            RoomManager: room CRUD, join/leave, participant limits
+  timetravel.go      Time-travel: field history, state-at-time queries
+  validation.go      Schema + field validation rules
+  metrics.go         Sync/merge/presence metric collectors
+  options.go         Functional options
+  inspect.go         Debug/inspect utilities
+  migrations.go      Shadow table DDL
 ```
 
 ## Key Concepts
@@ -83,8 +97,14 @@ grove/crdt/
 - **Shadow tables** (`_<table>_crdt`) store CRDT metadata alongside primary data; your primary table schema is never modified
 - **Tombstones** mark deleted records so deletions propagate during sync; they expire after a configurable TTL (default: 7 days)
 - **Sync hooks** intercept changes flowing between nodes for validation, filtering, transformation, or audit logging
-- **Transport** is pluggable: use HTTP, SSE streaming, or implement your own for WebSocket, gRPC, NATS, etc.
+- **Transport** is pluggable: use HTTP, SSE streaming, WebSocket, or implement your own for gRPC, NATS, etc.
 - **Presence** provides ephemeral, real-time awareness (typing indicators, cursors, online users) with TTL-based cleanup, SSE broadcast, and React hooks
+- **Rooms** provide scoped collaborative spaces with participant limits, cursor tracking, typing indicators, and lifecycle hooks
+- **Time-Travel** optionally records field-level history for querying state at any point in time, audit trails, and undo
+- **WebSocket transport** enables bidirectional multiplexed sync over a single persistent connection
+- **Plugins** allow intercepting merge, metadata, presence, room, time-travel, and connection events for custom logic
+- **Validation** enforces schema and field-level rules before merge operations
+- **Metrics** collect sync, merge, and presence statistics for observability
 
 ## Quick Example
 
@@ -118,8 +138,12 @@ report, err := syncer.Sync(ctx)
 ## Next Steps
 
 - [Getting Started](/docs/crdt/getting-started) for a complete setup walkthrough
-- [CRDT Types](/docs/crdt/types) for deep dives into LWW, Counter, and Set semantics
+- [CRDT Types](/docs/crdt/types) for deep dives into LWW, Counter, Set, List, and Document semantics
 - [Sync Protocol](/docs/crdt/sync) for transport, syncer, and hook details
 - [SSE Streaming](/docs/crdt/streaming) for real-time change propagation
 - [Presence & Awareness](/docs/crdt/presence) for ephemeral real-time state (typing indicators, cursors, online users)
+- [Room Management](/docs/crdt/rooms) for scoped collaborative spaces with participant limits and lifecycle hooks
+- [Time-Travel & History](/docs/crdt/time-travel) for querying state at any point in time
+- [Plugin System](/docs/crdt/plugins) for intercepting merge, presence, room, and connection events
+- [WebSocket Transport](/docs/crdt/websocket) for bidirectional multiplexed sync
 - [TypeScript Client](/docs/crdt/typescript-client) for browser and React integration

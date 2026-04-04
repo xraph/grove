@@ -55,6 +55,10 @@ export type {
   FieldState,
   DocumentState,
   SyncReport,
+  RGANode,
+  RGAListState,
+  ListOperation,
+  DocumentCRDTState,
 } from "./types.js";
 
 // Plugin interfaces
@@ -99,11 +103,26 @@ export {
   newORSetState,
   mergeSet,
   setElements,
+  newRGAListState,
+  mergeListState,
+  listElements,
+  listNodeIds,
+  newDocumentCRDTState,
+  mergeDocumentState,
+  documentResolve,
   mergeFieldState,
 } from "./merge.js";
 
 // Errors
-export { CRDTError, TransportError } from "./errors.js";
+export {
+  CRDTErrorCode,
+  CRDTError,
+  TransportError,
+  NetworkError,
+  ValidationError,
+  SyncError,
+  PluginError,
+} from "./errors.js";
 
 // Client
 export { CRDTClient } from "./client.js";
@@ -113,12 +132,43 @@ export type { CRDTStreamEvent } from "./stream.js";
 export { CRDTStream } from "./stream.js";
 
 // State store
-export { CRDTStore } from "./store.js";
+export { CRDTStore, BatchWriter } from "./store.js";
+export type { StateSnapshot } from "./store.js";
+
+// Undo/Redo
+export type { UndoEntry } from "./undo.js";
+export { UndoManager } from "./undo.js";
+
+// Plugin system
+export { PluginManager } from "./plugin.js";
+export type {
+  StorePlugin,
+  WriteHook,
+  MergeHook,
+  SyncHook,
+  ReadHook,
+  PresenceHook,
+  StorageHook,
+  WriteEvent,
+  MergeEvent,
+  PullEvent,
+} from "./plugin.js";
 
 // Presence
 export { PresenceManager } from "./presence.js";
 
+// Room management
+export { RoomClient, documentRoomId, randomColor } from "./room.js";
+export type {
+  CursorPosition,
+  ParticipantData,
+  Room,
+  RoomInfo,
+  RoomClientConfig,
+} from "./room.js";
+
 // Default implementations
 export { HttpTransport, HttpStreamTransport, isStreamTransport } from "./transport.js";
-export { MemoryStorage } from "./storage.js";
+export { MemoryStorage, IndexedDBStorage } from "./storage.js";
+export type { IndexedDBStorageOptions } from "./storage.js";
 export { StaticAuthProvider } from "./auth.js";

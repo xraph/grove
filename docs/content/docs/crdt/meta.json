@@ -7,6 +7,10 @@
     "sync",
     "streaming",
     "presence",
+    "rooms",
+    "time-travel",
+    "plugins",
+    "websocket",
     "typescript-client",
     "api-reference"
   ]

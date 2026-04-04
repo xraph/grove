@@ -534,6 +534,414 @@ function DocumentEditor({ docId }: { docId: string }) {
 }
 ```
 
+## List and Document Operations
+
+### List Mutations
+
+Operate on `crdt:list` fields with ordered insert, delete, and move:
+
+```typescript
+// Insert an item into a list at a position.
+store.insertIntoList("boards", "board-1", "tasks", "Buy groceries", { after: "task-2" });
+
+// Insert at the beginning of the list.
+store.insertIntoList("boards", "board-1", "tasks", "First task", { position: "start" });
+
+// Delete an item from a list by its node ID.
+store.deleteFromList("boards", "board-1", "tasks", "task-node-id");
+
+// Move an item to a new position.
+store.moveInList("boards", "board-1", "tasks", "task-node-id", { after: "task-5" });
+```
+
+### Document Mutations
+
+Operate on `crdt:document` fields with per-path addressing:
+
+```typescript
+// Set a field at a path (uses LWW merge by default).
+store.setDocumentField("profiles", "user-1", "data", "address.city", "New York");
+
+// Set a nested field.
+store.setDocumentField("profiles", "user-1", "data", "preferences.theme", "dark");
+
+// Delete a field at a path.
+store.deleteDocumentField("profiles", "user-1", "data", "address.zip");
+
+// Increment a counter at a path.
+store.incrementDocumentCounter("profiles", "user-1", "data", "stats.loginCount", 1);
+
+// Add to a set at a path.
+store.addToDocumentSet("profiles", "user-1", "data", "roles", "editor");
+```
+
+### React Hooks for List and Document
+
+```tsx
+import { useList, useNestedDocument } from "@grove-js/crdt/react";
+
+function TaskList({ boardId }: { boardId: string }) {
+    const { items, insert, remove, move } = useList<string>("boards", boardId, "tasks");
+
+    return (
+        <ul>
+            {items.map((item, index) => (
+                <li key={item.id} draggable>
+                    {item.value}
+                    <button onClick={() => remove(item.id)}>x</button>
+                </li>
+            ))}
+            <button onClick={() => insert("New task", { position: "end" })}>
+                Add Task
+            </button>
+        </ul>
+    );
+}
+
+function ProfileEditor({ userId }: { userId: string }) {
+    const { get, set, remove, paths } = useNestedDocument("profiles", userId, "data");
+
+    return (
+        <div>
+            <input
+                value={get("address.city") ?? ""}
+                onChange={(e) => set("address.city", e.target.value)}
+                placeholder="City"
+            />
+            <input
+                value={get("address.zip") ?? ""}
+                onChange={(e) => set("address.zip", e.target.value)}
+                placeholder="ZIP"
+            />
+        </div>
+    );
+}
+```
+
+## Batch Writes
+
+Group multiple mutations into a single atomic batch to reduce event overhead and ensure consistency:
+
+```typescript
+// Chainable BatchWriter API.
+store.batch("documents", "doc-1")
+    .setField("title", "Updated Title")
+    .incrementCounter("viewCount", 1)
+    .addToSet("tags", "featured")
+    .commit();
+
+// Multiple field updates in one batch.
+store.batch("profiles", "user-1")
+    .setField("name", "Alice Smith")
+    .setField("email", "alice@example.com")
+    .setField("status", "active")
+    .commit();
+```
+
+The `commit()` call fires a single change notification and generates one set of pending changes for sync.
+
+## Undo/Redo
+
+The store tracks mutation history for undo/redo support:
+
+```typescript
+// Perform mutations.
+store.setField("documents", "doc-1", "title", "Draft");
+store.setField("documents", "doc-1", "title", "Final");
+
+// Undo the last mutation.
+store.undo();
+// title is now "Draft"
+
+// Redo the undone mutation.
+store.redo();
+// title is now "Final"
+
+// Check capabilities.
+console.log(store.canUndo); // boolean
+console.log(store.canRedo); // boolean
+```
+
+### React Hook
+
+```tsx
+import { useUndo } from "@grove-js/crdt/react";
+
+function UndoControls() {
+    const { undo, redo, canUndo, canRedo } = useUndo();
+
+    return (
+        <div>
+            <button onClick={undo} disabled={!canUndo}>Undo</button>
+            <button onClick={redo} disabled={!canRedo}>Redo</button>
+        </div>
+    );
+}
+```
+
+## State Export/Import
+
+Export and import CRDT state for backup, migration, or debugging:
+
+```typescript
+// Export the entire store state.
+const snapshot = store.exportState();
+// Returns: { tables: { documents: { "doc-1": DocumentState, ... }, ... } }
+
+// Export a single table.
+const docsSnapshot = store.exportTable("documents");
+
+// Import state into a store (merges with existing state).
+store.importState(snapshot);
+```
+
+The exported format is JSON-serializable and compatible across client versions.
+
+## IndexedDB Storage
+
+Persist CRDT state to IndexedDB for offline-first applications:
+
+```typescript
+import { IndexedDBStorage } from "@grove-js/crdt";
+
+const storage = new IndexedDBStorage({
+    dbName: "my-app-crdt",
+    dbVersion: 1,
+});
+
+// Pass to CRDTStore.
+const store = new CRDTStore("browser-1", clock, { storage });
+
+// Or pass via CRDTProvider.
+<CRDTProvider config={{
+    baseURL: "/api/sync",
+    nodeID: "browser-1",
+    tables: ["documents"],
+    storage: new IndexedDBStorage({ dbName: "my-app-crdt" }),
+}}>
+    <App />
+</CRDTProvider>
+```
+
+The `IndexedDBStorage` adapter implements the `StorageAdapter` interface and automatically persists documents and pending changes across page reloads.
+
+## Room Client
+
+The `RoomClient` provides an HTTP API for room management. See [Room Management](/docs/crdt/rooms) for the full guide.
+
+```typescript
+import { RoomClient } from "@grove-js/crdt";
+
+const rooms = new RoomClient({
+    baseURL: "/api/sync",
+    nodeID: "browser-1",
+});
+
+// Create a room.
+await rooms.create("design-session", { maxParticipants: 10 });
+
+// Join with participant data.
+await rooms.join("design-session", {
+    name: "Alice",
+    color: "#3b82f6",
+    cursor: { type: "canvas", x: 0, y: 0 },
+});
+
+// List rooms.
+const roomList = await rooms.list();
+
+// Leave a room.
+await rooms.leave("design-session");
+```
+
+### React Room Hooks
+
+```tsx
+import { useRoom, useDocumentRoom, useRoomList } from "@grove-js/crdt/react";
+
+function RoomBrowser() {
+    const { rooms, loading } = useRoomList();
+
+    return (
+        <ul>
+            {rooms.map((room) => (
+                <li key={room.id}>
+                    {room.id} ({room.participantCount}/{room.maxParticipants})
+                </li>
+            ))}
+        </ul>
+    );
+}
+
+function DocumentRoom({ docId }: { docId: string }) {
+    const { participants, join, leave, updateMyData } = useDocumentRoom("documents", docId);
+
+    useEffect(() => {
+        join({ name: "Alice", color: "#3b82f6" });
+        return () => { leave(); };
+    }, []);
+
+    return (
+        <div>
+            {participants.map((p) => (
+                <span key={p.nodeId} style={{ color: p.data.color }}>
+                    {p.data.name}
+                </span>
+            ))}
+        </div>
+    );
+}
+```
+
+## Plugins
+
+Extend the client-side store with custom logic via the `StorePlugin` interface:
+
+```typescript
+import type { StorePlugin } from "@grove-js/crdt";
+
+interface StorePlugin {
+    name: string;
+    onInit?(store: CRDTStore): void;
+    onBeforeMutation?(mutation: Mutation): Mutation | null;
+    onAfterMutation?(mutation: Mutation, prevState: DocumentState): void;
+    onBeforeSync?(changes: ChangeRecord[]): ChangeRecord[];
+    onAfterSync?(result: SyncResult): void;
+    onConflict?(field: string, local: FieldState, remote: FieldState, resolved: FieldState): void;
+    destroy?(): void;
+}
+```
+
+### Registering Plugins
+
+```typescript
+// Register a plugin on the store.
+store.use(myPlugin);
+
+// Or via CRDTProvider config.
+<CRDTProvider config={{
+    baseURL: "/api/sync",
+    nodeID: "browser-1",
+    tables: ["documents"],
+    plugins: [validationPlugin, loggingPlugin],
+}}>
+    <App />
+</CRDTProvider>
+```
+
+### Example: Validation Plugin
+
+```typescript
+const validationPlugin: StorePlugin = {
+    name: "validation",
+    onBeforeMutation(mutation) {
+        if (mutation.field === "title" && typeof mutation.value === "string") {
+            if (mutation.value.length > 200) {
+                console.warn("Title too long, truncating");
+                return { ...mutation, value: mutation.value.slice(0, 200) };
+            }
+        }
+        return mutation;
+    },
+};
+```
+
+### Example: Conflict Logging Plugin
+
+```typescript
+const conflictLogger: StorePlugin = {
+    name: "conflict-logger",
+    onConflict(field, local, remote, resolved) {
+        console.log(`Conflict on "${field}":`, {
+            localHLC: local.hlc,
+            remoteHLC: remote.hlc,
+            winner: resolved === remote ? "remote" : "local",
+        });
+    },
+};
+```
+
+### React Hook
+
+```tsx
+import { usePlugin } from "@grove-js/crdt/react";
+
+function PluginStatus() {
+    const plugin = usePlugin("validation");
+    // Access plugin instance for runtime configuration
+    return <div>Plugin: {plugin?.name ?? "not loaded"}</div>;
+}
+```
+
+## Conflict Notifications
+
+Subscribe to merge conflicts for UI notifications or analytics:
+
+```tsx
+import { useConflicts } from "@grove-js/crdt/react";
+
+function ConflictBanner() {
+    const { conflicts, clearConflicts } = useConflicts();
+
+    if (conflicts.length === 0) return null;
+
+    return (
+        <div className="conflict-banner">
+            <p>{conflicts.length} conflict(s) resolved automatically</p>
+            <ul>
+                {conflicts.map((c, i) => (
+                    <li key={i}>
+                        {c.table}/{c.pk}: field "{c.field}" — {c.resolution} won
+                    </li>
+                ))}
+            </ul>
+            <button onClick={clearConflicts}>Dismiss</button>
+        </div>
+    );
+}
+```
+
+## Rich Errors
+
+The package exports typed error classes for precise error handling:
+
+```typescript
+import {
+    CRDTErrorCode,
+    NetworkError,
+    ValidationError,
+    SyncError,
+    PluginError,
+} from "@grove-js/crdt";
+
+try {
+    await client.push(changes);
+} catch (err) {
+    if (err instanceof NetworkError) {
+        console.error("Network issue:", err.message, err.statusCode);
+    } else if (err instanceof SyncError) {
+        console.error("Sync conflict:", err.code, err.details);
+    } else if (err instanceof ValidationError) {
+        console.error("Validation failed:", err.field, err.constraint);
+    } else if (err instanceof PluginError) {
+        console.error("Plugin error:", err.pluginName, err.message);
+    }
+}
+```
+
+### Error Codes
+
+| Code | Class | Description |
+|------|-------|-------------|
+| `NETWORK_ERROR` | `NetworkError` | HTTP request failed or timed out |
+| `NETWORK_TIMEOUT` | `NetworkError` | Request exceeded timeout |
+| `SYNC_CONFLICT` | `SyncError` | Unresolvable sync conflict |
+| `SYNC_VERSION_MISMATCH` | `SyncError` | Protocol version mismatch |
+| `VALIDATION_FAILED` | `ValidationError` | Field validation rule violated |
+| `VALIDATION_SCHEMA` | `ValidationError` | Schema mismatch |
+| `PLUGIN_INIT_FAILED` | `PluginError` | Plugin initialization error |
+| `PLUGIN_HOOK_FAILED` | `PluginError` | Plugin hook threw an error |
+
 ## Full Example
 
 A collaborative document editor with real-time CRDT sync:

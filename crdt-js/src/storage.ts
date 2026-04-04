@@ -36,3 +36,7 @@ export class MemoryStorage implements StorageAdapter {
     // No-op for in-memory storage.
   }
 }
+
+// Re-export IndexedDB adapter for convenience.
+export { IndexedDBStorage } from "./storage/indexeddb.js";
+export type { IndexedDBStorageOptions } from "./storage/indexeddb.js";

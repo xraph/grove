@@ -30,6 +30,12 @@ type InspectField struct {
 
 	// Set fields
 	Elements []any `json:"elements,omitempty"`
+
+	// List fields
+	ListLength int `json:"list_length,omitempty"`
+
+	// Document fields
+	DocPaths []string `json:"doc_paths,omitempty"`
 }
 
 // InspectState converts a State into a human-readable InspectResult.
@@ -77,8 +83,26 @@ func InspectState(state *State) *InspectResult {
 			ss := SetFromFieldState(fs)
 			for _, elem := range ss.Elements() {
 				var v any
-				json.Unmarshal(elem, &v) //nolint:errcheck // best-effort display value
+				json.Unmarshal(elem, &v) //nolint:errcheck // best-effort display value // best-effort display value
 				field.Elements = append(field.Elements, v)
+			}
+
+		case TypeList:
+			ls := ListFromFieldState(fs)
+			if ls != nil {
+				field.ListLength = ls.Len()
+				for _, elem := range ls.Elements() {
+					var v any
+					json.Unmarshal(elem, &v) //nolint:errcheck // best-effort display value
+					field.Elements = append(field.Elements, v)
+				}
+			}
+
+		case TypeDocument:
+			ds := DocumentFromFieldState(fs)
+			if ds != nil {
+				field.DocPaths = ds.Paths()
+				field.Value = ds.Resolve()
 			}
 		}
 
@@ -113,6 +137,10 @@ func (r *InspectResult) String() string {
 			}
 		case TypeSet:
 			fmt.Fprintf(&b, "%v", field.Elements)
+		case TypeList:
+			fmt.Fprintf(&b, "[%d items] %v", field.ListLength, field.Elements)
+		case TypeDocument:
+			fmt.Fprintf(&b, "{%d paths} %v", len(field.DocPaths), field.Value)
 		}
 		b.WriteString("\n")
 	}

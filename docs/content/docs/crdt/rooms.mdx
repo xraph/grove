@@ -1,0 +1,512 @@
+---
+title: Room Management
+description: Scoped collaborative spaces with participant limits, cursor tracking, typing indicators, and lifecycle hooks.
+---
+
+Rooms extend the [Presence & Awareness](/docs/crdt/presence) system with structured collaborative spaces. While presence tracks "who is here," rooms answer "who is working on what" with participant limits, cursor tracking, typing indicators, and lifecycle hooks.
+
+## Overview
+
+A room is a named collaborative space scoped to a document, canvas, or arbitrary context. Rooms provide:
+
+- **Participant limits** to control concurrency (e.g., max 5 editors)
+- **Cursor tracking** with typed positions for canvas, text, and code editors
+- **Typing indicators** per participant
+- **Metadata** per room and per participant
+- **Lifecycle hooks** for authorization, logging, and side effects
+- **Document room helpers** that tie rooms to specific table records
+
+Rooms are built on top of presence and use the same TTL-based cleanup and SSE broadcast infrastructure.
+
+## Server Setup (Go)
+
+### Forge Integration
+
+Rooms are enabled automatically when presence is enabled:
+
+```go
+app.Use(groveext.New(
+    groveext.WithDriver(pgdb),
+    groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents"}}),
+    groveext.WithSyncController(
+        crdt.WithPresenceEnabled(true),
+        crdt.WithPresenceTTL(30 * time.Second),
+    ),
+))
+```
+
+This registers the room HTTP endpoints alongside the existing sync and presence routes.
+
+### Standalone Server
+
+```go
+ctrl := crdt.NewSyncController(plugin,
+    crdt.WithPresenceEnabled(true),
+    crdt.WithPresenceTTL(30 * time.Second),
+)
+defer ctrl.Close()
+
+handler := crdt.NewHTTPHandler(ctrl)
+http.Handle("/sync/", handler)
+```
+
+## RoomManager
+
+The `RoomManager` handles room CRUD, join/leave operations, and participant tracking. Access it from the `SyncController`:
+
+```go
+rm := ctrl.RoomManager()
+```
+
+### Creating Rooms
+
+```go
+room, err := rm.CreateRoom(ctx, "design-review", crdt.RoomOptions{
+    MaxParticipants: 10,
+    Metadata:        map[string]any{"project": "grove", "team": "platform"},
+})
+```
+
+### RoomOptions
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `MaxParticipants` | `int` | Maximum number of participants (0 = unlimited) |
+| `Metadata` | `map[string]any` | Arbitrary room metadata |
+
+### Joining Rooms
+
+```go
+err := rm.JoinRoom(ctx, "design-review", crdt.ParticipantData{
+    Name:     "Alice",
+    Color:    "#3b82f6",
+    Avatar:   "https://example.com/alice.png",
+    Cursor:   &crdt.CursorPosition{Type: "canvas", X: 120, Y: 340},
+    IsTyping: false,
+    Status:   "active",
+})
+```
+
+Join returns an error if the room is full or the participant is already in the room.
+
+### Leaving Rooms
+
+```go
+err := rm.LeaveRoom(ctx, "design-review", "node-1")
+```
+
+### Listing Rooms
+
+```go
+rooms, err := rm.ListRooms(ctx)
+```
+
+### Getting Room Details
+
+```go
+room, err := rm.GetRoom(ctx, "design-review")
+// room.ID, room.Participants, room.Metadata, room.CreatedAt
+```
+
+### Deleting Rooms
+
+```go
+err := rm.DeleteRoom(ctx, "design-review")
+```
+
+## Cursor Tracking
+
+Cursors are typed to support different editor contexts:
+
+```go
+type CursorPosition struct {
+    Type   string  `json:"type"`   // "canvas", "text", "code"
+    X      float64 `json:"x"`      // Canvas: pixel X position
+    Y      float64 `json:"y"`      // Canvas: pixel Y position
+    Line   int     `json:"line"`   // Text/Code: line number
+    Column int     `json:"column"` // Text/Code: column number
+    Offset int     `json:"offset"` // Text: character offset from start
+}
+```
+
+### Canvas Cursor
+
+For design tools and whiteboards where position is absolute:
+
+```go
+cursor := &crdt.CursorPosition{
+    Type: "canvas",
+    X:    450.5,
+    Y:    230.0,
+}
+```
+
+### Text Cursor
+
+For rich text editors with line and column:
+
+```go
+cursor := &crdt.CursorPosition{
+    Type:   "text",
+    Line:   12,
+    Column: 35,
+    Offset: 482,
+}
+```
+
+### Code Cursor
+
+For code editors with line and column:
+
+```go
+cursor := &crdt.CursorPosition{
+    Type:   "code",
+    Line:   42,
+    Column: 18,
+}
+```
+
+## ParticipantData
+
+Each participant carries metadata visible to other participants:
+
+```go
+type ParticipantData struct {
+    Name     string          `json:"name"`
+    Color    string          `json:"color"`
+    Avatar   string          `json:"avatar,omitempty"`
+    Cursor   *CursorPosition `json:"cursor,omitempty"`
+    IsTyping bool            `json:"isTyping"`
+    Status   string          `json:"status,omitempty"`   // "active", "idle", "away"
+    Extra    json.RawMessage `json:"extra,omitempty"`     // Arbitrary extra data
+}
+```
+
+Update participant data after joining:
+
+```go
+err := rm.UpdateParticipant(ctx, "design-review", "node-1", crdt.ParticipantData{
+    Name:     "Alice",
+    Color:    "#3b82f6",
+    Cursor:   &crdt.CursorPosition{Type: "canvas", X: 200, Y: 150},
+    IsTyping: true,
+})
+```
+
+## Document Room Helpers
+
+Convenience functions tie rooms to specific documents. The room ID is constructed as `"table:pk"`:
+
+```go
+// Create a room for a specific document.
+room, err := rm.CreateDocumentRoom(ctx, "documents", "doc-1", crdt.RoomOptions{
+    MaxParticipants: 5,
+})
+// Room ID: "documents:doc-1"
+
+// Join a document room.
+err = rm.JoinDocumentRoom(ctx, "documents", "doc-1", crdt.ParticipantData{
+    Name:  "Alice",
+    Color: "#3b82f6",
+})
+
+// Get document room details.
+room, err = rm.GetDocumentRoom(ctx, "documents", "doc-1")
+```
+
+## Room Lifecycle Hooks
+
+Register hooks to intercept room events for authorization, logging, or side effects:
+
+### RoomHook
+
+```go
+type RoomHook struct {
+    OnCreate func(ctx context.Context, roomID string, opts RoomOptions) error
+    OnDelete func(ctx context.Context, roomID string)
+    OnJoin   func(ctx context.Context, roomID string, nodeID string, data ParticipantData) error
+    OnLeave  func(ctx context.Context, roomID string, nodeID string)
+}
+```
+
+### Registering Hooks
+
+```go
+ctrl.AddRoomHook(crdt.RoomHook{
+    OnJoin: func(ctx context.Context, roomID string, nodeID string, data crdt.ParticipantData) error {
+        // Authorization: only allow users with "editor" role
+        if !hasEditorRole(ctx) {
+            return fmt.Errorf("unauthorized: editor role required")
+        }
+        log.Printf("User %s joined room %s", data.Name, roomID)
+        return nil
+    },
+    OnLeave: func(ctx context.Context, roomID string, nodeID string) {
+        log.Printf("Node %s left room %s", nodeID, roomID)
+    },
+    OnCreate: func(ctx context.Context, roomID string, opts crdt.RoomOptions) error {
+        log.Printf("Room %s created with max %d participants", roomID, opts.MaxParticipants)
+        return nil
+    },
+})
+```
+
+### RoomInterceptor
+
+For more advanced interception, implement the `RoomInterceptor` interface as a [plugin](/docs/crdt/plugins):
+
+```go
+type RoomInterceptor interface {
+    BeforeJoinRoom(ctx context.Context, roomID, nodeID string, data *ParticipantData) error
+    AfterJoinRoom(ctx context.Context, roomID, nodeID string, data ParticipantData)
+    BeforeLeaveRoom(ctx context.Context, roomID, nodeID string) error
+    AfterLeaveRoom(ctx context.Context, roomID, nodeID string)
+}
+```
+
+## HTTP API Reference
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/sync/rooms` | Create a room |
+| GET | `/sync/rooms` | List all rooms |
+| GET | `/sync/rooms/:id` | Get room details and participants |
+| DELETE | `/sync/rooms/:id` | Delete a room |
+| POST | `/sync/rooms/:id/join` | Join a room |
+| POST | `/sync/rooms/:id/leave` | Leave a room |
+| PUT | `/sync/rooms/:id/participant` | Update participant data |
+
+### Create Room
+
+**`POST /sync/rooms`**
+
+```json
+{
+  "room_id": "design-review",
+  "options": {
+    "max_participants": 10,
+    "metadata": { "project": "grove" }
+  }
+}
+```
+
+### Join Room
+
+**`POST /sync/rooms/:id/join`**
+
+```json
+{
+  "node_id": "browser-1",
+  "data": {
+    "name": "Alice",
+    "color": "#3b82f6",
+    "cursor": { "type": "canvas", "x": 0, "y": 0 }
+  }
+}
+```
+
+### Update Participant
+
+**`PUT /sync/rooms/:id/participant`**
+
+```json
+{
+  "node_id": "browser-1",
+  "data": {
+    "name": "Alice",
+    "color": "#3b82f6",
+    "cursor": { "type": "canvas", "x": 200, "y": 150 },
+    "isTyping": true
+  }
+}
+```
+
+## TypeScript Client
+
+### RoomClient
+
+```typescript
+import { RoomClient } from "@grove-js/crdt";
+
+const rooms = new RoomClient({
+    baseURL: "/api/sync",
+    nodeID: "browser-1",
+    headers: { Authorization: "Bearer <token>" },
+});
+
+await rooms.create("design-session", { maxParticipants: 10 });
+await rooms.join("design-session", {
+    name: "Alice",
+    color: "#3b82f6",
+    cursor: { type: "canvas", x: 0, y: 0 },
+});
+
+// Update cursor on mouse move.
+await rooms.updateParticipant("design-session", {
+    cursor: { type: "canvas", x: 200, y: 150 },
+});
+
+// List all rooms.
+const allRooms = await rooms.list();
+
+// Leave on cleanup.
+await rooms.leave("design-session");
+```
+
+### React Hooks
+
+#### useRoom
+
+```tsx
+import { useRoom } from "@grove-js/crdt/react";
+
+function CollabCanvas({ roomId }: { roomId: string }) {
+    const { participants, join, leave, updateMyData } = useRoom(roomId);
+
+    useEffect(() => {
+        join({ name: "Alice", color: "#3b82f6" });
+        return () => { leave(); };
+    }, []);
+
+    const handleMouseMove = (e: React.MouseEvent) => {
+        updateMyData({
+            cursor: { type: "canvas", x: e.clientX, y: e.clientY },
+        });
+    };
+
+    return (
+        <div onMouseMove={handleMouseMove}>
+            {participants.map((p) => (
+                <Cursor key={p.nodeId} data={p.data} />
+            ))}
+        </div>
+    );
+}
+```
+
+#### useDocumentRoom
+
+```tsx
+import { useDocumentRoom } from "@grove-js/crdt/react";
+
+function DocumentEditor({ docId }: { docId: string }) {
+    const { participants, join, leave, updateMyData } = useDocumentRoom("documents", docId);
+
+    useEffect(() => {
+        join({ name: "Alice", color: "#3b82f6" });
+        return () => { leave(); };
+    }, []);
+
+    return (
+        <div>
+            <div className="active-editors">
+                {participants.map((p) => (
+                    <span key={p.nodeId} style={{ color: p.data.color }}>
+                        {p.data.name}
+                        {p.data.isTyping && " (typing...)"}
+                    </span>
+                ))}
+            </div>
+        </div>
+    );
+}
+```
+
+#### useRoomList
+
+```tsx
+import { useRoomList } from "@grove-js/crdt/react";
+
+function RoomBrowser() {
+    const { rooms, loading, refresh } = useRoomList();
+
+    if (loading) return <div>Loading rooms...</div>;
+
+    return (
+        <ul>
+            {rooms.map((room) => (
+                <li key={room.id}>
+                    {room.id} — {room.participantCount}/{room.maxParticipants} participants
+                </li>
+            ))}
+            <button onClick={refresh}>Refresh</button>
+        </ul>
+    );
+}
+```
+
+## Example: Collaborative Document Editor with Cursors
+
+A complete example combining rooms, cursors, and document editing:
+
+```tsx
+import { CRDTProvider, useDocument, useDocumentRoom } from "@grove-js/crdt/react";
+
+function App() {
+    return (
+        <CRDTProvider config={{
+            baseURL: "/api/sync",
+            nodeID: `browser-${crypto.randomUUID()}`,
+            tables: ["documents"],
+        }}>
+            <CollaborativeEditor docId="doc-1" />
+        </CRDTProvider>
+    );
+}
+
+function CollaborativeEditor({ docId }: { docId: string }) {
+    const { data, update } = useDocument("documents", docId);
+    const { participants, join, leave, updateMyData } = useDocumentRoom("documents", docId);
+
+    useEffect(() => {
+        join({ name: "Alice", color: "#3b82f6" });
+        return () => { leave(); };
+    }, []);
+
+    const handleKeyDown = () => {
+        updateMyData({ isTyping: true });
+    };
+
+    const handleBlur = () => {
+        updateMyData({ isTyping: false, cursor: null });
+    };
+
+    const handleSelectionChange = () => {
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount > 0) {
+            updateMyData({
+                cursor: {
+                    type: "text",
+                    offset: sel.anchorOffset,
+                    line: 0,
+                    column: sel.anchorOffset,
+                },
+            });
+        }
+    };
+
+    return (
+        <div>
+            <div className="collaborators">
+                {participants.map((p) => (
+                    <span
+                        key={p.nodeId}
+                        className="collaborator-badge"
+                        style={{ backgroundColor: p.data.color }}
+                    >
+                        {p.data.name}
+                        {p.data.isTyping && " ..."}
+                    </span>
+                ))}
+            </div>
+            <textarea
+                value={data?.body ?? ""}
+                onChange={(e) => update("body", e.target.value)}
+                onKeyDown={handleKeyDown}
+                onBlur={handleBlur}
+                onSelect={handleSelectionChange}
+            />
+        </div>
+    );
+}
+```

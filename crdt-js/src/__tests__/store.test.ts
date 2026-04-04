@@ -95,7 +95,7 @@ describe("CRDTStore", () => {
 
     it("returns a ChangeRecord with correct properties", () => {
       const { store } = createTestStore();
-      const change = store.setField("users", "1", "name", "Alice");
+      const change = store.setField("users", "1", "name", "Alice")!;
       expect(change.table).toBe("users");
       expect(change.pk).toBe("1");
       expect(change.field).toBe("name");
@@ -114,8 +114,8 @@ describe("CRDTStore", () => {
 
     it("uses the clock to generate monotonically increasing HLCs", () => {
       const { store } = createTestStore();
-      const c1 = store.setField("users", "1", "name", "a");
-      const c2 = store.setField("users", "1", "name", "b");
+      const c1 = store.setField("users", "1", "name", "a")!;
+      const c2 = store.setField("users", "1", "name", "b")!;
       expect(c2.hlc.ts >= c1.hlc.ts).toBe(true);
       if (c2.hlc.ts === c1.hlc.ts) {
         expect(c2.hlc.c).toBeGreaterThan(c1.hlc.c);
@@ -153,7 +153,7 @@ describe("CRDTStore", () => {
 
     it("returns ChangeRecord with counter_delta", () => {
       const { store } = createTestStore();
-      const change = store.incrementCounter("users", "1", "views", 5);
+      const change = store.incrementCounter("users", "1", "views", 5)!;
       expect(change.crdt_type).toBe("counter");
       expect(change.counter_delta).toEqual({ inc: 5, dec: 0 });
     });
@@ -188,7 +188,7 @@ describe("CRDTStore", () => {
 
     it("returns ChangeRecord with counter_delta", () => {
       const { store } = createTestStore();
-      const change = store.decrementCounter("users", "1", "views", 2);
+      const change = store.decrementCounter("users", "1", "views", 2)!;
       expect(change.counter_delta).toEqual({ inc: 0, dec: 2 });
     });
   });
@@ -208,7 +208,7 @@ describe("CRDTStore", () => {
 
     it("returns ChangeRecord with set_op add", () => {
       const { store } = createTestStore();
-      const change = store.addToSet("users", "1", "tags", ["x"]);
+      const change = store.addToSet("users", "1", "tags", ["x"])!;
       expect(change.crdt_type).toBe("set");
       expect(change.set_op).toEqual({ op: "add", elements: ["x"] });
     });
@@ -241,7 +241,7 @@ describe("CRDTStore", () => {
 
     it("returns ChangeRecord with set_op remove", () => {
       const { store } = createTestStore();
-      const change = store.removeFromSet("users", "1", "tags", ["x"]);
+      const change = store.removeFromSet("users", "1", "tags", ["x"])!;
       expect(change.set_op).toEqual({ op: "remove", elements: ["x"] });
     });
 

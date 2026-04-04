@@ -33,6 +33,9 @@ type Syncer struct {
 	interval       time.Duration
 	gossipInterval time.Duration
 	logger         log.Logger
+	retryAttempts  int
+	retryBaseDelay time.Duration
+	retryMaxDelay  time.Duration
 
 	// lastSync tracks the last sync HLC per peer (index-based for peers array).
 	mu       sync.Mutex
@@ -42,11 +45,14 @@ type Syncer struct {
 // NewSyncer creates a new Syncer for the given plugin.
 func NewSyncer(plugin *Plugin, opts ...SyncerOption) *Syncer {
 	s := &Syncer{
-		plugin:   plugin,
-		metadata: plugin.metadata,
-		interval: 30 * time.Second,
-		logger:   log.NewNoopLogger(),
-		lastSync: make(map[string]HLC),
+		plugin:         plugin,
+		metadata:       plugin.metadata,
+		interval:       30 * time.Second,
+		retryAttempts:  3,
+		retryBaseDelay: 1 * time.Second,
+		retryMaxDelay:  30 * time.Second,
+		logger:         log.NewNoopLogger(),
+		lastSync:       make(map[string]HLC),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -66,9 +72,9 @@ func (s *Syncer) Sync(ctx context.Context) (*SyncReport, error) {
 
 	for i, t := range transports {
 		peerID := fmt.Sprintf("peer-%d", i)
-		r, err := s.syncWithPeer(ctx, t, peerID)
+		r, err := s.syncWithPeerRetry(ctx, t, peerID)
 		if err != nil {
-			s.logger.Error("crdt: sync failed",
+			s.logger.Error("crdt: sync failed after retries",
 				log.String("peer", peerID),
 				log.String("error", err.Error()),
 			)
@@ -137,6 +143,38 @@ func (s *Syncer) PushChange(ctx context.Context, table, pk, field string, crdtTy
 		}
 	}
 	return nil
+}
+
+// syncWithPeerRetry wraps syncWithPeer with exponential backoff retry.
+func (s *Syncer) syncWithPeerRetry(ctx context.Context, t Transport, peerID string) (*SyncReport, error) {
+	var lastErr error
+	backoff := s.retryBaseDelay
+
+	for attempt := 0; attempt <= s.retryAttempts; attempt++ {
+		r, err := s.syncWithPeer(ctx, t, peerID)
+		if err == nil {
+			return r, nil
+		}
+		lastErr = err
+
+		if attempt < s.retryAttempts {
+			s.logger.Warn("crdt: sync attempt failed, retrying",
+				log.String("peer", peerID),
+				log.String("error", err.Error()),
+				log.String("backoff", backoff.String()),
+			)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			backoff = time.Duration(float64(backoff) * 1.5)
+			if backoff > s.retryMaxDelay {
+				backoff = s.retryMaxDelay
+			}
+		}
+	}
+	return nil, lastErr
 }
 
 func (s *Syncer) syncWithPeer(ctx context.Context, t Transport, peerID string) (*SyncReport, error) {

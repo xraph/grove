@@ -25,6 +25,20 @@ type Transport interface {
 	Push(ctx context.Context, req *PushRequest) (*PushResponse, error)
 }
 
+// SyncFilter defines selective sync criteria for partial replication.
+// When set on a PullRequest, only records matching the filter are returned.
+type SyncFilter struct {
+	// PKFilter restricts sync to records matching these primary keys.
+	PKFilter []string `json:"pk_filter,omitempty"`
+
+	// FieldFilter restricts sync to only these fields.
+	FieldFilter []string `json:"field_filter,omitempty"`
+
+	// Predicates are driver-specific filter expressions.
+	// Keys are field names, values are comparison expressions.
+	Predicates map[string]string `json:"predicates,omitempty"`
+}
+
 // PullRequest asks a remote node for changes since a given point.
 type PullRequest struct {
 	// Tables to pull changes for.
@@ -35,6 +49,10 @@ type PullRequest struct {
 
 	// NodeID of the requesting node.
 	NodeID string `json:"node_id"`
+
+	// Filter enables selective sync (partial replication).
+	// When set, only changes matching the filter are returned.
+	Filter *SyncFilter `json:"filter,omitempty"`
 }
 
 // PullResponse contains changes from the remote node.

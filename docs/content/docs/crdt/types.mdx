@@ -1,9 +1,9 @@
 ---
 title: CRDT Types
-description: Deep dive into LWW-Register, PN-Counter, and OR-Set merge semantics, algorithms, and use cases.
+description: Deep dive into LWW-Register, PN-Counter, OR-Set, RGA List, and Nested Document merge semantics, algorithms, and use cases.
 ---
 
-Grove supports three field-level CRDT types. Each has different merge semantics optimized for specific use cases. This page covers the algorithms, concurrent update behavior, and practical guidance for each type.
+Grove supports five field-level CRDT types. Each has different merge semantics optimized for specific use cases. This page covers the algorithms, concurrent update behavior, and practical guidance for each type.
 
 ## LWW-Register (Last-Writer-Wins)
 
@@ -233,6 +233,175 @@ type Project struct {
 | `Elements` | `(s *ORSetState) []json.RawMessage` | Returns elements with at least one non-removed tag |
 | `SetFromFieldState` | `(fs *FieldState) *ORSetState` | Extracts set state from a field |
 
+## RGA List (Replicated Growable Array)
+
+**Tag:** `crdt:list`
+
+An ordered list that supports concurrent insert, delete, and move operations. The list maintains a tree of nodes where each insertion creates a new child node under the insert position, and ordering is determined by DFS traversal sorted by HLC timestamps.
+
+### Merge Algorithm
+
+```
+MergeList(local, remote):
+  merged.Nodes = union(local.Nodes, remote.Nodes)
+  merged.Tombstones = union(local.Tombstones, remote.Tombstones)
+
+  // DFS traversal: children sorted by HLC (descending)
+  result = DFS(merged.Root, sortChildrenByHLC)
+  return filter(result, not in merged.Tombstones)
+```
+
+Each node carries: `ID` (unique), `ParentID` (insert position), `Value`, `HLC` (creation timestamp), and an optional `Tombstone` flag. Concurrent inserts at the same position are ordered by HLC, giving a deterministic total order.
+
+### Concurrent Update Example
+
+```
+Initial list: ["A", "B", "C"]
+
+Node 1 (ts=100): Insert "X" after "A"  -> ["A", "X", "B", "C"]
+Node 2 (ts=105): Insert "Y" after "A"  -> ["A", "Y", "B", "C"]
+
+After sync: ["A", "Y", "X", "B", "C"]
+  (Node 2's "Y" has higher HLC, sorts before "X" among children of "A")
+
+Node 1 (ts=110): Delete "B"  -> tombstone node "B"
+Node 2 (ts=108): Move "C" before "B"  -> re-parent "C" under "A"
+
+After sync: ["A", "Y", "X", "C"]
+  ("B" is tombstoned, "C" re-parented)
+```
+
+### State Structure
+
+```go
+type RGAListState struct {
+    Nodes      map[string]*RGANode `json:"nodes"`
+    Tombstones map[string]bool     `json:"tombstones"`
+    RootID     string              `json:"root_id"`
+}
+
+type RGANode struct {
+    ID       string          `json:"id"`
+    ParentID string          `json:"parent_id"`
+    Value    json.RawMessage `json:"value"`
+    HLC      HLC             `json:"hlc"`
+}
+```
+
+### Usage
+
+```go
+type TaskBoard struct {
+    grove.BaseModel `grove:"table:boards,alias:b"`
+    ID    string   `grove:"id,pk"`
+    Name  string   `grove:"name,crdt:lww"`
+    Tasks []string `grove:"tasks,type:jsonb,crdt:list"`
+}
+```
+
+### Best For
+
+- Ordered collections (task lists, kanban columns)
+- Drag-and-drop reordering across multiple clients
+- Sequential data where position matters (playlist items, paragraph ordering)
+- Any list where concurrent insert/delete/move must converge
+
+### Go API
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `NewRGAListState` | `() *RGAListState` | Creates an empty list state |
+| `MergeList` | `(local, remote *RGAListState) *RGAListState` | Union nodes, DFS traversal merge |
+| `ListElements` | `(s *RGAListState) []json.RawMessage` | Returns ordered elements (excludes tombstoned) |
+| `ListFromFieldState` | `(fs *FieldState) *RGAListState` | Extracts list state from a field |
+
+## Nested Document
+
+**Tag:** `crdt:document`
+
+A hierarchical document CRDT that supports per-path field merging with heterogeneous child types. Each path in the document can independently use a different CRDT type (LWW, counter, set, or list), enabling complex nested structures like forms, user profiles, and JSON-like documents.
+
+### Merge Algorithm
+
+```
+MergeDocument(local, remote):
+  allPaths = union(keys(local.Fields), keys(remote.Fields))
+  for each path in allPaths:
+    localField  = local.Fields[path]
+    remoteField = remote.Fields[path]
+
+    // Delegate to MergeEngine based on each field's CRDT type
+    merged.Fields[path] = MergeEngine.MergeField(localField, remoteField)
+
+  return merged
+```
+
+Each path (e.g., `"address.city"`, `"tags"`, `"stats.viewCount"`) stores its own `FieldState` with an independent CRDT type. This allows mixing LWW fields, counters, sets, and lists at different paths within the same document.
+
+### Path-Based Addressing
+
+Paths use dot notation to address nested fields:
+
+```
+"name"              -> top-level LWW field
+"address.city"      -> nested LWW field
+"address.zip"       -> nested LWW field
+"tags"              -> top-level OR-Set
+"stats.viewCount"   -> nested PN-Counter
+"items"             -> top-level RGA List
+```
+
+### Concurrent Update Example
+
+```
+Node A: SetPath("address.city", "New York")   // LWW at path "address.city"
+Node B: SetPath("address.zip", "10001")        // LWW at path "address.zip"
+
+After sync: both paths merge independently
+  address.city = "New York", address.zip = "10001"
+
+Node A: IncrementPath("stats.viewCount", 5)    // Counter at path "stats.viewCount"
+Node B: IncrementPath("stats.viewCount", 3)    // Counter at path "stats.viewCount"
+
+After sync: stats.viewCount = 8 (counter merge)
+```
+
+### State Structure
+
+```go
+type DocumentCRDTState struct {
+    Fields map[string]*FieldState `json:"fields"`
+}
+```
+
+Each entry in `Fields` is keyed by the dot-notation path and holds a standard `FieldState` with its own CRDT type (`TypeLWW`, `TypeCounter`, `TypeSet`, or `TypeList`).
+
+### Usage
+
+```go
+type UserProfile struct {
+    grove.BaseModel `grove:"table:profiles,alias:p"`
+    ID      string         `grove:"id,pk"`
+    Data    map[string]any `grove:"data,type:jsonb,crdt:document"`
+}
+```
+
+### Best For
+
+- JSON-like nested structures with independent field-level merge
+- Forms with nested sections (address, preferences, settings)
+- User profiles with mixed data types per field
+- Any document where different paths need different merge strategies
+
+### Go API
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `NewDocumentCRDTState` | `() *DocumentCRDTState` | Creates an empty document state |
+| `MergeDocument` | `(local, remote *DocumentCRDTState) *DocumentCRDTState` | Per-path field merge |
+| `DocumentPaths` | `(s *DocumentCRDTState) []string` | Returns all paths in the document |
+| `DocumentFromFieldState` | `(fs *FieldState) *DocumentCRDTState` | Extracts document state from a field |
+
 ## MergeEngine
 
 The `MergeEngine` dispatches to the correct merge function based on the CRDT type of each field. It handles full-state merging for records with multiple fields.
@@ -250,6 +419,8 @@ merged, err := engine.MergeField(localFieldState, remoteFieldState)
 - `TypeLWW` calls `MergeLWW`
 - `TypeCounter` calls `MergeCounter`
 - `TypeSet` calls `MergeSet`
+- `TypeList` calls `MergeList`
+- `TypeDocument` calls `MergeDocument`
 
 If the local state is `nil`, the remote state is accepted directly.
 
@@ -273,3 +444,9 @@ merged, err := engine.MergeState(localState, remoteState)
 | Shopping cart items | `crdt:set` | Add-wins prevents lost items |
 | Score in a game | `crdt:counter` | Multiple score sources merge correctly |
 | Status field (draft/published) | `crdt:lww` | Last status change wins |
+| Task list ordering | `crdt:list` | Concurrent insert/reorder must converge |
+| Kanban board columns | `crdt:list` | Drag-and-drop across multiple users |
+| Playlist items | `crdt:list` | Ordered sequence with concurrent edits |
+| User profile with nested fields | `crdt:document` | Independent merge per nested path |
+| Form with mixed field types | `crdt:document` | Different merge strategies per section |
+| Settings with counters and flags | `crdt:document` | Heterogeneous child types at each path |

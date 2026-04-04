@@ -1,9 +1,9 @@
 ---
 title: CRDT Types
-description: Available CRDT data types in Grove KV — Counter, Register, Set, and Map — with API reference, merge semantics, and usage examples.
+description: Available CRDT data types in Grove KV — Counter, Register, Set, Map, List, and Document — with API reference, merge semantics, and usage examples.
 ---
 
-The `kvcrdt` package provides four CRDT types that persist their state in a KV store. Each type wraps a core `grove/crdt` state struct and uses the adapter pattern described in the [overview](/docs/kv/crdt/overview). All types share a common set of options and follow the same read-modify-write cycle.
+The `kvcrdt` package provides six CRDT types that persist their state in a KV store. Each type wraps a core `grove/crdt` state struct and uses the adapter pattern described in the [overview](/docs/kv/crdt/overview). All types share a common set of options and follow the same read-modify-write cycle.
 
 ## Creating Types
 
@@ -21,6 +21,8 @@ counter  := kvcrdt.NewCounter(store, "page:views", kvcrdt.WithNodeID("node-1"))
 register := kvcrdt.NewRegister[string](store, "user:name", kvcrdt.WithNodeID("node-1"))
 set      := kvcrdt.NewSet[string](store, "tags:article:1", kvcrdt.WithNodeID("node-1"))
 m        := kvcrdt.NewMap(store, "config:app", kvcrdt.WithNodeID("node-1"))
+list     := kvcrdt.NewList[string](store, "tasks:project:1", kvcrdt.WithNodeID("node-1"))
+doc      := kvcrdt.NewDocument(store, "profile:user:1", kvcrdt.WithNodeID("node-1"))
 ```
 
 ### Shared Options
@@ -318,6 +320,80 @@ fmt.Println("Keys:", keys) // Keys: [max_connections log_level feature_x]
 
 ---
 
+## List
+
+`List[T]` is an RGA (Replicated Growable Array) backed by a KV store. Elements have stable positions and can be inserted, deleted, or moved concurrently without conflicts.
+
+### API
+
+```go
+list := kvcrdt.NewList[string](store, "tasks:project:1", kvcrdt.WithNodeID("node-1"))
+
+// Append to end
+err := list.Append(ctx, "Buy groceries")
+
+// Insert after a specific position
+nodeIDs, _ := list.NodeIDs(ctx) // Get position IDs
+err = list.InsertAfter(ctx, nodeIDs[0], "Call dentist")
+
+// Delete by position ID
+err = list.Delete(ctx, nodeIDs[0])
+
+// Read elements in order
+items, _ := list.Elements(ctx)
+// items: ["Call dentist"]
+
+count, _ := list.Len(ctx)
+// count: 1
+
+// Merge with remote state
+remoteState, _ := remoteList.State(ctx)
+err = list.Merge(ctx, remoteState)
+```
+
+### Merge Semantics
+
+RGA merge unions all nodes from both lists. Concurrent inserts at the same position are ordered by HLC (newer first). Tombstones propagate: if either side deletes a node, the merged result is deleted.
+
+## Document
+
+`Document` is a nested CRDT map with dot-path addressing. Each path can have a different CRDT type (LWW, counter, set), enabling JSON-like nested structures where different subtrees use different conflict resolution.
+
+### API
+
+```go
+doc := kvcrdt.NewDocument(store, "profile:user:1", kvcrdt.WithNodeID("node-1"))
+
+// Set LWW fields at nested paths
+err := doc.Set(ctx, "name", "Alice")
+err = doc.Set(ctx, "address.city", "New York")
+err = doc.Set(ctx, "address.zip", "10001")
+
+// Set a counter at a path
+err = doc.SetCounter(ctx, "stats.logins", 1)
+
+// Read a field
+var city string
+err = doc.Get(ctx, "address.city", &city)
+
+// Resolve entire document as nested map
+resolved, _ := doc.Resolve(ctx)
+// resolved: {"name": "Alice", "address": {"city": "New York", "zip": "10001"}, "stats": {"logins": 1}}
+
+// Delete a path and its children
+err = doc.Delete(ctx, "address")
+
+// Merge with remote state
+remoteState, _ := remoteDoc.State(ctx)
+err = doc.Merge(ctx, remoteState)
+```
+
+### Merge Semantics
+
+Document merge uses the MergeEngine for each path independently. Paths present in only one side are kept. Paths present in both use the CRDT-type-specific merge for that path (LWW for scalars, max-per-node for counters, tag union for sets). Type conflicts at the same path resolve by higher HLC.
+
+---
+
 ## Choosing the Right Type
 
 | Scenario | Recommended Type | Why |
@@ -326,7 +402,11 @@ fmt.Println("Keys:", keys) // Keys: [max_connections log_level feature_x]
 | User display name | **Register[string]** | Last edit should win |
 | Article tags | **Set[string]** | Concurrent add/remove must converge |
 | App configuration | **Map** | Per-field independent LWW merge |
+| Task list / kanban board | **List[string]** | Ordered items with concurrent insert/delete/move |
+| User profile with nesting | **Document** | Nested paths with mixed CRDT types |
 | Inventory quantity | **Counter** | Distributed increment/decrement across warehouses |
 | Session data | **Map** | Multiple fields updated by different services |
 | ACL member list | **Set[string]** | Add-wins prevents accidental permission loss |
 | Feature flag value | **Register[bool]** | Simple scalar with LWW resolution |
+| Shopping cart items | **List[CartItem]** | Ordered items that can be reordered or removed |
+| Form with nested sections | **Document** | Independent fields at any nesting depth |

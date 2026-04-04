@@ -16,7 +16,7 @@ export interface HLC {
 }
 
 /** CRDT type identifier. */
-export type CRDTType = "lww" | "counter" | "set";
+export type CRDTType = "lww" | "counter" | "set" | "list" | "document";
 
 /** Set operation type. */
 export type SetOpType = "add" | "remove";
@@ -25,6 +25,33 @@ export type SetOpType = "add" | "remove";
 export interface CounterDelta {
   inc: number;
   dec: number;
+}
+
+/** RGA node for list CRDT. Mirrors Go crdt.RGANode. */
+export interface RGANode {
+  id: HLC;
+  node_id: string;
+  parent_id: HLC;
+  value: unknown;
+  tombstone?: boolean;
+}
+
+/** RGA list state. Mirrors Go crdt.RGAListState. */
+export interface RGAListState {
+  nodes: Record<string, RGANode>;
+}
+
+/** List operation for sync transport. Mirrors Go crdt.ListOperation. */
+export interface ListOperation {
+  op: "insert" | "delete" | "move";
+  node_id?: HLC;
+  parent_id?: HLC;
+  value?: unknown;
+}
+
+/** Nested document CRDT state. Mirrors Go crdt.DocumentCRDTState. */
+export interface DocumentCRDTState {
+  fields: Record<string, FieldState>;
 }
 
 /** Set operation payload. Mirrors Go crdt.SetOperation. */
@@ -48,6 +75,7 @@ export interface ChangeRecord {
   tombstone?: boolean;
   counter_delta?: CounterDelta;
   set_op?: SetOperation;
+  list_op?: ListOperation;
 }
 
 /** Pull request payload. Mirrors Go crdt.PullRequest. */
@@ -142,6 +170,8 @@ export interface FieldState {
   value?: unknown;
   counter_state?: PNCounterState;
   set_state?: ORSetState;
+  list_state?: RGAListState;
+  doc_state?: DocumentCRDTState;
 }
 
 /** Full document state (all fields for a single record). Mirrors Go crdt.State. */

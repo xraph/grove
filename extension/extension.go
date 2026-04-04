@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/xraph/forge"
@@ -52,6 +53,7 @@ type Extension struct {
 	crdtDatabase       string // named DB for CRDT (multi-DB mode)
 	syncer             *crdt.Syncer
 	syncControllerOpts []crdt.SyncControllerOption
+	syncController     *crdt.SyncController // initialized during registerCRDT
 }
 
 // databaseEntry holds the configuration for a named database
@@ -118,11 +120,7 @@ func (e *Extension) Register(fapp forge.App) error {
 	}
 
 	// 4. Register CRDT sync controller if enabled and routes not disabled.
-	if err := e.registerCRDT(fapp); err != nil {
-		return err
-	}
-
-	return nil
+	return e.registerCRDT(fapp)
 }
 
 // registerSingleDB handles the original single-database path.
@@ -328,7 +326,8 @@ func (e *Extension) registerCRDT(fapp forge.App) error {
 	}
 
 	ctrl := crdt.NewSyncController(e.crdtPlugin, e.syncControllerOpts...)
-	forgeCtrl := &crdtForgeController{ctrl: ctrl}
+	e.syncController = ctrl
+	forgeCtrl := &crdtForgeController{ctrl: ctrl, basePath: e.config.BasePath}
 
 	if err := fapp.RegisterController(forgeCtrl); err != nil {
 		return fmt.Errorf("grove: register crdt controller: %w", err)
@@ -339,6 +338,22 @@ func (e *Extension) registerCRDT(fapp forge.App) error {
 		return e.crdtPlugin
 	}); err != nil {
 		return fmt.Errorf("grove: register crdt plugin in container: %w", err)
+	}
+
+	// Provide SyncController via DI.
+	if err := vessel.Provide(fapp.Container(), func() *crdt.SyncController {
+		return ctrl
+	}); err != nil {
+		return fmt.Errorf("grove: register crdt controller in container: %w", err)
+	}
+
+	// Provide RoomManager via DI if enabled.
+	if ctrl.Rooms() != nil {
+		if err := vessel.Provide(fapp.Container(), func() *crdt.RoomManager {
+			return ctrl.Rooms()
+		}); err != nil {
+			return fmt.Errorf("grove: register room manager in container: %w", err)
+		}
 	}
 
 	e.Logger().Info("grove: CRDT sync controller registered",
@@ -375,8 +390,13 @@ func (e *Extension) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop gracefully shuts down all Grove databases.
+// Stop gracefully shuts down all Grove databases and CRDT subsystems.
 func (e *Extension) Stop(_ context.Context) error {
+	// Clean up CRDT subsystems.
+	if e.syncController != nil {
+		e.syncController.Close()
+	}
+
 	if e.manager != nil {
 		e.manager.Close()
 	} else if e.db != nil {
@@ -567,7 +587,8 @@ func (e *Extension) initDB() error {
 // crdtForgeController adapts the crdt.SyncController as a forge.Controller.
 // It registers sync routes (pull, push, stream) on the Forge router.
 type crdtForgeController struct {
-	ctrl *crdt.SyncController
+	ctrl     *crdt.SyncController
+	basePath string // URL prefix for routes (default: "/sync")
 }
 
 // Ensure compile-time interface compliance.
@@ -578,8 +599,13 @@ func (c *crdtForgeController) Name() string { return "crdt-sync" }
 
 // Routes implements forge.Controller. It registers CRDT sync routes
 // on the Forge router with proper request/response schemas and tags.
+// The base path defaults to "/sync" but can be overridden via WithBasePath.
 func (c *crdtForgeController) Routes(r forge.Router) error {
-	sync := r.Group("/sync")
+	base := c.basePath
+	if base == "" {
+		base = "/sync"
+	}
+	sync := r.Group(base)
 
 	// POST /sync/pull — remote nodes pull changes from this node.
 	if err := sync.POST("/pull", c.handlePull,
@@ -621,6 +647,98 @@ func (c *crdtForgeController) Routes(r forge.Router) error {
 			forge.WithTags("crdt", "sync", "presence"),
 		); err != nil {
 			return fmt.Errorf("crdt: register presence get route: %w", err)
+		}
+	}
+
+	// Time-travel routes (only registered when time-travel is enabled).
+	if c.ctrl.TimeTravelEnabled() {
+		if err := sync.GET("/history", c.handleHistory,
+			forge.WithName("crdt.history"),
+			forge.WithTags("crdt", "sync", "timetravel"),
+		); err != nil {
+			return fmt.Errorf("crdt: register history route: %w", err)
+		}
+
+		if err := sync.POST("/history", c.handleHistory,
+			forge.WithName("crdt.history.post"),
+			forge.WithTags("crdt", "sync", "timetravel"),
+		); err != nil {
+			return fmt.Errorf("crdt: register history post route: %w", err)
+		}
+
+		if err := sync.GET("/field-history", c.handleFieldHistory,
+			forge.WithName("crdt.field-history"),
+			forge.WithTags("crdt", "sync", "timetravel"),
+		); err != nil {
+			return fmt.Errorf("crdt: register field-history route: %w", err)
+		}
+	}
+
+	// Room management routes (only registered when room manager is enabled).
+	if c.ctrl.Rooms() != nil {
+		rooms := sync.Group("/rooms")
+
+		if err := rooms.GET("", c.handleListRooms,
+			forge.WithName("crdt.rooms.list"),
+			forge.WithTags("crdt", "sync", "rooms"),
+		); err != nil {
+			return fmt.Errorf("crdt: register rooms list route: %w", err)
+		}
+
+		if err := rooms.POST("", c.handleCreateRoom,
+			forge.WithName("crdt.rooms.create"),
+			forge.WithTags("crdt", "sync", "rooms"),
+		); err != nil {
+			return fmt.Errorf("crdt: register rooms create route: %w", err)
+		}
+
+		if err := rooms.GET("/:id", c.handleGetRoom,
+			forge.WithName("crdt.rooms.get"),
+			forge.WithTags("crdt", "sync", "rooms"),
+		); err != nil {
+			return fmt.Errorf("crdt: register rooms get route: %w", err)
+		}
+
+		if err := rooms.POST("/:id/join", c.handleJoinRoom,
+			forge.WithName("crdt.rooms.join"),
+			forge.WithTags("crdt", "sync", "rooms"),
+		); err != nil {
+			return fmt.Errorf("crdt: register rooms join route: %w", err)
+		}
+
+		if err := rooms.POST("/:id/leave", c.handleLeaveRoom,
+			forge.WithName("crdt.rooms.leave"),
+			forge.WithTags("crdt", "sync", "rooms"),
+		); err != nil {
+			return fmt.Errorf("crdt: register rooms leave route: %w", err)
+		}
+
+		if err := rooms.GET("/:id/participants", c.handleGetParticipants,
+			forge.WithName("crdt.rooms.participants"),
+			forge.WithTags("crdt", "sync", "rooms"),
+		); err != nil {
+			return fmt.Errorf("crdt: register rooms participants route: %w", err)
+		}
+
+		if err := rooms.POST("/:id/cursor", c.handleUpdateCursor,
+			forge.WithName("crdt.rooms.cursor"),
+			forge.WithTags("crdt", "sync", "rooms", "cursor"),
+		); err != nil {
+			return fmt.Errorf("crdt: register rooms cursor route: %w", err)
+		}
+
+		if err := rooms.POST("/:id/typing", c.handleUpdateTyping,
+			forge.WithName("crdt.rooms.typing"),
+			forge.WithTags("crdt", "sync", "rooms", "presence"),
+		); err != nil {
+			return fmt.Errorf("crdt: register rooms typing route: %w", err)
+		}
+
+		if err := rooms.PUT("/:id/metadata", c.handleUpdateRoomMetadata,
+			forge.WithName("crdt.rooms.metadata"),
+			forge.WithTags("crdt", "sync", "rooms"),
+		); err != nil {
+			return fmt.Errorf("crdt: register rooms metadata route: %w", err)
 		}
 	}
 
@@ -703,10 +821,14 @@ func (c *crdtForgeController) handleStream(ctx forge.Context, stream forge.Strea
 	// Parse since HLC from query params.
 	var since crdt.HLC
 	if ts := ctx.Query("since_ts"); ts != "" {
-		fmt.Sscanf(ts, "%d", &since.Timestamp)
+		if v, err := strconv.ParseInt(ts, 10, 64); err == nil {
+			since.Timestamp = v
+		}
 	}
 	if cnt := ctx.Query("since_count"); cnt != "" {
-		fmt.Sscanf(cnt, "%d", &since.Counter)
+		if v, err := strconv.ParseUint(cnt, 10, 32); err == nil {
+			since.Counter = uint32(v)
+		}
 	}
 	since.NodeID = ctx.Query("since_node")
 
@@ -757,6 +879,226 @@ func (c *crdtForgeController) handleStream(ctx forge.Context, stream forge.Strea
 			}
 		}
 	}
+}
+
+// --- Time-Travel Handlers ---
+
+// handleHistory handles GET/POST /sync/history using Forge context.
+func (c *crdtForgeController) handleHistory(ctx forge.Context) error {
+	var req crdt.HistoryRequest
+	if ctx.Request().Method == "GET" {
+		req.Table = ctx.Query("table")
+		req.PK = ctx.Query("pk")
+		if ts := ctx.Query("at_ts"); ts != "" {
+			if v, err := strconv.ParseInt(ts, 10, 64); err == nil {
+				req.AtHLC.Timestamp = v
+			}
+		}
+		if cnt := ctx.Query("at_c"); cnt != "" {
+			if v, err := strconv.ParseUint(cnt, 10, 32); err == nil {
+				req.AtHLC.Counter = uint32(v)
+			}
+		}
+		req.AtHLC.NodeID = ctx.Query("at_node")
+	} else {
+		if err := ctx.Bind(&req); err != nil {
+			return ctx.JSON(400, map[string]string{"error": fmt.Sprintf("invalid request: %v", err)})
+		}
+	}
+
+	if req.Table == "" || req.PK == "" {
+		return ctx.JSON(400, map[string]string{"error": "table and pk are required"})
+	}
+
+	resp, err := c.ctrl.HandleHistory(ctx.Request().Context(), &req)
+	if err != nil {
+		return ctx.JSON(500, map[string]string{"error": err.Error()})
+	}
+	return ctx.JSON(200, resp)
+}
+
+// handleFieldHistory handles GET /sync/field-history using Forge context.
+func (c *crdtForgeController) handleFieldHistory(ctx forge.Context) error {
+	var req crdt.FieldHistoryRequest
+	req.Table = ctx.Query("table")
+	req.PK = ctx.Query("pk")
+	req.Field = ctx.Query("field")
+	if limit := ctx.Query("limit"); limit != "" {
+		if v, err := strconv.Atoi(limit); err == nil {
+			req.Limit = v
+		}
+	}
+
+	if req.Table == "" || req.PK == "" || req.Field == "" {
+		return ctx.JSON(400, map[string]string{"error": "table, pk, and field are required"})
+	}
+
+	resp, err := c.ctrl.HandleFieldHistory(ctx.Request().Context(), &req)
+	if err != nil {
+		return ctx.JSON(500, map[string]string{"error": err.Error()})
+	}
+	return ctx.JSON(200, resp)
+}
+
+// --- Room Handlers ---
+
+// handleListRooms handles GET /sync/rooms.
+func (c *crdtForgeController) handleListRooms(ctx forge.Context) error {
+	rm := c.ctrl.Rooms()
+	roomType := ctx.Query("type")
+	var rooms []crdt.RoomInfo
+	if roomType != "" {
+		rooms = rm.ListRoomsByType(roomType)
+	} else {
+		rooms = rm.ListRooms()
+	}
+	return ctx.JSON(200, rooms)
+}
+
+// handleCreateRoom handles POST /sync/rooms.
+func (c *crdtForgeController) handleCreateRoom(ctx forge.Context) error {
+	rm := c.ctrl.Rooms()
+	var req struct {
+		ID              string          `json:"id"`
+		Type            string          `json:"type"`
+		Metadata        json.RawMessage `json:"metadata,omitempty"`
+		MaxParticipants int             `json:"max_participants,omitempty"`
+		CreatedBy       string          `json:"created_by,omitempty"`
+	}
+	if err := ctx.Bind(&req); err != nil {
+		return ctx.JSON(400, map[string]string{"error": fmt.Sprintf("invalid request: %v", err)})
+	}
+	if req.ID == "" {
+		return ctx.JSON(400, map[string]string{"error": "id is required"})
+	}
+
+	var opts []crdt.RoomOption
+	if req.Metadata != nil {
+		opts = append(opts, func(r *crdt.Room) { r.Metadata = req.Metadata })
+	}
+	if req.MaxParticipants > 0 {
+		opts = append(opts, crdt.WithMaxParticipants(req.MaxParticipants))
+	}
+	if req.CreatedBy != "" {
+		opts = append(opts, crdt.WithRoomCreator(req.CreatedBy))
+	}
+
+	room, err := rm.CreateRoom(ctx.Request().Context(), req.ID, req.Type, opts...)
+	if err != nil {
+		return ctx.JSON(500, map[string]string{"error": err.Error()})
+	}
+	return ctx.JSON(201, room)
+}
+
+// handleGetRoom handles GET /sync/rooms/:id.
+func (c *crdtForgeController) handleGetRoom(ctx forge.Context) error {
+	rm := c.ctrl.Rooms()
+	id := ctx.Param("id")
+	info := rm.GetRoomInfo(id)
+	if info == nil {
+		return ctx.JSON(404, map[string]string{"error": "room not found"})
+	}
+	return ctx.JSON(200, info)
+}
+
+// handleJoinRoom handles POST /sync/rooms/:id/join.
+func (c *crdtForgeController) handleJoinRoom(ctx forge.Context) error {
+	rm := c.ctrl.Rooms()
+	id := ctx.Param("id")
+	var req struct {
+		NodeID string          `json:"node_id"`
+		Data   json.RawMessage `json:"data,omitempty"`
+	}
+	if err := ctx.Bind(&req); err != nil {
+		return ctx.JSON(400, map[string]string{"error": fmt.Sprintf("invalid request: %v", err)})
+	}
+	if req.NodeID == "" {
+		return ctx.JSON(400, map[string]string{"error": "node_id is required"})
+	}
+
+	if err := rm.JoinRoom(ctx.Request().Context(), id, req.NodeID, req.Data); err != nil {
+		return ctx.JSON(409, map[string]string{"error": err.Error()})
+	}
+
+	info := rm.GetRoomInfo(id)
+	return ctx.JSON(200, info)
+}
+
+// handleLeaveRoom handles POST /sync/rooms/:id/leave.
+func (c *crdtForgeController) handleLeaveRoom(ctx forge.Context) error {
+	rm := c.ctrl.Rooms()
+	id := ctx.Param("id")
+	var req struct {
+		NodeID string `json:"node_id"`
+	}
+	if err := ctx.Bind(&req); err != nil {
+		return ctx.JSON(400, map[string]string{"error": fmt.Sprintf("invalid request: %v", err)})
+	}
+	if req.NodeID == "" {
+		return ctx.JSON(400, map[string]string{"error": "node_id is required"})
+	}
+
+	rm.LeaveRoom(ctx.Request().Context(), id, req.NodeID)
+	return ctx.NoContent(204)
+}
+
+// handleGetParticipants handles GET /sync/rooms/:id/participants.
+func (c *crdtForgeController) handleGetParticipants(ctx forge.Context) error {
+	rm := c.ctrl.Rooms()
+	id := ctx.Param("id")
+	participants := rm.GetDocumentParticipants("", id)
+	// Use presence.Get directly since the room ID IS the topic.
+	if rm.GetRoom(id) != nil {
+		participants = c.ctrl.Presence().Get(id)
+	}
+	if participants == nil {
+		participants = []crdt.PresenceState{}
+	}
+	return ctx.JSON(200, participants)
+}
+
+// handleUpdateCursor handles POST /sync/rooms/:id/cursor.
+func (c *crdtForgeController) handleUpdateCursor(ctx forge.Context) error {
+	rm := c.ctrl.Rooms()
+	id := ctx.Param("id")
+	var req struct {
+		NodeID string              `json:"node_id"`
+		Cursor crdt.CursorPosition `json:"cursor"`
+	}
+	if err := ctx.Bind(&req); err != nil {
+		return ctx.JSON(400, map[string]string{"error": fmt.Sprintf("invalid request: %v", err)})
+	}
+	rm.UpdateCursor(id, req.NodeID, req.Cursor)
+	return ctx.NoContent(204)
+}
+
+// handleUpdateTyping handles POST /sync/rooms/:id/typing.
+func (c *crdtForgeController) handleUpdateTyping(ctx forge.Context) error {
+	rm := c.ctrl.Rooms()
+	id := ctx.Param("id")
+	var req struct {
+		NodeID   string `json:"node_id"`
+		IsTyping bool   `json:"is_typing"`
+	}
+	if err := ctx.Bind(&req); err != nil {
+		return ctx.JSON(400, map[string]string{"error": fmt.Sprintf("invalid request: %v", err)})
+	}
+	rm.UpdateTypingStatus(id, req.NodeID, req.IsTyping)
+	return ctx.NoContent(204)
+}
+
+// handleUpdateRoomMetadata handles PUT /sync/rooms/:id/metadata.
+func (c *crdtForgeController) handleUpdateRoomMetadata(ctx forge.Context) error {
+	rm := c.ctrl.Rooms()
+	id := ctx.Param("id")
+	var metadata json.RawMessage
+	if err := ctx.Bind(&metadata); err != nil {
+		return ctx.JSON(400, map[string]string{"error": fmt.Sprintf("invalid request: %v", err)})
+	}
+	if err := rm.SetRoomMetadata(id, metadata); err != nil {
+		return ctx.JSON(404, map[string]string{"error": err.Error()})
+	}
+	return ctx.NoContent(204)
 }
 
 // splitAndTrim splits a string by sep and trims whitespace from each part.

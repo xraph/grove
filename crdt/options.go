@@ -76,6 +76,16 @@ func WithGossipInterval(d time.Duration) SyncerOption {
 	return func(s *Syncer) { s.gossipInterval = d }
 }
 
+// WithRetry configures retry behavior for sync operations.
+// Defaults: 3 attempts, 1s base delay, 30s max delay.
+func WithRetry(attempts int, baseDelay, maxDelay time.Duration) SyncerOption {
+	return func(s *Syncer) {
+		s.retryAttempts = attempts
+		s.retryBaseDelay = baseDelay
+		s.retryMaxDelay = maxDelay
+	}
+}
+
 // --- SyncController Options ---
 
 // SyncControllerOption configures a SyncController.
@@ -112,6 +122,42 @@ func WithPresenceEnabled(enabled bool) SyncControllerOption {
 // "leave" event is broadcast. Defaults to 30 seconds.
 func WithPresenceTTL(d time.Duration) SyncControllerOption {
 	return func(c *SyncController) { c.presenceTTL = d }
+}
+
+// WithControllerPlugin registers a CRDT plugin on the sync controller.
+// Plugins intercept merge operations, metadata reads/writes, presence,
+// room events, time-travel queries, and client connections.
+//
+// Example:
+//
+//	type AuditPlugin struct { crdt.BaseCRDTPlugin }
+//	func (p *AuditPlugin) Name() string { return "audit" }
+//	func (p *AuditPlugin) AfterMerge(ctx context.Context, ev *crdt.MergeEvent) error {
+//	    log.Printf("merge: %s/%s field=%s winner=%s", ev.Table, ev.PK, ev.Field, ev.WinnerNodeID)
+//	    return nil
+//	}
+//
+//	crdt.WithControllerPlugin(&AuditPlugin{})
+func WithControllerPlugin(plugin CRDTPlugin) SyncControllerOption {
+	return func(c *SyncController) {
+		c.pluginChain.Add(plugin)
+	}
+}
+
+// WithRoomManager enables the room management subsystem on the controller.
+// Requires presence to be enabled. Provides structured room lifecycle,
+// participant tracking, cursor position tracking, and room listing.
+func WithRoomManager(enabled bool) SyncControllerOption {
+	return func(c *SyncController) {
+		if enabled {
+			c.presenceEnabled = true // Rooms require presence.
+		}
+		// Room manager is created during NewSyncController initialization
+		// after presence is set up. Store a flag.
+		if enabled {
+			c.roomManager = &RoomManager{} // placeholder, replaced during init.
+		}
+	}
 }
 
 // --- StreamingTransport Options ---

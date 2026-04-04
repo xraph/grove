@@ -3,6 +3,7 @@ package kvcrdt
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -51,8 +52,8 @@ func (s *Syncer) Sync(ctx context.Context) (*crdt.SyncReport, error) {
 	}
 
 	for _, key := range keys {
-		if err := s.syncKey(ctx, key, report); err != nil {
-			return report, fmt.Errorf("kvcrdt: sync key %s: %w", key, err)
+		if syncErr := s.syncKey(ctx, key, report); syncErr != nil {
+			return report, fmt.Errorf("kvcrdt: sync key %s: %w", key, syncErr)
 		}
 	}
 
@@ -87,7 +88,7 @@ func (s *Syncer) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				_, _ = s.Sync(ctx)
+				s.Sync(ctx) //nolint:errcheck // background sync loop, errors logged at caller
 			}
 		}
 	}()
@@ -104,12 +105,12 @@ func (s *Syncer) Stop() {
 // syncKey merges a key from primary → replica and replica → primary.
 func (s *Syncer) syncKey(ctx context.Context, key string, report *crdt.SyncReport) error {
 	primaryRaw, err := s.primary.GetRaw(ctx, key)
-	if err != nil && err != kv.ErrNotFound {
+	if err != nil && !errors.Is(err, kv.ErrNotFound) {
 		return err
 	}
 
 	replicaRaw, err := s.replica.GetRaw(ctx, key)
-	if err != nil && err != kv.ErrNotFound {
+	if err != nil && !errors.Is(err, kv.ErrNotFound) {
 		return err
 	}
 
@@ -152,7 +153,7 @@ func (s *Syncer) syncKeyReverse(ctx context.Context, key string, report *crdt.Sy
 	}
 
 	primaryRaw, err := s.primary.GetRaw(ctx, key)
-	if err != nil && err != kv.ErrNotFound {
+	if err != nil && !errors.Is(err, kv.ErrNotFound) {
 		return err
 	}
 
@@ -165,6 +166,9 @@ func (s *Syncer) syncKeyReverse(ctx context.Context, key string, report *crdt.Sy
 }
 
 // mergeRawStates attempts to unmarshal two raw byte slices as crdt.State and merge them.
+// It uses the MergeEngine to perform type-aware merging (LWW, Counter, Set, etc.)
+// instead of simple HLC comparison, which would silently drop concurrent counter
+// increments and set operations.
 func mergeRawStates(a, b []byte) (*crdt.State, error) {
 	if a == nil && b == nil {
 		return nil, fmt.Errorf("both states are nil")
@@ -193,16 +197,13 @@ func mergeRawStates(a, b []byte) (*crdt.State, error) {
 		return stateA, nil
 	}
 
-	// Merge field by field using LWW per field.
-	if stateA.Fields == nil {
-		stateA.Fields = make(map[string]*crdt.FieldState)
-	}
-	for field, fsB := range stateB.Fields {
-		fsA, exists := stateA.Fields[field]
-		if !exists || fsB.HLC.After(fsA.HLC) {
-			stateA.Fields[field] = fsB
-		}
+	// Use the MergeEngine for type-aware field merging. This correctly handles
+	// counters (max-per-node) and sets (tag union) instead of LWW-only logic.
+	engine := crdt.NewMergeEngine()
+	merged, err := engine.MergeState(stateA, stateB)
+	if err != nil {
+		return nil, fmt.Errorf("kvcrdt: merge states: %w", err)
 	}
 
-	return stateA, nil
+	return merged, nil
 }

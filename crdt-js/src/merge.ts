@@ -12,8 +12,11 @@ import type {
   PNCounterState,
   ORSetState,
   ORSetTag,
+  RGAListState,
+  RGANode,
+  DocumentCRDTState,
 } from "./types.js";
-import { hlcAfter, hlcString } from "./hlc.js";
+import { hlcAfter, hlcCompare, hlcString } from "./hlc.js";
 
 // --- LWW Register ---
 
@@ -199,6 +202,232 @@ function deduplicateTags(tags: ORSetTag[]): ORSetTag[] {
   return result;
 }
 
+// --- RGA List ---
+
+/** Compute a deterministic string key for an HLC (used as node map key). */
+function hlcKey(hlc: HLC): string {
+  return `${hlc.ts}:${hlc.c}:${hlc.node}`;
+}
+
+/** Create an empty RGA list state. */
+export function newRGAListState(): RGAListState {
+  return { nodes: {} };
+}
+
+/**
+ * Merge two RGA list states. For each node key, the version with the
+ * higher HLC wins; if equal, prefer non-tombstoned.
+ */
+export function mergeListState(
+  local: RGAListState | undefined,
+  remote: RGAListState | undefined
+): RGAListState {
+  if (!local) return remote ?? newRGAListState();
+  if (!remote) return local;
+
+  const merged = newRGAListState();
+
+  // Copy local nodes.
+  for (const [key, node] of Object.entries(local.nodes)) {
+    merged.nodes[key] = { ...node };
+  }
+
+  // Merge remote nodes.
+  for (const [key, remoteNode] of Object.entries(remote.nodes)) {
+    const existing = merged.nodes[key];
+    if (!existing) {
+      merged.nodes[key] = { ...remoteNode };
+    } else {
+      // Higher HLC wins.
+      if (hlcAfter(remoteNode.id, existing.id)) {
+        merged.nodes[key] = { ...remoteNode };
+      } else if (!hlcAfter(existing.id, remoteNode.id)) {
+        // Equal HLC — prefer non-tombstoned.
+        if (existing.tombstone && !remoteNode.tombstone) {
+          merged.nodes[key] = { ...remoteNode };
+        }
+      }
+    }
+  }
+
+  return merged;
+}
+
+/**
+ * Resolve an RGA list to an ordered array of live (non-tombstoned) values.
+ *
+ * Walks the linked list from root (parent_id is zero HLC) and
+ * uses HLC ordering for sibling resolution.
+ */
+export function listElements(state: RGAListState): unknown[] {
+  const nodes = Object.values(state.nodes);
+  if (nodes.length === 0) return [];
+
+  // Build children map: parent key → sorted children.
+  const childrenMap = new Map<string, RGANode[]>();
+  for (const node of nodes) {
+    const pk = hlcKey(node.parent_id);
+    let children = childrenMap.get(pk);
+    if (!children) {
+      children = [];
+      childrenMap.set(pk, children);
+    }
+    children.push(node);
+  }
+
+  // Sort each group by HLC descending (newest first, matching RGA insert-right semantics).
+  for (const children of childrenMap.values()) {
+    children.sort((a, b) => -hlcCompare(a.id, b.id));
+  }
+
+  // DFS traversal from root.
+  const rootKey = hlcKey({ ts: 0, c: 0, node: "" });
+  const result: unknown[] = [];
+
+  function walk(parentKey: string): void {
+    const children = childrenMap.get(parentKey);
+    if (!children) return;
+    for (const child of children) {
+      if (!child.tombstone) {
+        result.push(child.value);
+      }
+      walk(hlcKey(child.id));
+    }
+  }
+
+  walk(rootKey);
+  return result;
+}
+
+/**
+ * Return the ordered node IDs (HLCs) for live elements in an RGA list.
+ * Order matches listElements().
+ */
+export function listNodeIds(state: RGAListState): HLC[] {
+  const nodes = Object.values(state.nodes);
+  if (nodes.length === 0) return [];
+
+  const childrenMap = new Map<string, RGANode[]>();
+  for (const node of nodes) {
+    const pk = hlcKey(node.parent_id);
+    let children = childrenMap.get(pk);
+    if (!children) {
+      children = [];
+      childrenMap.set(pk, children);
+    }
+    children.push(node);
+  }
+
+  for (const children of childrenMap.values()) {
+    children.sort((a, b) => -hlcCompare(a.id, b.id));
+  }
+
+  const rootKey = hlcKey({ ts: 0, c: 0, node: "" });
+  const result: HLC[] = [];
+
+  function walk(parentKey: string): void {
+    const children = childrenMap.get(parentKey);
+    if (!children) return;
+    for (const child of children) {
+      if (!child.tombstone) {
+        result.push(child.id);
+      }
+      walk(hlcKey(child.id));
+    }
+  }
+
+  walk(rootKey);
+  return result;
+}
+
+// --- Nested Document CRDT ---
+
+/** Create an empty document CRDT state. */
+export function newDocumentCRDTState(): DocumentCRDTState {
+  return { fields: {} };
+}
+
+/**
+ * Merge two nested document CRDT states by merging each field using
+ * the same mergeFieldState logic (recursive for nested documents).
+ */
+export function mergeDocumentState(
+  local: DocumentCRDTState | undefined,
+  remote: DocumentCRDTState | undefined
+): DocumentCRDTState {
+  if (!local) return remote ?? newDocumentCRDTState();
+  if (!remote) return local;
+
+  const merged = newDocumentCRDTState();
+
+  // Copy local fields.
+  for (const [key, field] of Object.entries(local.fields)) {
+    merged.fields[key] = { ...field };
+  }
+
+  // Merge remote fields.
+  for (const [key, remoteField] of Object.entries(remote.fields)) {
+    const existing = merged.fields[key];
+    if (!existing) {
+      merged.fields[key] = { ...remoteField };
+    } else {
+      // For nested docs and lists, merge the sub-state.
+      if (existing.type === "list" && remoteField.type === "list") {
+        merged.fields[key] = {
+          ...existing,
+          hlc: hlcAfter(remoteField.hlc, existing.hlc) ? remoteField.hlc : existing.hlc,
+          list_state: mergeListState(existing.list_state, remoteField.list_state),
+        };
+      } else if (existing.type === "document" && remoteField.type === "document") {
+        merged.fields[key] = {
+          ...existing,
+          hlc: hlcAfter(remoteField.hlc, existing.hlc) ? remoteField.hlc : existing.hlc,
+          doc_state: mergeDocumentState(existing.doc_state, remoteField.doc_state),
+        };
+      } else {
+        // Different types or scalar types — higher HLC wins.
+        if (hlcAfter(remoteField.hlc, existing.hlc)) {
+          merged.fields[key] = { ...remoteField };
+        }
+      }
+    }
+  }
+
+  return merged;
+}
+
+/**
+ * Resolve a nested document CRDT state to a plain object.
+ * Recursively resolves nested documents and lists.
+ */
+export function documentResolve(state: DocumentCRDTState): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+
+  for (const [key, field] of Object.entries(state.fields)) {
+    switch (field.type) {
+      case "lww":
+        result[key] = field.value;
+        break;
+      case "counter":
+        result[key] = field.counter_state ? counterValue(field.counter_state) : 0;
+        break;
+      case "set":
+        result[key] = field.set_state ? setElements(field.set_state) : [];
+        break;
+      case "list":
+        result[key] = field.list_state ? listElements(field.list_state) : [];
+        break;
+      case "document":
+        result[key] = field.doc_state ? documentResolve(field.doc_state) : {};
+        break;
+      default:
+        result[key] = field.value;
+    }
+  }
+
+  return result;
+}
+
 // --- Field-Level Merge ---
 
 /**
@@ -285,6 +514,56 @@ export function mergeFieldState(
         hlc: change.hlc,
         node_id: change.node_id,
         set_state: localSet,
+      };
+    }
+
+    case "list": {
+      let localList = local?.list_state ?? newRGAListState();
+      // Apply list operation from the change.
+      if (change.list_op) {
+        const op = change.list_op;
+        if (op.op === "insert" && op.node_id) {
+          const key = hlcKey(op.node_id);
+          localList.nodes[key] = {
+            id: op.node_id,
+            node_id: change.node_id,
+            parent_id: op.parent_id ?? { ts: 0, c: 0, node: "" },
+            value: op.value,
+          };
+        } else if (op.op === "delete" && op.node_id) {
+          const key = hlcKey(op.node_id);
+          const existing = localList.nodes[key];
+          if (existing) {
+            localList.nodes[key] = { ...existing, tombstone: true };
+          }
+        }
+      }
+      return {
+        type: "list",
+        hlc: change.hlc,
+        node_id: change.node_id,
+        list_state: localList,
+      };
+    }
+
+    case "document": {
+      let localDoc = local?.doc_state ?? newDocumentCRDTState();
+      // For document type, the change carries a field path in the value.
+      // Apply as an LWW field within the nested document.
+      if (change.value !== undefined) {
+        const path = change.field;
+        localDoc.fields[path] = {
+          type: "lww",
+          hlc: change.hlc,
+          node_id: change.node_id,
+          value: change.value,
+        };
+      }
+      return {
+        type: "document",
+        hlc: change.hlc,
+        node_id: change.node_id,
+        doc_state: localDoc,
       };
     }
 

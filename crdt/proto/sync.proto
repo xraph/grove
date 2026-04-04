@@ -1,0 +1,136 @@
+syntax = "proto3";
+
+package grove.crdt.v1;
+
+option go_package = "github.com/xraph/grove/crdt/proto";
+
+// HLC is a Hybrid Logical Clock value.
+message HLC {
+  int64 timestamp = 1;
+  uint32 counter = 2;
+  string node_id = 3;
+}
+
+// ChangeRecord represents a single field-level change for sync transport.
+message ChangeRecord {
+  string table = 1;
+  string pk = 2;
+  string field = 3;
+  string crdt_type = 4;
+  HLC hlc = 5;
+  string node_id = 6;
+  bytes value = 7;
+  bool tombstone = 8;
+  CounterDelta counter_delta = 9;
+  SetOperation set_op = 10;
+  ListOperation list_op = 11;
+}
+
+// CounterDelta represents a single node's counter change.
+message CounterDelta {
+  int64 increment = 1;
+  int64 decrement = 2;
+}
+
+// SetOperation represents an add or remove operation on an OR-Set.
+message SetOperation {
+  string op = 1;   // "add" or "remove"
+  bytes elements = 2; // JSON array of elements
+}
+
+// ListOperation represents an operation on an RGA list.
+message ListOperation {
+  string op = 1;  // "insert", "delete", or "move"
+  HLC node_id = 2;
+  HLC parent_id = 3;
+  bytes value = 4;
+}
+
+// PullRequest asks a remote node for changes since a given point.
+message PullRequest {
+  repeated string tables = 1;
+  HLC since = 2;
+  string node_id = 3;
+  // Selective sync filter (optional).
+  SyncFilter filter = 4;
+}
+
+// PullResponse contains changes from the remote node.
+message PullResponse {
+  repeated ChangeRecord changes = 1;
+  HLC latest_hlc = 2;
+}
+
+// PushRequest sends local changes to a remote node.
+message PushRequest {
+  repeated ChangeRecord changes = 1;
+  string node_id = 2;
+}
+
+// PushResponse acknowledges a push.
+message PushResponse {
+  int32 merged = 1;
+  HLC latest_hlc = 2;
+}
+
+// SyncFilter defines selective sync criteria for partial replication.
+message SyncFilter {
+  // Only sync records matching these primary keys.
+  repeated string pk_filter = 1;
+  // Only sync these fields.
+  repeated string field_filter = 2;
+  // Custom predicate expressions (driver-specific).
+  map<string, string> predicates = 3;
+}
+
+// PresenceUpdate is a request to update presence state.
+message PresenceUpdate {
+  string node_id = 1;
+  string topic = 2;
+  bytes data = 3;
+}
+
+// PresenceEvent is a presence change notification.
+message PresenceEvent {
+  string type = 1;  // "join", "update", "leave"
+  string node_id = 2;
+  string topic = 3;
+  bytes data = 4;
+}
+
+// PresenceState represents a single client's presence.
+message PresenceState {
+  string node_id = 1;
+  string topic = 2;
+  bytes data = 3;
+  int64 updated_at = 4;
+}
+
+// PresenceSnapshot is a response containing all active presence for a topic.
+message PresenceSnapshot {
+  string topic = 1;
+  repeated PresenceState states = 2;
+}
+
+// WebSocketFrame is the framing format for multiplexed WebSocket messages.
+message WebSocketFrame {
+  FrameType type = 1;
+  bytes payload = 2;
+  string request_id = 3; // For correlating request/response pairs.
+}
+
+enum FrameType {
+  FRAME_TYPE_UNSPECIFIED = 0;
+  FRAME_TYPE_PULL_REQUEST = 1;
+  FRAME_TYPE_PULL_RESPONSE = 2;
+  FRAME_TYPE_PUSH_REQUEST = 3;
+  FRAME_TYPE_PUSH_RESPONSE = 4;
+  FRAME_TYPE_CHANGE = 5;
+  FRAME_TYPE_CHANGES = 6;
+  FRAME_TYPE_PRESENCE_UPDATE = 7;
+  FRAME_TYPE_PRESENCE_EVENT = 8;
+  FRAME_TYPE_PRESENCE_SNAPSHOT = 9;
+  FRAME_TYPE_ERROR = 10;
+  FRAME_TYPE_PING = 11;
+  FRAME_TYPE_PONG = 12;
+}

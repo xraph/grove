@@ -1,8 +1,8 @@
 // Package kvcrdt bridges grove/crdt types into KV storage, enabling
 // distributed, eventually-consistent state without a relational database.
 //
-// It provides CRDT-backed distributed counters, registers, sets, and maps
-// that use a KV Store for persistence and can be synchronized across stores.
+// It provides CRDT-backed distributed counters, registers, sets, maps, lists,
+// and documents that use a KV Store for persistence and can be synchronized across stores.
 package kvcrdt
 
 import (

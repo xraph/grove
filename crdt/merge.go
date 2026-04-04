@@ -56,6 +56,33 @@ func (m *MergeEngine) MergeField(local, remote *FieldState) (*FieldState, error)
 		}
 		return merged.ToFieldState(clock, nodeID), nil
 
+	case TypeList:
+		localList := ListFromFieldState(local)
+		remoteList := ListFromFieldState(remote)
+		merged := MergeList(localList, remoteList)
+		clock := local.HLC
+		nodeID := local.NodeID
+		if remote.HLC.After(local.HLC) {
+			clock = remote.HLC
+			nodeID = remote.NodeID
+		}
+		return merged.ToFieldState(clock, nodeID), nil
+
+	case TypeDocument:
+		localDoc := DocumentFromFieldState(local)
+		remoteDoc := DocumentFromFieldState(remote)
+		merged, err := MergeDocument(localDoc, remoteDoc)
+		if err != nil {
+			return nil, fmt.Errorf("crdt: merge document: %w", err)
+		}
+		clock := local.HLC
+		nodeID := local.NodeID
+		if remote.HLC.After(local.HLC) {
+			clock = remote.HLC
+			nodeID = remote.NodeID
+		}
+		return merged.ToFieldState(clock, nodeID), nil
+
 	default:
 		return nil, fmt.Errorf("crdt: unknown type: %s", local.Type)
 	}
