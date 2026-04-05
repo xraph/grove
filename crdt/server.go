@@ -486,6 +486,11 @@ func (c *SyncController) Metrics() *Metrics {
 	return c.metrics
 }
 
+// Logger returns the controller's logger.
+func (c *SyncController) Logger() log.Logger {
+	return c.logger
+}
+
 // PresenceChannel returns the channel for receiving presence events to
 // broadcast over SSE streams. Returns nil if presence is disabled.
 func (c *SyncController) PresenceChannel() <-chan PresenceEvent {

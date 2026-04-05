@@ -3,6 +3,7 @@ import { CRDTStore } from "../store.js";
 import { HybridClock } from "../hlc.js";
 import { counterValue, setElements } from "../merge.js";
 import type { ChangeRecord } from "../types.js";
+import type { StorePlugin, WriteHook, MergeHook, ReadHook } from "../plugin.js";
 
 function createTestStore(nodeID = "test-node") {
   let time = 1000;
@@ -618,6 +619,244 @@ describe("CRDTStore", () => {
       store.applyChanges([change]);
       const doc = store.getDocument<Record<string, unknown>>("t", "1");
       expect(doc!.custom).toBe("custom-val");
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Plugins (via store API)
+  // ---------------------------------------------------------------------------
+
+  describe("CRDTStore - Plugins", () => {
+    it("registers plugins via use()", () => {
+      const { store } = createTestStore();
+      const init = vi.fn();
+      store.use({ name: "test-plugin", init });
+      expect(init).toHaveBeenCalledTimes(1);
+    });
+
+    it("removes plugins via removePlugin()", () => {
+      const { store } = createTestStore();
+      const destroy = vi.fn();
+      store.use({ name: "test-plugin", destroy });
+      store.removePlugin("test-plugin");
+      expect(destroy).toHaveBeenCalledTimes(1);
+    });
+
+    it("gets plugins via getPlugin()", () => {
+      const { store } = createTestStore();
+      const plugin = { name: "my-plugin" };
+      store.use(plugin);
+      expect(store.getPlugin("my-plugin")).toBe(plugin);
+      expect(store.getPlugin("non-existent")).toBeUndefined();
+    });
+
+    it("runs WriteHook.beforeWrite on setField", () => {
+      const { store } = createTestStore();
+      const beforeWrite = vi.fn((ev: any) => ev);
+      store.use({ name: "w", beforeWrite } as StorePlugin & WriteHook);
+
+      store.setField("users", "1", "name", "Alice");
+      expect(beforeWrite).toHaveBeenCalledTimes(1);
+      expect(beforeWrite.mock.calls[0][0].table).toBe("users");
+      expect(beforeWrite.mock.calls[0][0].field).toBe("name");
+    });
+
+    it("rejects writes when plugin returns null", () => {
+      const { store } = createTestStore();
+      store.use({
+        name: "blocker",
+        beforeWrite() {
+          return null;
+        },
+      } as StorePlugin & WriteHook);
+
+      const result = store.setField("users", "1", "name", "Alice");
+      expect(result).toBeNull();
+      expect(store.getDocument("users", "1")).toBeNull();
+      expect(store.pendingCount).toBe(0);
+    });
+
+    it("runs MergeHook.beforeMerge on applyChanges", () => {
+      const { store } = createTestStore();
+      const beforeMerge = vi.fn((ev: any) => ev.remote);
+      store.use({ name: "m", beforeMerge } as StorePlugin & MergeHook);
+
+      const change: ChangeRecord = {
+        table: "users",
+        pk: "1",
+        field: "name",
+        crdt_type: "lww",
+        hlc: { ts: 500_000_000_000, c: 0, node: "remote" },
+        node_id: "remote",
+        value: "Alice",
+      };
+      store.applyChanges([change]);
+      expect(beforeMerge).toHaveBeenCalledTimes(1);
+    });
+
+    it("runs ReadHook.transformDocument on getDocument", () => {
+      const { store } = createTestStore();
+      store.use({
+        name: "read",
+        transformDocument<T>(_table: string, _pk: string, doc: T): T {
+          return { ...(doc as object), computed: true } as T;
+        },
+      } as StorePlugin & ReadHook);
+
+      store.setField("users", "1", "name", "Alice");
+      const doc = store.getDocument<Record<string, unknown>>("users", "1");
+      expect(doc!.computed).toBe(true);
+      expect(doc!.name).toBe("Alice");
+    });
+
+    it("runs ReadHook.transformCollection on getCollection", () => {
+      const { store } = createTestStore();
+      store.use({
+        name: "read",
+        transformCollection<T>(_table: string, docs: T[]): T[] {
+          return docs.slice(0, 1); // Only return first doc
+        },
+      } as StorePlugin & ReadHook);
+
+      store.setField("users", "1", "name", "Alice");
+      store.setField("users", "2", "name", "Bob");
+      const col = store.getCollection("users");
+      expect(col).toHaveLength(1);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Batch Writes
+  // ---------------------------------------------------------------------------
+
+  describe("CRDTStore - Batch Writes", () => {
+    it("creates a batch writer via batch()", () => {
+      const { store } = createTestStore();
+      const batch = store.batch("users", "1");
+      expect(batch).toBeDefined();
+      expect(typeof batch.setField).toBe("function");
+      expect(typeof batch.commit).toBe("function");
+    });
+
+    it("commits multiple field changes atomically", () => {
+      const { store } = createTestStore();
+      const changes = store.batch("users", "1")
+        .setField("name", "Alice")
+        .setField("email", "alice@example.com")
+        .commit();
+
+      expect(changes).toHaveLength(2);
+      const doc = store.getDocument<{ name: string; email: string }>("users", "1");
+      expect(doc!.name).toBe("Alice");
+      expect(doc!.email).toBe("alice@example.com");
+    });
+
+    it("batch setField + incrementCounter together", () => {
+      const { store } = createTestStore();
+      store.batch("users", "1")
+        .setField("name", "Alice")
+        .incrementCounter("views", 5)
+        .commit();
+
+      const doc = store.getDocument<{ name: string; views: number }>("users", "1");
+      expect(doc!.name).toBe("Alice");
+      expect(doc!.views).toBe(5);
+    });
+
+    it("batch changes appear in pending", () => {
+      const { store } = createTestStore();
+      expect(store.pendingCount).toBe(0);
+
+      store.batch("users", "1")
+        .setField("name", "Alice")
+        .setField("email", "alice@example.com")
+        .commit();
+
+      expect(store.pendingCount).toBe(2);
+    });
+
+    it("batch notifies listeners once", () => {
+      const { store } = createTestStore();
+      const listener = vi.fn();
+      store.subscribeDocument("users", "1", listener);
+
+      store.batch("users", "1")
+        .setField("name", "Alice")
+        .setField("email", "alice@example.com")
+        .commit();
+
+      // commitBatch calls notifyListeners once for the whole batch.
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // State Export/Import
+  // ---------------------------------------------------------------------------
+
+  describe("CRDTStore - State Export/Import", () => {
+    it("exports state as snapshot", () => {
+      const { store } = createTestStore();
+      store.setField("users", "1", "name", "Alice");
+
+      const snapshot = store.exportState();
+      expect(snapshot.version).toBe(1);
+      expect(snapshot.nodeId).toBe("test-node");
+      expect(snapshot.timestamp).toBeGreaterThan(0);
+      expect(snapshot.tables["users"]).toBeDefined();
+      expect(snapshot.tables["users"]["1"]).toBeDefined();
+    });
+
+    it("imports state from snapshot", () => {
+      const { store: store1 } = createTestStore("node-1");
+      store1.setField("users", "1", "name", "Alice");
+      const snapshot = store1.exportState();
+
+      const { store: store2 } = createTestStore("node-2");
+      store2.importState(snapshot);
+
+      const doc = store2.getDocument<{ name: string }>("users", "1");
+      expect(doc!.name).toBe("Alice");
+    });
+
+    it("import replaces existing state", () => {
+      const { store } = createTestStore();
+      store.setField("users", "1", "name", "Alice");
+      store.setField("posts", "1", "title", "Hello");
+
+      // Import a snapshot with only users table.
+      const snapshot = store.exportState();
+      // Remove posts from snapshot.
+      delete snapshot.tables["posts"];
+
+      store.importState(snapshot);
+
+      expect(store.getDocument("users", "1")).not.toBeNull();
+      expect(store.getCollection("posts")).toEqual([]);
+    });
+
+    it("export includes pending changes", () => {
+      const { store } = createTestStore();
+      store.setField("users", "1", "name", "Alice");
+      store.setField("users", "1", "email", "alice@example.com");
+
+      const snapshot = store.exportState();
+      expect(snapshot.pending).toHaveLength(2);
+      expect(snapshot.pending[0].field).toBe("name");
+      expect(snapshot.pending[1].field).toBe("email");
+    });
+
+    it("exportTable returns single table", () => {
+      const { store } = createTestStore();
+      store.setField("users", "1", "name", "Alice");
+      store.setField("posts", "1", "title", "Hello");
+
+      const usersTable = store.exportTable("users");
+      expect(Object.keys(usersTable)).toEqual(["1"]);
+      expect(usersTable["1"].table).toBe("users");
+
+      const emptyTable = store.exportTable("nonexistent");
+      expect(Object.keys(emptyTable)).toHaveLength(0);
     });
   });
 });

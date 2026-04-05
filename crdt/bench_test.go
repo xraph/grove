@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	log "github.com/xraph/go-utils/log"
 )
 
 // --- Merge Benchmarks ---
@@ -344,5 +347,293 @@ func BenchmarkChangeRecord_Unmarshal(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		var record ChangeRecord
 		json.Unmarshal(data, &record)
+	}
+}
+
+// --- List Benchmarks ---
+
+func BenchmarkMergeList(b *testing.B) {
+	for _, size := range []int{10, 100, 1000} {
+		b.Run(fmt.Sprintf("%d-nodes", size), func(b *testing.B) {
+			clock := NewHybridClock("bench")
+			l1 := NewRGAListState()
+			l2 := NewRGAListState()
+
+			// Insert shared elements into both lists.
+			shared := size / 2
+			var parentID HLC
+			for i := 0; i < shared; i++ {
+				hlc := clock.Now()
+				_ = l1.Insert(fmt.Sprintf("shared-%d", i), parentID, "node-a", hlc)
+				_ = l2.Insert(fmt.Sprintf("shared-%d", i), parentID, "node-a", hlc)
+				parentID = hlc
+			}
+
+			// Insert unique elements into each list.
+			for i := 0; i < size-shared; i++ {
+				hlc := clock.Now()
+				_ = l1.Insert(fmt.Sprintf("l1-%d", i), parentID, "node-a", hlc)
+			}
+			for i := 0; i < size-shared; i++ {
+				hlc := clock.Now()
+				_ = l2.Insert(fmt.Sprintf("l2-%d", i), parentID, "node-b", hlc)
+			}
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				MergeList(l1, l2)
+			}
+		})
+	}
+}
+
+func BenchmarkRGAList_Insert(b *testing.B) {
+	clock := NewHybridClock("bench")
+	list := NewRGAListState()
+	var parentID HLC
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		hlc := clock.Now()
+		_ = list.Insert(fmt.Sprintf("elem-%d", i), parentID, "node-a", hlc)
+		parentID = hlc
+	}
+}
+
+func BenchmarkRGAList_Elements(b *testing.B) {
+	for _, size := range []int{10, 100, 1000} {
+		b.Run(fmt.Sprintf("%d-elements", size), func(b *testing.B) {
+			clock := NewHybridClock("bench")
+			list := NewRGAListState()
+			var parentID HLC
+			for i := 0; i < size; i++ {
+				hlc := clock.Now()
+				_ = list.Insert(fmt.Sprintf("elem-%d", i), parentID, "node-a", hlc)
+				parentID = hlc
+			}
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				list.Elements()
+			}
+		})
+	}
+}
+
+// --- Document Benchmarks ---
+
+func BenchmarkMergeDocument(b *testing.B) {
+	for _, paths := range []int{5, 20, 100} {
+		b.Run(fmt.Sprintf("%d-paths", paths), func(b *testing.B) {
+			d1 := NewDocumentCRDTState()
+			d2 := NewDocumentCRDTState()
+			for i := 0; i < paths; i++ {
+				path := fmt.Sprintf("section.field_%d", i)
+				_ = d1.SetField(path, fmt.Sprintf("val-a-%d", i), HLC{Timestamp: int64(i * 10), Counter: 1, NodeID: "node-a"}, "node-a")
+				_ = d2.SetField(path, fmt.Sprintf("val-b-%d", i), HLC{Timestamp: int64(i*10 + 5), Counter: 1, NodeID: "node-b"}, "node-b")
+			}
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				MergeDocument(d1, d2)
+			}
+		})
+	}
+}
+
+func BenchmarkDocumentCRDT_Resolve(b *testing.B) {
+	for _, paths := range []int{5, 20, 100} {
+		b.Run(fmt.Sprintf("%d-paths", paths), func(b *testing.B) {
+			doc := NewDocumentCRDTState()
+			for i := 0; i < paths; i++ {
+				path := fmt.Sprintf("section.sub_%d.field", i)
+				_ = doc.SetField(path, fmt.Sprintf("value-%d", i), HLC{Timestamp: int64(i), Counter: 1, NodeID: "node-a"}, "node-a")
+			}
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				doc.Resolve()
+			}
+		})
+	}
+}
+
+// --- MergeEngine Benchmarks for new types ---
+
+func BenchmarkMergeEngine_MergeField_List(b *testing.B) {
+	engine := NewMergeEngine()
+	clock := NewHybridClock("bench")
+
+	l1 := NewRGAListState()
+	l2 := NewRGAListState()
+	var parentID HLC
+	for i := 0; i < 20; i++ {
+		hlc := clock.Now()
+		_ = l1.Insert(fmt.Sprintf("l1-%d", i), parentID, "node-a", hlc)
+		parentID = hlc
+	}
+	parentID = HLC{}
+	for i := 0; i < 20; i++ {
+		hlc := clock.Now()
+		_ = l2.Insert(fmt.Sprintf("l2-%d", i), parentID, "node-b", hlc)
+		parentID = hlc
+	}
+
+	local := l1.ToFieldState(HLC{Timestamp: 100, NodeID: "node-a"}, "node-a")
+	remote := l2.ToFieldState(HLC{Timestamp: 200, NodeID: "node-b"}, "node-b")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		engine.MergeField(local, remote)
+	}
+}
+
+func BenchmarkMergeEngine_MergeField_Document(b *testing.B) {
+	engine := NewMergeEngine()
+
+	d1 := NewDocumentCRDTState()
+	d2 := NewDocumentCRDTState()
+	for i := 0; i < 10; i++ {
+		path := fmt.Sprintf("field_%d", i)
+		_ = d1.SetField(path, fmt.Sprintf("a-%d", i), HLC{Timestamp: int64(i * 10), NodeID: "node-a"}, "node-a")
+		_ = d2.SetField(path, fmt.Sprintf("b-%d", i), HLC{Timestamp: int64(i*10 + 5), NodeID: "node-b"}, "node-b")
+	}
+
+	local := d1.ToFieldState(HLC{Timestamp: 100, NodeID: "node-a"}, "node-a")
+	remote := d2.ToFieldState(HLC{Timestamp: 200, NodeID: "node-b"}, "node-b")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		engine.MergeField(local, remote)
+	}
+}
+
+// --- Plugin Chain Benchmarks ---
+
+func BenchmarkPluginChain_DispatchBeforeMerge(b *testing.B) {
+	ev := &MergeEvent{
+		Table:  "docs",
+		PK:     "1",
+		Field:  "title",
+		Local:  &FieldState{Type: TypeLWW, HLC: HLC{Timestamp: 100, NodeID: "a"}, NodeID: "a", Value: json.RawMessage(`"local"`)},
+		Remote: &FieldState{Type: TypeLWW, HLC: HLC{Timestamp: 200, NodeID: "b"}, NodeID: "b", Value: json.RawMessage(`"remote"`)},
+	}
+	ctx := context.Background()
+
+	b.Run("0-plugins", func(b *testing.B) {
+		pc := NewPluginChain()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			pc.DispatchBeforeMerge(ctx, ev)
+		}
+	})
+
+	b.Run("1-plugin", func(b *testing.B) {
+		pc := NewPluginChain()
+		pc.Add(&BaseCRDTPlugin{})
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			pc.DispatchBeforeMerge(ctx, ev)
+		}
+	})
+
+	b.Run("5-plugins", func(b *testing.B) {
+		pc := NewPluginChain()
+		for j := 0; j < 5; j++ {
+			pc.Add(&BaseCRDTPlugin{})
+		}
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			pc.DispatchBeforeMerge(ctx, ev)
+		}
+	})
+}
+
+// --- Validation Benchmarks ---
+
+func BenchmarkValidation_ValidateChangeRecord(b *testing.B) {
+	vc := DefaultValidationConfig()
+	// Disable drift check so benchmark doesn't fail due to timing.
+	vc.MaxHLCDrift = 0
+
+	change := &ChangeRecord{
+		Table:    "documents",
+		PK:       "doc-123",
+		Field:    "title",
+		CRDTType: TypeLWW,
+		HLC:      HLC{Timestamp: time.Now().UnixNano(), Counter: 1, NodeID: "node-a"},
+		NodeID:   "node-a",
+		Value:    json.RawMessage(`"hello world"`),
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		vc.ValidateChangeRecord(change)
+	}
+}
+
+func BenchmarkValidation_ValidatePushRequest(b *testing.B) {
+	vc := DefaultValidationConfig()
+	vc.MaxHLCDrift = 0
+
+	for _, count := range []int{1, 10, 100} {
+		b.Run(fmt.Sprintf("%d-changes", count), func(b *testing.B) {
+			changes := make([]ChangeRecord, count)
+			for i := 0; i < count; i++ {
+				changes[i] = ChangeRecord{
+					Table:    "documents",
+					PK:       fmt.Sprintf("doc-%d", i),
+					Field:    "title",
+					CRDTType: TypeLWW,
+					HLC:      HLC{Timestamp: time.Now().UnixNano(), Counter: 1, NodeID: "node-a"},
+					NodeID:   "node-a",
+					Value:    json.RawMessage(`"value"`),
+				}
+			}
+			req := &PushRequest{
+				NodeID:  "node-a",
+				Changes: changes,
+			}
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				vc.ValidatePushRequest(req)
+			}
+		})
+	}
+}
+
+// --- Room Benchmarks ---
+
+func BenchmarkRoomManager_JoinLeave(b *testing.B) {
+	pm := NewPresenceManager(30*time.Second, nil, log.NewNoopLogger())
+	rm := NewRoomManager(pm, log.NewNoopLogger())
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		nodeID := fmt.Sprintf("node-%d", i)
+		_ = rm.JoinRoom(ctx, "bench-room", nodeID, nil)
+		rm.LeaveRoom(ctx, "bench-room", nodeID)
+	}
+}
+
+func BenchmarkRoomManager_UpdateCursor(b *testing.B) {
+	pm := NewPresenceManager(30*time.Second, nil, log.NewNoopLogger())
+	rm := NewRoomManager(pm, log.NewNoopLogger())
+	ctx := context.Background()
+
+	_ = rm.JoinRoom(ctx, "bench-room", "node-1", nil)
+
+	cursor := CursorPosition{
+		Line:   10,
+		Column: 25,
+		Field:  "content",
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cursor.Line = i % 100
+		rm.UpdateCursor("bench-room", "node-1", cursor)
 	}
 }

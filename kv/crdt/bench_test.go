@@ -100,3 +100,65 @@ func BenchmarkSyncer_Sync(b *testing.B) {
 		})
 	}
 }
+
+// --- List Benchmarks ---
+
+func BenchmarkList_Append(b *testing.B) {
+	store := kvtest.BenchStore(b)
+	list := kvcrdt.NewList[string](store, "crdt:bench:list:append", kvcrdt.WithNodeID("node1"))
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = list.Append(ctx, fmt.Sprintf("elem-%d", i))
+	}
+}
+
+func BenchmarkList_Elements(b *testing.B) {
+	for _, n := range []int{10, 100} {
+		b.Run(fmt.Sprintf("%d_elements", n), func(b *testing.B) {
+			store := kvtest.BenchStore(b)
+			list := kvcrdt.NewList[string](store, "crdt:bench:list:elems", kvcrdt.WithNodeID("node1"))
+			ctx := context.Background()
+			for i := 0; i < n; i++ {
+				_ = list.Append(ctx, fmt.Sprintf("elem-%d", i))
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_, _ = list.Elements(ctx)
+			}
+		})
+	}
+}
+
+// --- Document Benchmarks ---
+
+func BenchmarkDocument_Set(b *testing.B) {
+	for _, n := range []int{10, 50} {
+		b.Run(fmt.Sprintf("%d_fields", n), func(b *testing.B) {
+			store := kvtest.BenchStore(b)
+			doc := kvcrdt.NewDocument(store, "crdt:bench:doc:set", kvcrdt.WithNodeID("node1"))
+			ctx := context.Background()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = doc.Set(ctx, fmt.Sprintf("field_%d", i%n), "value")
+			}
+		})
+	}
+}
+
+func BenchmarkDocument_Resolve(b *testing.B) {
+	for _, n := range []int{5, 20} {
+		b.Run(fmt.Sprintf("%d_paths", n), func(b *testing.B) {
+			store := kvtest.BenchStore(b)
+			doc := kvcrdt.NewDocument(store, "crdt:bench:doc:resolve", kvcrdt.WithNodeID("node1"))
+			ctx := context.Background()
+			for i := 0; i < n; i++ {
+				_ = doc.Set(ctx, fmt.Sprintf("section.field_%d", i), fmt.Sprintf("value-%d", i))
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_, _ = doc.Resolve(ctx)
+			}
+		})
+	}
+}

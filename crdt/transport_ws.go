@@ -342,6 +342,64 @@ func (t *WebSocketTransport) pingLoop(ctx context.Context) {
 	}
 }
 
+// --- Forge Transport Adapters ---
+
+// ForgeWSConn adapts a Forge Connection (from forge.WebSocketHandler) to the
+// WebSocketConn interface used by CRDT transport. This allows the CRDT WebSocket
+// handler to work natively with Forge's built-in WebSocket upgrade machinery.
+//
+// Usage inside a Forge WebSocket handler:
+//
+//	sync.WebSocket("/ws", func(ctx forge.Context, conn forge.Connection) error {
+//	    adapter := crdt.NewForgeWSConn(conn)
+//	    handler := crdt.NewWebSocketHandler(ctrl, adapter, logger)
+//	    return handler.Serve(conn.Context())
+//	})
+type ForgeWSConn struct {
+	id   string
+	conn forgeConnection
+}
+
+// forgeConnection is the minimal interface from forge.Connection that we need.
+// This avoids importing forge directly in the crdt package (which has no
+// forge dependency). The extension package provides the concrete type.
+type forgeConnection interface {
+	ID() string
+	Read() ([]byte, error)
+	Write(data []byte) error
+	WriteJSON(v any) error
+	ReadJSON(v any) error
+	Close() error
+}
+
+// NewForgeWSConn creates a WebSocketConn adapter from a forge.Connection.
+func NewForgeWSConn(conn forgeConnection) *ForgeWSConn {
+	return &ForgeWSConn{
+		id:   conn.ID(),
+		conn: conn,
+	}
+}
+
+// ReadMessage implements WebSocketConn using forge.Connection.Read().
+func (f *ForgeWSConn) ReadMessage() ([]byte, error) {
+	return f.conn.Read()
+}
+
+// WriteMessage implements WebSocketConn using forge.Connection.Write().
+func (f *ForgeWSConn) WriteMessage(data []byte) error {
+	return f.conn.Write(data)
+}
+
+// Close implements WebSocketConn using forge.Connection.Close().
+func (f *ForgeWSConn) Close() error {
+	return f.conn.Close()
+}
+
+// ID returns the forge connection ID.
+func (f *ForgeWSConn) ID() string {
+	return f.id
+}
+
 // --- Server-side WebSocket Handler ---
 
 // WebSocketHandler processes WebSocket messages on the server side.

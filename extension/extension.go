@@ -623,12 +623,20 @@ func (c *crdtForgeController) Routes(r forge.Router) error {
 		return fmt.Errorf("crdt: register push route: %w", err)
 	}
 
-	// GET /sync/stream — SSE stream of real-time changes.
+	// GET /sync/stream — SSE stream of real-time changes (Forge SSE transport).
 	if err := sync.EventStream("/stream", c.handleStream,
 		forge.WithName("crdt.stream"),
 		forge.WithTags("crdt", "sync", "streaming"),
 	); err != nil {
 		return fmt.Errorf("crdt: register stream route: %w", err)
+	}
+
+	// GET /sync/ws — WebSocket bidirectional sync (Forge WebSocket transport).
+	if err := sync.WebSocket("/ws", c.handleWebSocket,
+		forge.WithName("crdt.websocket"),
+		forge.WithTags("crdt", "sync", "websocket"),
+	); err != nil {
+		return fmt.Errorf("crdt: register websocket route: %w", err)
 	}
 
 	// Presence routes (only registered when presence is enabled).
@@ -803,6 +811,21 @@ func (c *crdtForgeController) handleGetPresence(ctx forge.Context) error {
 	}
 
 	return ctx.JSON(200, snapshot)
+}
+
+// handleWebSocket handles GET /sync/ws using Forge WebSocket transport.
+// The connection upgrade is handled by Forge's built-in WebSocket machinery.
+// This uses the CRDT WebSocketHandler for multiplexed pull/push/subscribe/presence
+// over a single persistent connection.
+func (c *crdtForgeController) handleWebSocket(_ forge.Context, conn forge.Connection) error {
+	// Adapt Forge Connection to CRDT WebSocketConn interface.
+	adapter := crdt.NewForgeWSConn(conn)
+
+	// Create per-connection CRDT WebSocket handler.
+	handler := crdt.NewWebSocketHandler(c.ctrl, adapter, c.ctrl.Logger())
+
+	// Serve until the connection closes.
+	return handler.Serve(conn.Context())
 }
 
 // handleStream handles GET /sync/stream using Forge SSE streaming.

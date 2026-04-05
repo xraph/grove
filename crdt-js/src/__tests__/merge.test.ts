@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { HLC, ChangeRecord, ORSetTag, ORSetState } from "../types.js";
+import type { HLC, ChangeRecord, ORSetTag, ORSetState, RGAListState, RGANode, DocumentCRDTState } from "../types.js";
 import {
   mergeLWW,
   newPNCounterState,
@@ -10,6 +10,13 @@ import {
   mergeSet,
   setElements,
   mergeFieldState,
+  newRGAListState,
+  mergeListState,
+  listElements,
+  listNodeIds,
+  newDocumentCRDTState,
+  mergeDocumentState,
+  documentResolve,
 } from "../merge.js";
 import type { LWWValue } from "../merge.js";
 
@@ -602,5 +609,199 @@ describe("mergeFieldState", () => {
       expect(result.value).toBe("fallback");
       expect(result.type).toBe("unknown_type");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// List CRDT merge
+// ---------------------------------------------------------------------------
+
+describe("List CRDT merge", () => {
+  /** Helper to build an RGA node. */
+  function makeNode(ts: number, node: string, parentTs = 0, value?: unknown): RGANode {
+    return {
+      id: { ts, c: 0, node },
+      node_id: node,
+      parent_id: { ts: parentTs, c: 0, node: parentTs === 0 ? "" : node },
+      value: value ?? `val-${ts}`,
+    };
+  }
+
+  /** Helper to build key for an HLC. */
+  function nk(ts: number, node: string): string {
+    return `${ts}:0:${node}`;
+  }
+
+  it("merges two empty lists", () => {
+    const merged = mergeListState(newRGAListState(), newRGAListState());
+    expect(Object.keys(merged.nodes)).toHaveLength(0);
+    expect(listElements(merged)).toEqual([]);
+  });
+
+  it("merges disjoint lists", () => {
+    const local: RGAListState = {
+      nodes: { [nk(1, "a")]: makeNode(1, "a", 0, "x") },
+    };
+    const remote: RGAListState = {
+      nodes: { [nk(2, "b")]: makeNode(2, "b", 0, "y") },
+    };
+    const merged = mergeListState(local, remote);
+    expect(Object.keys(merged.nodes)).toHaveLength(2);
+
+    const elems = listElements(merged);
+    expect(elems).toContain("x");
+    expect(elems).toContain("y");
+  });
+
+  it("preserves tombstones from both sides", () => {
+    const localNode = makeNode(1, "a", 0, "x");
+    const remoteNode = { ...makeNode(2, "b", 0, "y"), tombstone: true };
+
+    const local: RGAListState = { nodes: { [nk(1, "a")]: localNode } };
+    const remote: RGAListState = { nodes: { [nk(2, "b")]: remoteNode } };
+    const merged = mergeListState(local, remote);
+
+    expect(Object.keys(merged.nodes)).toHaveLength(2);
+    // Only non-tombstoned nodes appear in elements.
+    const elems = listElements(merged);
+    expect(elems).toEqual(["x"]);
+  });
+
+  it("listElements returns visible elements in order", () => {
+    // Build a 3-element list: A -> B -> C (chained via parent_id).
+    const nodeA = makeNode(1, "a", 0, "A");
+    const nodeB: RGANode = {
+      id: { ts: 2, c: 0, node: "a" },
+      node_id: "a",
+      parent_id: { ts: 1, c: 0, node: "a" },
+      value: "B",
+    };
+    const nodeC: RGANode = {
+      id: { ts: 3, c: 0, node: "a" },
+      node_id: "a",
+      parent_id: { ts: 2, c: 0, node: "a" },
+      value: "C",
+    };
+
+    const state: RGAListState = {
+      nodes: {
+        [nk(1, "a")]: nodeA,
+        [nk(2, "a")]: nodeB,
+        [nk(3, "a")]: nodeC,
+      },
+    };
+
+    expect(listElements(state)).toEqual(["A", "B", "C"]);
+  });
+
+  it("listNodeIds returns HLC IDs", () => {
+    const nodeA = makeNode(1, "a", 0, "A");
+    const nodeB: RGANode = {
+      id: { ts: 2, c: 0, node: "a" },
+      node_id: "a",
+      parent_id: { ts: 1, c: 0, node: "a" },
+      value: "B",
+    };
+
+    const state: RGAListState = {
+      nodes: {
+        [nk(1, "a")]: nodeA,
+        [nk(2, "a")]: nodeB,
+      },
+    };
+
+    const ids = listNodeIds(state);
+    expect(ids).toHaveLength(2);
+    expect(ids[0].ts).toBe(1);
+    expect(ids[1].ts).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Document CRDT merge
+// ---------------------------------------------------------------------------
+
+describe("Document CRDT merge", () => {
+  it("merges two empty documents", () => {
+    const merged = mergeDocumentState(newDocumentCRDTState(), newDocumentCRDTState());
+    expect(Object.keys(merged.fields)).toHaveLength(0);
+    expect(documentResolve(merged)).toEqual({});
+  });
+
+  it("merges disjoint paths", () => {
+    const local: DocumentCRDTState = {
+      fields: {
+        name: { type: "lww", hlc: { ts: 1, c: 0, node: "a" }, node_id: "a", value: "Alice" },
+      },
+    };
+    const remote: DocumentCRDTState = {
+      fields: {
+        email: { type: "lww", hlc: { ts: 2, c: 0, node: "b" }, node_id: "b", value: "alice@example.com" },
+      },
+    };
+
+    const merged = mergeDocumentState(local, remote);
+    const resolved = documentResolve(merged);
+    expect(resolved.name).toBe("Alice");
+    expect(resolved.email).toBe("alice@example.com");
+  });
+
+  it("LWW resolution for shared paths", () => {
+    const local: DocumentCRDTState = {
+      fields: {
+        name: { type: "lww", hlc: { ts: 100, c: 0, node: "a" }, node_id: "a", value: "Alice" },
+      },
+    };
+    const remote: DocumentCRDTState = {
+      fields: {
+        name: { type: "lww", hlc: { ts: 200, c: 0, node: "b" }, node_id: "b", value: "Bob" },
+      },
+    };
+
+    const merged = mergeDocumentState(local, remote);
+    const resolved = documentResolve(merged);
+    // Remote has higher HLC, so Bob wins.
+    expect(resolved.name).toBe("Bob");
+  });
+
+  it("documentResolve builds nested structure", () => {
+    const state: DocumentCRDTState = {
+      fields: {
+        title: { type: "lww", hlc: { ts: 1, c: 0, node: "a" }, node_id: "a", value: "My Doc" },
+        count: {
+          type: "counter",
+          hlc: { ts: 2, c: 0, node: "a" },
+          node_id: "a",
+          counter_state: { inc: { a: 5 }, dec: {} },
+        },
+      },
+    };
+
+    const resolved = documentResolve(state);
+    expect(resolved.title).toBe("My Doc");
+    expect(resolved.count).toBe(5);
+  });
+
+  it("documentResolve handles deep paths", () => {
+    // Simulate a nested document within a document field.
+    const innerDoc: DocumentCRDTState = {
+      fields: {
+        street: { type: "lww", hlc: { ts: 1, c: 0, node: "a" }, node_id: "a", value: "123 Main St" },
+        city: { type: "lww", hlc: { ts: 2, c: 0, node: "a" }, node_id: "a", value: "Springfield" },
+      },
+    };
+    const state: DocumentCRDTState = {
+      fields: {
+        address: {
+          type: "document",
+          hlc: { ts: 3, c: 0, node: "a" },
+          node_id: "a",
+          doc_state: innerDoc,
+        },
+      },
+    };
+
+    const resolved = documentResolve(state);
+    expect(resolved.address).toEqual({ street: "123 Main St", city: "Springfield" });
   });
 });
