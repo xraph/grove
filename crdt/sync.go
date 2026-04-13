@@ -29,9 +29,9 @@ type Syncer struct {
 	// Multiple peers for hub-and-spoke / P2P.
 	peers []Transport
 
-	tables   []string
-	interval time.Duration
-	logger   log.Logger
+	tables         []string
+	interval       time.Duration
+	logger         log.Logger
 	retryAttempts  int
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration

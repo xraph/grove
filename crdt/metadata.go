@@ -288,7 +288,10 @@ func (ms *MetadataStore) WriteFieldStatesAtomic(ctx context.Context, table, pk s
 	txStore := &MetadataStore{executor: tx}
 	for field, fs := range fields {
 		if err := txStore.WriteFieldState(ctx, table, pk, field, fs); err != nil {
-			_ = tx.Rollback()
+			rErr := tx.Rollback()
+			if rErr != nil {
+				return rErr
+			}
 			return err
 		}
 	}
