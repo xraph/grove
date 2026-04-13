@@ -94,6 +94,43 @@ func structToMapInsert(model any, table *schema.Table) (M, error) {
 	return doc, nil
 }
 
+// structToPKMap extracts non-zero PK field values from a model.
+// Used by upsert operations to populate $setOnInsert so that the caller's
+// chosen _id (e.g. a TypeID) is written on insert instead of a MongoDB ObjectID.
+func structToPKMap(model any, table *schema.Table) (M, error) {
+	val := reflect.ValueOf(model)
+	for val.Kind() == reflect.Ptr {
+		if val.IsNil() {
+			return nil, fmt.Errorf("mongodriver: nil model pointer")
+		}
+		val = val.Elem()
+	}
+
+	if val.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("mongodriver: expected struct, got %v", val.Kind())
+	}
+
+	doc := make(M, len(table.PKFields))
+	for _, f := range table.PKFields {
+		fv := val
+		for _, idx := range f.GoIndex {
+			fv = fv.Field(idx)
+		}
+
+		if fv.IsZero() {
+			continue
+		}
+
+		key := f.Options.Column
+		if key == "id" {
+			key = "_id"
+		}
+		doc[key] = fv.Interface()
+	}
+
+	return doc, nil
+}
+
 // structToUpdateMap converts a struct to a bson.M map for $set updates.
 // It excludes PK, ScanOnly, and AutoIncrement fields.
 func structToUpdateMap(model any, table *schema.Table) (M, error) {

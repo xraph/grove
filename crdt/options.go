@@ -71,11 +71,6 @@ func WithSyncTables(tables ...string) SyncerOption {
 	return func(s *Syncer) { s.tables = tables }
 }
 
-// WithGossipInterval sets the interval for P2P gossip rounds.
-func WithGossipInterval(d time.Duration) SyncerOption {
-	return func(s *Syncer) { s.gossipInterval = d }
-}
-
 // WithRetry configures retry behavior for sync operations.
 // Defaults: 3 attempts, 1s base delay, 30s max delay.
 func WithRetry(attempts int, baseDelay, maxDelay time.Duration) SyncerOption {
@@ -122,6 +117,13 @@ func WithPresenceEnabled(enabled bool) SyncControllerOption {
 // "leave" event is broadcast. Defaults to 30 seconds.
 func WithPresenceTTL(d time.Duration) SyncControllerOption {
 	return func(c *SyncController) { c.presenceTTL = d }
+}
+
+// WithPresenceBufferSize sets the buffer size for the presence event
+// broadcast channel. When the buffer is full, new events are dropped.
+// Defaults to 256.
+func WithPresenceBufferSize(size int) SyncControllerOption {
+	return func(c *SyncController) { c.presenceBufferSize = size }
 }
 
 // WithControllerPlugin registers a CRDT plugin on the sync controller.

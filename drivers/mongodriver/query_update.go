@@ -155,6 +155,16 @@ func (q *UpdateQuery) Exec(ctx context.Context) (*mongoResult, error) {
 			return nil, err
 		}
 		q.update = bson.M{"$set": setDoc}
+
+		// For upserts, add PK fields to $setOnInsert so the caller's ID
+		// (e.g. a TypeID string) is used on insert instead of MongoDB
+		// auto-generating an ObjectID.
+		if q.upsert {
+			pkDoc, pkErr := structToPKMap(q.model, q.table)
+			if pkErr == nil && len(pkDoc) > 0 {
+				q.update["$setOnInsert"] = pkDoc
+			}
+		}
 	}
 
 	qc := q.buildUpdateHookContext()

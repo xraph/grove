@@ -25,10 +25,11 @@ type SyncController struct {
 	logger             log.Logger
 
 	// Presence subsystem (nil when disabled).
-	presenceEnabled bool
-	presenceTTL     time.Duration
-	presence        *PresenceManager
-	presenceCh      chan PresenceEvent // buffered channel for broadcasting to SSE streams
+	presenceEnabled    bool
+	presenceTTL        time.Duration
+	presenceBufferSize int
+	presence           *PresenceManager
+	presenceCh         chan PresenceEvent // buffered channel for broadcasting to SSE streams
 
 	// Time-travel configuration (nil when disabled).
 	timeTravel *TimeTravelConfig
@@ -69,7 +70,11 @@ func NewSyncController(plugin *Plugin, opts ...SyncControllerOption) *SyncContro
 
 	// Initialize presence subsystem if enabled.
 	if c.presenceEnabled {
-		c.presenceCh = make(chan PresenceEvent, 64)
+		bufSize := c.presenceBufferSize
+		if bufSize <= 0 {
+			bufSize = 256
+		}
+		c.presenceCh = make(chan PresenceEvent, bufSize)
 		c.presence = NewPresenceManager(c.presenceTTL, func(event PresenceEvent) {
 			// Non-blocking send to the broadcast channel.
 			select {

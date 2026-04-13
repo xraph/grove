@@ -29,10 +29,9 @@ type Syncer struct {
 	// Multiple peers for hub-and-spoke / P2P.
 	peers []Transport
 
-	tables         []string
-	interval       time.Duration
-	gossipInterval time.Duration
-	logger         log.Logger
+	tables   []string
+	interval time.Duration
+	logger   log.Logger
 	retryAttempts  int
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
@@ -246,24 +245,25 @@ func (s *Syncer) syncWithPeer(ctx context.Context, t Transport, peerID string) (
 		}
 	}
 
+	// Update last sync point after pull succeeds — even if push fails later,
+	// we don't need to re-pull the same changes (merges are idempotent but wasteful).
+	s.mu.Lock()
+	if !pullResp.LatestHLC.IsZero() {
+		s.lastSync[peerID] = pullResp.LatestHLC
+	}
+	s.mu.Unlock()
+
 	if len(filteredChanges) > 0 {
 		pushResp, err := t.Push(ctx, &PushRequest{
 			Changes: filteredChanges,
 			NodeID:  s.plugin.nodeID,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("push: %w", err)
+			return report, fmt.Errorf("push: %w", err)
 		}
 		report.Pushed = len(filteredChanges)
 		_ = pushResp
 	}
-
-	// Update last sync point.
-	s.mu.Lock()
-	if !pullResp.LatestHLC.IsZero() {
-		s.lastSync[peerID] = pullResp.LatestHLC
-	}
-	s.mu.Unlock()
 
 	return report, nil
 }

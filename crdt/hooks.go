@@ -52,8 +52,13 @@ func (p *Plugin) BeforeQuery(_ context.Context, _ *hook.QueryContext) (*hook.Hoo
 }
 
 // writeFieldStates writes CRDT metadata for each CRDT-tagged field.
+// When multiple fields are written, they are committed atomically if the
+// underlying executor supports transactions.
 func (p *Plugin) writeFieldStates(ctx context.Context, table, pk string, fields map[string]CRDTType, data any, clock HLC) error {
 	values := extractFieldValues(data)
+
+	// Build all field states first, then write atomically.
+	pending := make(map[string]*FieldState, len(fields))
 
 	for fieldName, crdtType := range fields {
 		value, hasValue := values[fieldName]
@@ -127,13 +132,11 @@ func (p *Plugin) writeFieldStates(ctx context.Context, table, pk string, fields 
 		}
 
 		if fs != nil {
-			if err := p.metadata.WriteFieldState(ctx, table, pk, fieldName, fs); err != nil {
-				return err
-			}
+			pending[fieldName] = fs
 		}
 	}
 
-	return nil
+	return p.metadata.WriteFieldStatesAtomic(ctx, table, pk, pending)
 }
 
 // extractCRDTFields extracts field names and their CRDT types from the
@@ -182,9 +185,11 @@ func extractFieldValues(data any) map[string]any {
 	// For struct types, use JSON round-trip as fallback.
 	raw, err := json.Marshal(data)
 	if err != nil {
-		return values
+		return values // Non-serializable data; CRDT fields will be skipped.
 	}
-	json.Unmarshal(raw, &values) //nolint:errcheck // best-effort struct-to-map conversion
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return values // Struct-to-map conversion failed; CRDT fields will be skipped.
+	}
 	return values
 }
 

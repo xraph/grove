@@ -59,9 +59,18 @@ func (db *MysqlDB) Open(ctx context.Context, dsn string, opts ...driver.Option) 
 		return fmt.Errorf("mysqldriver: open: %w", err)
 	}
 
-	// Apply pool size from options.
+	// Apply pool options.
 	if db.opts.PoolSize > 0 {
 		sqlDB.SetMaxOpenConns(db.opts.PoolSize)
+	}
+	if db.opts.MinConns > 0 {
+		sqlDB.SetMaxIdleConns(int(db.opts.MinConns))
+	}
+	if db.opts.MaxConnLifetime > 0 {
+		sqlDB.SetConnMaxLifetime(db.opts.MaxConnLifetime)
+	}
+	if db.opts.MaxConnIdleTime > 0 {
+		sqlDB.SetConnMaxIdleTime(db.opts.MaxConnIdleTime)
 	}
 
 	db.db = sqlDB

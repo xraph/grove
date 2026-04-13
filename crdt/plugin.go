@@ -96,6 +96,33 @@ func (p *Plugin) CleanupTombstones(ctx context.Context, table string) error {
 	return p.metadata.CleanTombstones(ctx, table, cutoff)
 }
 
+// RunTombstoneCleanup starts a background loop that periodically removes
+// tombstones older than the configured TTL for the given tables. The loop
+// runs until the context is cancelled.
+func (p *Plugin) RunTombstoneCleanup(ctx context.Context, interval time.Duration, tables ...string) {
+	if p.metadata == nil || len(tables) == 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				for _, table := range tables {
+					if err := p.CleanupTombstones(ctx, table); err != nil && ctx.Err() == nil {
+						// Log but don't stop; cleanup is best-effort.
+						continue
+					}
+				}
+			}
+		}
+	}()
+}
+
 // EnsureShadowTable creates the shadow table for the given table if it
 // doesn't exist. This should be called during migration or initialization.
 func (p *Plugin) EnsureShadowTable(ctx context.Context, table string) error {

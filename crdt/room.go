@@ -264,7 +264,8 @@ func (rm *RoomManager) JoinRoom(ctx context.Context, roomID, nodeID string, data
 		rm.rooms[roomID] = room
 	}
 
-	// Check participant limit.
+	// Check participant limit and update presence while holding the lock
+	// to prevent TOCTOU races where two goroutines both pass the check.
 	if room.MaxParticipants > 0 {
 		current := rm.presence.Get(roomID)
 		if len(current) >= room.MaxParticipants {
@@ -273,16 +274,17 @@ func (rm *RoomManager) JoinRoom(ctx context.Context, roomID, nodeID string, data
 		}
 	}
 
-	hooks := make([]RoomHook, len(rm.hooks))
-	copy(hooks, rm.hooks)
-	rm.mu.Unlock()
-
-	// Update presence (this broadcasts join/update events via SSE).
+	// Update presence while still holding the lock to ensure atomicity
+	// between the capacity check and the join.
 	rm.presence.Update(PresenceUpdate{
 		NodeID: nodeID,
 		Topic:  roomID,
 		Data:   data,
 	})
+
+	hooks := make([]RoomHook, len(rm.hooks))
+	copy(hooks, rm.hooks)
+	rm.mu.Unlock()
 
 	for _, h := range hooks {
 		if err := h.OnParticipantJoin(ctx, room, nodeID); err != nil {

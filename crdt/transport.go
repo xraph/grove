@@ -33,10 +33,6 @@ type SyncFilter struct {
 
 	// FieldFilter restricts sync to only these fields.
 	FieldFilter []string `json:"field_filter,omitempty"`
-
-	// Predicates are driver-specific filter expressions.
-	// Keys are field names, values are comparison expressions.
-	Predicates map[string]string `json:"predicates,omitempty"`
 }
 
 // PullRequest asks a remote node for changes since a given point.

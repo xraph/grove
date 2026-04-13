@@ -20,6 +20,21 @@ type Executor interface {
 	QueryContext(ctx context.Context, query string, args ...any) (Rows, error)
 }
 
+// TxExecutor extends Executor with transaction support. When the underlying
+// executor supports transactions, MetadataStore uses them to wrap multi-field
+// writes atomically.
+type TxExecutor interface {
+	Executor
+	BeginTx(ctx context.Context) (TxHandle, error)
+}
+
+// TxHandle represents an active transaction.
+type TxHandle interface {
+	Executor
+	Commit() error
+	Rollback() error
+}
+
 // ExecResult is the result of an exec operation.
 type ExecResult interface {
 	RowsAffected() (int64, error)
@@ -171,20 +186,32 @@ func (ms *MetadataStore) ReadState(ctx context.Context, table, pk string) (*Stat
 	return state, nil
 }
 
-// ReadChangesSince reads all change records from the shadow table that
-// happened after the given HLC timestamp. Used by the sync protocol.
-func (ms *MetadataStore) ReadChangesSince(ctx context.Context, table string, since HLC) ([]ChangeRecord, error) {
+// DefaultChangesLimit is the maximum number of change records returned by
+// ReadChangesSince when no explicit limit is provided. This prevents
+// unbounded result sets on large shadow tables.
+const DefaultChangesLimit = 10000
+
+// ReadChangesSince reads change records from the shadow table that happened
+// after the given HLC timestamp. Used by the sync protocol.
+// An optional limit can be provided (first value used); 0 means use DefaultChangesLimit.
+func (ms *MetadataStore) ReadChangesSince(ctx context.Context, table string, since HLC, limits ...int) ([]ChangeRecord, error) {
 	shadowTable := ShadowTableName(table)
+
+	limit := DefaultChangesLimit
+	if len(limits) > 0 && limits[0] > 0 {
+		limit = limits[0]
+	}
 
 	query := fmt.Sprintf(
 		`SELECT pk_hash, field_name, hlc_ts, hlc_counter, node_id, tombstone, crdt_state
 		FROM %s
 		WHERE hlc_ts > $1 OR (hlc_ts = $1 AND hlc_counter > $2)
-		ORDER BY hlc_ts, hlc_counter`,
+		ORDER BY hlc_ts, hlc_counter
+		LIMIT $3`,
 		shadowTable,
 	)
 
-	rows, err := ms.executor.QueryContext(ctx, query, since.Timestamp, since.Counter)
+	rows, err := ms.executor.QueryContext(ctx, query, since.Timestamp, since.Counter, limit)
 	if err != nil {
 		return nil, fmt.Errorf("crdt: read changes: %w", err)
 	}
@@ -227,6 +254,49 @@ func (ms *MetadataStore) ReadChangesSince(ctx context.Context, table string, sin
 	}
 
 	return changes, rows.Err()
+}
+
+// WriteFieldStatesAtomic writes multiple field states in a single transaction
+// when the executor supports it. Falls back to individual writes otherwise.
+func (ms *MetadataStore) WriteFieldStatesAtomic(ctx context.Context, table, pk string, fields map[string]*FieldState) error {
+	if len(fields) <= 1 {
+		// Single field — no transaction needed.
+		for field, fs := range fields {
+			if err := ms.WriteFieldState(ctx, table, pk, field, fs); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	txExec, ok := ms.executor.(TxExecutor)
+	if !ok {
+		// Executor doesn't support transactions — fall back to individual writes.
+		for field, fs := range fields {
+			if err := ms.WriteFieldState(ctx, table, pk, field, fs); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	tx, err := txExec.BeginTx(ctx)
+	if err != nil {
+		return fmt.Errorf("crdt: begin tx: %w", err)
+	}
+
+	txStore := &MetadataStore{executor: tx}
+	for field, fs := range fields {
+		if err := txStore.WriteFieldState(ctx, table, pk, field, fs); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("crdt: commit field states: %w", err)
+	}
+	return nil
 }
 
 // CleanTombstones removes tombstones older than the given HLC.

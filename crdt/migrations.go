@@ -21,11 +21,12 @@ func ShadowTableDDL(table string) string {
 }
 
 // ShadowTableSyncIndex generates the CREATE INDEX statement for efficient
-// sync queries (ordered by HLC timestamp).
+// sync queries. The index covers (hlc_ts, hlc_counter) to match the
+// ReadChangesSince query which filters on both columns.
 func ShadowTableSyncIndex(table string) string {
 	shadow := ShadowTableName(table)
 	return fmt.Sprintf(
-		`CREATE INDEX IF NOT EXISTS idx_%s_sync ON %s (hlc_ts, node_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_%s_sync ON %s (hlc_ts, hlc_counter)`,
 		shadow, shadow,
 	)
 }

@@ -67,9 +67,21 @@ func (db *PgDB) Open(ctx context.Context, dsn string, opts ...driver.Option) err
 		return fmt.Errorf("pgdriver: parse dsn: %w", err)
 	}
 
-	// Apply pool size from options.
+	// Apply pool options.
 	if db.opts.PoolSize > 0 {
 		poolCfg.MaxConns = int32(db.opts.PoolSize)
+	}
+	if db.opts.MinConns > 0 {
+		poolCfg.MinConns = db.opts.MinConns
+	}
+	if db.opts.MaxConnLifetime > 0 {
+		poolCfg.MaxConnLifetime = db.opts.MaxConnLifetime
+	}
+	if db.opts.MaxConnIdleTime > 0 {
+		poolCfg.MaxConnIdleTime = db.opts.MaxConnIdleTime
+	}
+	if db.opts.HealthCheckPeriod > 0 {
+		poolCfg.HealthCheckPeriod = db.opts.HealthCheckPeriod
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)

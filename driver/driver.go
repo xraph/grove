@@ -50,10 +50,14 @@ type Option func(*DriverOptions)
 
 // DriverOptions holds driver-level configuration.
 type DriverOptions struct { //nolint:revive // DriverOptions is the established public API name
-	PoolSize     int
-	QueryTimeout time.Duration
-	Logger       log.Logger
-	Extra        map[string]any // driver-specific options
+	PoolSize          int
+	MinConns          int32
+	MaxConnLifetime   time.Duration
+	MaxConnIdleTime   time.Duration
+	HealthCheckPeriod time.Duration
+	QueryTimeout      time.Duration
+	Logger            log.Logger
+	Extra             map[string]any // driver-specific options
 }
 
 // DefaultDriverOptions returns a DriverOptions with sensible defaults.
@@ -76,6 +80,39 @@ func WithPoolSize(n int) Option {
 func WithQueryTimeout(d time.Duration) Option {
 	return func(o *DriverOptions) {
 		o.QueryTimeout = d
+	}
+}
+
+// WithMinConns returns an Option that sets the minimum number of connections
+// in the pool. Connections above this count may be closed when idle.
+func WithMinConns(n int32) Option {
+	return func(o *DriverOptions) {
+		o.MinConns = n
+	}
+}
+
+// WithMaxConnLifetime returns an Option that sets the maximum lifetime of a
+// connection. Connections older than this duration are closed and replaced.
+func WithMaxConnLifetime(d time.Duration) Option {
+	return func(o *DriverOptions) {
+		o.MaxConnLifetime = d
+	}
+}
+
+// WithMaxConnIdleTime returns an Option that sets the maximum time a
+// connection can sit idle before it is closed.
+func WithMaxConnIdleTime(d time.Duration) Option {
+	return func(o *DriverOptions) {
+		o.MaxConnIdleTime = d
+	}
+}
+
+// WithHealthCheckPeriod returns an Option that sets the interval between
+// automatic health checks on idle connections. On serverless databases like
+// Neon, each health check costs bandwidth; consider setting this to 5m+.
+func WithHealthCheckPeriod(d time.Duration) Option {
+	return func(o *DriverOptions) {
+		o.HealthCheckPeriod = d
 	}
 }
 

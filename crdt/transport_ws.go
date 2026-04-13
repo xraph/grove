@@ -146,6 +146,56 @@ func (t *WebSocketTransport) Start(ctx context.Context) error {
 	}
 }
 
+// WebSocketDialer is a function that establishes a new WebSocket connection.
+// Used by StartWithReconnect to re-establish connections after disconnection.
+type WebSocketDialer func(ctx context.Context) (WebSocketConn, error)
+
+// StartWithReconnect begins the read loop and automatically reconnects on
+// disconnection using the provided dialer. It blocks until the context is
+// cancelled. Between reconnection attempts, it waits for reconnectDelay.
+func (t *WebSocketTransport) StartWithReconnect(ctx context.Context, dial WebSocketDialer) error {
+	for {
+		err := t.Start(ctx)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if t.closed.Load() {
+			return nil
+		}
+
+		t.logger.Error("crdt: ws disconnected, reconnecting",
+			log.String("error", err.Error()),
+		)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(t.reconnectDelay):
+		}
+
+		newConn, dialErr := dial(ctx)
+		if dialErr != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			t.logger.Error("crdt: ws reconnect dial failed",
+				log.String("error", dialErr.Error()),
+			)
+			continue
+		}
+
+		t.mu.Lock()
+		t.conn = newConn
+		t.closed.Store(false)
+		// Clear stale pending requests — their callers already timed out.
+		for id, ch := range t.pending {
+			close(ch)
+			delete(t.pending, id)
+		}
+		t.mu.Unlock()
+	}
+}
+
 // Close closes the WebSocket connection.
 func (t *WebSocketTransport) Close() error {
 	t.closed.Store(true)

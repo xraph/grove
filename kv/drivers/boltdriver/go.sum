@@ -10,8 +10,8 @@ github.com/vmihailenco/msgpack/v5 v5.4.1 h1:cQriyiUvjTwOHg8QZaPihLWeRAAVoCpE00IU
 github.com/vmihailenco/msgpack/v5 v5.4.1/go.mod h1:GaZTsDaehaPpQVyxrf5mtQlH+pc21PIudVV/E3rRQok=
 github.com/vmihailenco/tagparser/v2 v2.0.0 h1:y09buUbR+b5aycVFQs/g70pqKVZNBmxwAhO7/IwNM9g=
 github.com/vmihailenco/tagparser/v2 v2.0.0/go.mod h1:Wri+At7QHww0WTrCBeu4J6bNtoV6mEfg5OIWRZA9qds=
-github.com/xraph/go-utils v1.1.0 h1:bPO4C/mwm0I5ZZa3RxbwUqKhy3Vnxvm3s98vmX8CrjY=
-github.com/xraph/go-utils v1.1.0/go.mod h1:tZN4SuGy9otCo6dETp7Cvkgyiy0BvaJaZbTBv4Euvo4=
+github.com/xraph/go-utils v1.1.1 h1:k5TOQ1qhXLdEX8W5F60mSuPcFOPc8sBsnhmjx/Kpr5g=
+github.com/xraph/go-utils v1.1.1/go.mod h1:tZN4SuGy9otCo6dETp7Cvkgyiy0BvaJaZbTBv4Euvo4=
 go.etcd.io/bbolt v1.4.0 h1:TU77id3TnN/zKr7CO/uk+fBCwF2jGcMuw2B/FMAzYIk=
 go.etcd.io/bbolt v1.4.0/go.mod h1:AsD+OCi/qPN1giOX1aiLAha3o1U8rAz65bvN4j0sRuk=
 go.uber.org/goleak v1.3.0 h1:2K3zAYmnTNqV73imy9J1T3WC+gmCePx2hEGkimedGto=
