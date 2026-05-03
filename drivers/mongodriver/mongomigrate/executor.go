@@ -188,8 +188,13 @@ func (e *Executor) ListApplied(ctx context.Context) ([]*migrate.AppliedMigration
 
 	applied := make([]*migrate.AppliedMigration, len(docs))
 	for i, doc := range docs {
+		// migrate.AppliedMigration.ID is upstream-typed int64 for the
+		// SQL drivers' autoincrement _id columns. Mongo's _id is an
+		// ObjectID; we don't carry that forward because the
+		// orchestrator dedupes by Group+Version and never reads ID.
+		// Setting ID = 0 keeps the public type stable.
+		_ = doc.ID
 		applied[i] = &migrate.AppliedMigration{
-			ID:         doc.ID,
 			Version:    doc.Version,
 			Name:       doc.Name,
 			Group:      doc.Group,
@@ -234,12 +239,25 @@ func (e *Executor) RemoveApplied(ctx context.Context, m *migrate.Migration) erro
 	return nil
 }
 
-// migrationDoc is the internal BSON structure for the migration tracking
-// collection.
+// migrationDoc is the internal BSON structure for the migration
+// tracking collection. _id is typed as bson.ObjectID — not int64 —
+// because RecordApplied below inserts via bson.M{} without setting
+// _id, and MongoDB auto-generates an ObjectID for those documents.
+//
+// The previous int64 typing led to a pernicious round-trip bug:
+// every Record was written with an ObjectID _id, then ListApplied
+// failed to decode them with "cannot decode objectID into an
+// integer type" — meaning every deployment that successfully
+// recorded one migration was permanently broken on the next read.
+//
+// migrate.AppliedMigration.ID upstream is int64 for SQL drivers
+// where _id is an autoincrement column; for mongo we set it to 0
+// since the orchestrator dedupes by Group+Version (see migrator.go
+// appliedMap construction) and never reads ID.
 type migrationDoc struct {
-	ID         int64     `bson:"_id,omitempty"`
-	Version    string    `bson:"version"`
-	Name       string    `bson:"name"`
-	Group      string    `bson:"group"`
-	MigratedAt time.Time `bson:"migrated_at"`
+	ID         bson.ObjectID `bson:"_id,omitempty"`
+	Version    string        `bson:"version"`
+	Name       string        `bson:"name"`
+	Group      string        `bson:"group"`
+	MigratedAt time.Time     `bson:"migrated_at"`
 }
