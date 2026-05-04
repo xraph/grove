@@ -54,6 +54,14 @@ type Extension struct {
 	syncer             *crdt.Syncer
 	syncControllerOpts []crdt.SyncControllerOption
 	syncController     *crdt.SyncController // initialized during registerCRDT
+
+	// driverFactories overrides driver construction for specific
+	// driver names. Populated by WithDriverFactory; keyed on driver
+	// name (e.g. "mongo", "postgres"). When set, the extension calls
+	// the override instead of the global registry, letting callers
+	// inject driver-specific tuning (pool sizes, timeouts) without
+	// pulling driver packages into this submodule.
+	driverFactories map[string]DriverFactory
 }
 
 // databaseEntry holds the configuration for a named database
@@ -253,13 +261,20 @@ func (e *Extension) buildDatabaseEntries() []databaseEntry {
 	return entries
 }
 
-// resolveDatabaseDriver creates a driver for a database entry.
+// resolveDatabaseDriver creates a driver for a database entry. Per-
+// driver overrides registered via WithDriverFactory take precedence
+// over the global grove.OpenDriver registry — that's how callers
+// inject pool sizing and other driver-specific tuning without making
+// this package depend on driver implementations.
 func (e *Extension) resolveDatabaseDriver(entry databaseEntry) (grove.GroveDriver, error) {
 	if entry.driver != nil {
 		return entry.driver, nil
 	}
 	if entry.driverName == "" || entry.dsn == "" {
 		return nil, errors.New("driver and dsn are required")
+	}
+	if factory, ok := e.driverFactories[entry.driverName]; ok && factory != nil {
+		return factory(context.Background(), entry.dsn)
 	}
 	return grove.OpenDriver(context.Background(), entry.driverName, entry.dsn)
 }
@@ -549,6 +564,15 @@ func (e *Extension) resolveDriver() error {
 
 	if e.config.Driver == "" || e.config.DSN == "" {
 		return errors.New("grove: no driver configured; use WithDriver() or set driver/dsn in config")
+	}
+
+	if factory, ok := e.driverFactories[e.config.Driver]; ok && factory != nil {
+		drv, err := factory(context.Background(), e.config.DSN)
+		if err != nil {
+			return fmt.Errorf("grove: create %s driver from override factory: %w", e.config.Driver, err)
+		}
+		e.driver = drv
+		return nil
 	}
 
 	drv, err := grove.OpenDriver(context.Background(), e.config.Driver, e.config.DSN)

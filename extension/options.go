@@ -1,11 +1,20 @@
 package extension
 
 import (
+	"context"
+
 	"github.com/xraph/grove"
 	"github.com/xraph/grove/crdt"
 	"github.com/xraph/grove/hook"
 	"github.com/xraph/grove/migrate"
 )
+
+// DriverFactory builds a fully-opened grove driver from a DSN. Used by
+// WithDriverFactory to let callers override the registry-based factory
+// for a given driver name (e.g. inject MongoDB pool tuning, postgres
+// pool sizing, etc.) without baking driver-specific imports into the
+// extension package.
+type DriverFactory func(ctx context.Context, dsn string) (grove.GroveDriver, error)
 
 // ExtOption is a functional option for the Forge extension.
 type ExtOption func(*Extension)
@@ -179,6 +188,41 @@ func WithCRDTDatabase(dbName string) ExtOption {
 //	)
 func WithSyncer(syncer *crdt.Syncer) ExtOption {
 	return func(e *Extension) { e.syncer = syncer }
+}
+
+// WithDriverFactory overrides the driver-construction step for one
+// specific driver name. When the extension resolves a driver via
+// YAML config or WithDSN / WithDatabaseDSN, it consults the override
+// map first; only unknown names fall through to the global registry.
+//
+// Use this to inject driver-specific tuning (mongo pool size,
+// postgres pool sizing, etc.) without dragging the driver package
+// into grove/extension. Multiple calls merge; later registrations
+// win on the same driver name.
+//
+// Example (twinos tuning the mongo driver's pool):
+//
+//	ext := extension.New(
+//	    extension.WithDSN("mongo", "mongodb://localhost:27017/twinos"),
+//	    extension.WithDriverFactory("mongo", func(ctx context.Context, dsn string) (grove.GroveDriver, error) {
+//	        m := mongodriver.New()
+//	        if err := m.Open(ctx, dsn,
+//	            mongodriver.WithMaxPoolSize(200),
+//	            mongodriver.WithMinPoolSize(10),
+//	            mongodriver.WithMaxConnecting(4),
+//	        ); err != nil {
+//	            return nil, err
+//	        }
+//	        return m, nil
+//	    }),
+//	)
+func WithDriverFactory(name string, factory DriverFactory) ExtOption {
+	return func(e *Extension) {
+		if e.driverFactories == nil {
+			e.driverFactories = make(map[string]DriverFactory)
+		}
+		e.driverFactories[name] = factory
+	}
 }
 
 // WithSyncController overrides the default sync controller options.

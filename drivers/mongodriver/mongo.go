@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -57,6 +58,27 @@ func (db *MongoDB) Open(ctx context.Context, uri string, opts ...MongoOption) er
 	mopts.apply(opts)
 
 	clientOpts := options.Client().ApplyURI(uri)
+	if mopts.ServerSelectionTimeout > 0 {
+		clientOpts.SetServerSelectionTimeout(mopts.ServerSelectionTimeout)
+	}
+	if mopts.ConnectTimeout > 0 {
+		clientOpts.SetConnectTimeout(mopts.ConnectTimeout)
+	}
+	if mopts.Timeout > 0 {
+		clientOpts.SetTimeout(mopts.Timeout)
+	}
+	if mopts.MaxPoolSize > 0 {
+		clientOpts.SetMaxPoolSize(mopts.MaxPoolSize)
+	}
+	if mopts.MinPoolSize > 0 {
+		clientOpts.SetMinPoolSize(mopts.MinPoolSize)
+	}
+	if mopts.MaxConnIdleTime > 0 {
+		clientOpts.SetMaxConnIdleTime(mopts.MaxConnIdleTime)
+	}
+	if mopts.MaxConnecting > 0 {
+		clientOpts.SetMaxConnecting(mopts.MaxConnecting)
+	}
 
 	client, err := mongo.Connect(clientOpts)
 	if err != nil {
@@ -76,12 +98,92 @@ func (db *MongoDB) Open(ctx context.Context, uri string, opts ...MongoOption) er
 	db.dbName = dbName
 	db.database = client.Database(dbName)
 
-	// Verify connectivity.
-	if err := client.Ping(ctx, nil); err != nil {
+	if mopts.SkipPing {
+		return nil
+	}
+
+	if err := pingWithRetry(ctx, clientPinger{client}, mopts); err != nil {
+		// Best-effort cleanup so we don't leak a client on failed Open.
+		_ = client.Disconnect(context.Background())
+		db.client = nil
+		db.database = nil
 		return fmt.Errorf("mongodriver: ping: %w", err)
 	}
 
 	return nil
+}
+
+// pinger is the minimal interface satisfied by *mongo.Client; it exists so
+// pingWithRetry can be unit-tested without a real MongoDB server.
+type pinger interface {
+	Ping(ctx context.Context, rp any) error
+}
+
+// clientPinger adapts *mongo.Client to the pinger interface. The real Ping
+// takes a *readpref.ReadPref; we accept any so the test fake can pass nil.
+type clientPinger struct{ c *mongo.Client }
+
+func (p clientPinger) Ping(ctx context.Context, _ any) error {
+	return p.c.Ping(ctx, nil)
+}
+
+// pingWithRetry runs Ping with bounded exponential backoff. Each attempt has
+// its own PingTimeout; total attempts = 1 + PingRetries. Honors ctx cancel
+// during backoff sleeps.
+func pingWithRetry(ctx context.Context, p pinger, mopts *mongoOptions) error {
+	attempts := 1 + mopts.PingRetries
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		attemptCtx, cancel := contextWithOptionalTimeout(ctx, mopts.PingTimeout)
+		err := p.Ping(attemptCtx, nil)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+
+		if attempt == attempts-1 {
+			break
+		}
+
+		delay := backoffFor(attempt, mopts.PingRetryBackoff)
+		t := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			if lastErr != nil {
+				return fmt.Errorf("after %d attempt(s): %w", attempt+1, lastErr)
+			}
+			return ctx.Err()
+		case <-t.C:
+		}
+	}
+
+	return fmt.Errorf("after %d attempt(s): %w", attempts, lastErr)
+}
+
+// contextWithOptionalTimeout returns ctx unchanged when timeout <= 0.
+func contextWithOptionalTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+// backoffFor returns base * 2^attempt, capped at pingRetryMaxBackoff.
+func backoffFor(attempt int, base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	d := base << attempt
+	if d <= 0 || d > pingRetryMaxBackoff {
+		return pingRetryMaxBackoff
+	}
+	return d
 }
 
 // Close disconnects from the MongoDB server.
