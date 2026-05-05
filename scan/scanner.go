@@ -56,7 +56,7 @@ type Rows interface {
 // row.Scan with those pointers.
 func ScanRow(row Row, dest any, table *schema.Table) error { //nolint:revive // ScanRow is the established public API name
 	v := reflect.ValueOf(dest)
-	if v.Kind() != reflect.Ptr || v.IsNil() {
+	if v.Kind() != reflect.Pointer || v.IsNil() {
 		return fmt.Errorf("scan: dest must be a non-nil pointer to a struct, got %T", dest)
 	}
 	v = v.Elem()
@@ -86,7 +86,7 @@ func ScanRow(row Row, dest any, table *schema.Table) error { //nolint:revive // 
 func ScanRows(rows Rows, dest any, table *schema.Table) error { //nolint:revive // ScanRows is the established public API name
 	// Validate dest type.
 	destVal := reflect.ValueOf(dest)
-	if destVal.Kind() != reflect.Ptr || destVal.IsNil() {
+	if destVal.Kind() != reflect.Pointer || destVal.IsNil() {
 		return fmt.Errorf("scan: dest must be a non-nil pointer to a slice, got %T", dest)
 	}
 	sliceVal := destVal.Elem()
@@ -95,14 +95,14 @@ func ScanRows(rows Rows, dest any, table *schema.Table) error { //nolint:revive 
 	}
 
 	elemType := sliceVal.Type().Elem()
-	if elemType.Kind() == reflect.Ptr {
+	if elemType.Kind() == reflect.Pointer {
 		elemType = elemType.Elem()
 	}
 	if elemType.Kind() != reflect.Struct {
 		return fmt.Errorf("scan: slice element must be a struct or pointer to struct, got %s", elemType.Kind())
 	}
 
-	isPtr := sliceVal.Type().Elem().Kind() == reflect.Ptr
+	isPtr := sliceVal.Type().Elem().Kind() == reflect.Pointer
 
 	// Get column names from the result set.
 	columns, err := rows.Columns()

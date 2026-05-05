@@ -26,7 +26,7 @@ func FieldPtr(v reflect.Value, field *schema.Field) any {
 // This includes pointers, interfaces, slices, maps, channels, and functions.
 func IsNilable(t reflect.Type) bool {
 	switch t.Kind() {
-	case reflect.Ptr, reflect.Interface, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
+	case reflect.Pointer, reflect.Interface, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
 		return true
 	default:
 		return false
