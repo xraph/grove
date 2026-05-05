@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
@@ -63,6 +64,54 @@ func (e *Executor) DropCollection(ctx context.Context, model any) error {
 	q := e.db.NewDropCollection(model)
 	if err := q.Exec(ctx); err != nil {
 		return fmt.Errorf("mongomigrate: drop collection: %w", err)
+	}
+	return nil
+}
+
+// RefreshValidator regenerates the $jsonSchema validator for the collection
+// associated with the given model and applies it via collMod. Use this in
+// migrations that update model definitions (e.g. adding nullable pointer
+// fields, changing types) so existing collections pick up the new schema
+// without being recreated.
+//
+// Example usage in a migration:
+//
+//	Up: func(ctx context.Context, exec migrate.Executor) error {
+//	    mexec := exec.(*mongomigrate.Executor)
+//	    return mexec.RefreshValidator(ctx, (*User)(nil))
+//	}
+func (e *Executor) RefreshValidator(ctx context.Context, model any, opts ...CollectionOption) error {
+	o := defaultCollectionOpts()
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	q := e.db.NewCreateCollection(model)
+	if o.collection != "" {
+		q = q.Collection(o.collection)
+	}
+	if o.additionalProps != nil {
+		q = q.AdditionalProperties(*o.additionalProps)
+	}
+
+	jsonSchema, err := q.BuildSchema()
+	if err != nil {
+		return fmt.Errorf("mongomigrate: build schema: %w", err)
+	}
+
+	cmd := bson.D{
+		{Key: "collMod", Value: q.GetCollection()},
+		{Key: "validator", Value: bson.M{"$jsonSchema": jsonSchema}},
+	}
+	if o.validationLevel != "" {
+		cmd = append(cmd, bson.E{Key: "validationLevel", Value: o.validationLevel})
+	}
+	if o.validationAction != "" {
+		cmd = append(cmd, bson.E{Key: "validationAction", Value: o.validationAction})
+	}
+
+	if err := e.db.Database().RunCommand(ctx, cmd).Err(); err != nil {
+		return fmt.Errorf("mongomigrate: collMod %q: %w", q.GetCollection(), err)
 	}
 	return nil
 }

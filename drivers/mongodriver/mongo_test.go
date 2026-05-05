@@ -9,11 +9,11 @@ import (
 )
 
 type fakePinger struct {
-	calls    atomic.Int32
-	failN    int   // first N calls fail; subsequent calls succeed
-	failErr  error
-	delay    time.Duration // sleep on each call (simulate latency)
-	respectsCtx bool       // honor ctx cancellation while sleeping
+	calls       atomic.Int32
+	failN       int // first N calls fail; subsequent calls succeed
+	failErr     error
+	delay       time.Duration // sleep on each call (simulate latency)
+	respectsCtx bool          // honor ctx cancellation while sleeping
 }
 
 func (f *fakePinger) Ping(ctx context.Context, _ any) error {
@@ -112,7 +112,7 @@ func TestBackoffFor(t *testing.T) {
 		{0, 100 * time.Millisecond},
 		{1, 200 * time.Millisecond},
 		{2, 400 * time.Millisecond},
-		{6, pingRetryMaxBackoff}, // 100ms << 6 = 6.4s, capped
+		{6, pingRetryMaxBackoff},  // 100ms << 6 = 6.4s, capped
 		{60, pingRetryMaxBackoff}, // overflow safety
 	}
 	for _, tc := range cases {

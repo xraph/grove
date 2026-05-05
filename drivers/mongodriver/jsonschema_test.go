@@ -214,6 +214,49 @@ func TestBuildFieldSchema_ExplicitType(t *testing.T) {
 	}
 }
 
+// testSchemaNullable models the authsome user case: nullable timestamps
+// expressed as *time.Time. The generated $jsonSchema validator must accept
+// `null` for these fields, otherwise inserts of records that haven't set them
+// (e.g. a fresh user with no DeletedAt) fail with a validation error.
+type testSchemaNullable struct {
+	ID         bson.ObjectID `grove:"id,pk"`
+	Name       string        `grove:"name,notnull"`
+	BanExpires *time.Time    `grove:"ban_expires"`
+	DeletedAt  *time.Time    `grove:"deleted_at"`
+	// notnull pointer: schema should NOT accept null even though it's a pointer.
+	RequiredAt *time.Time `grove:"required_at,notnull"`
+}
+
+func TestBuildFieldSchema_NullablePointer(t *testing.T) {
+	table, err := schema.NewTable((*testSchemaNullable)(nil))
+	if err != nil {
+		t.Fatalf("NewTable: %v", err)
+	}
+
+	props := buildJSONSchema(table, nil)["properties"].(bson.M)
+
+	for _, field := range []string{"ban_expires", "deleted_at"} {
+		fs, ok := props[field].(bson.M)
+		if !ok {
+			t.Fatalf("field %q not found", field)
+		}
+		got, ok := fs["bsonType"].(bson.A)
+		if !ok {
+			t.Fatalf("field %q: expected bsonType to be bson.A, got %T (%v)", field, fs["bsonType"], fs["bsonType"])
+		}
+		want := bson.A{"date", "null"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("field %q: bsonType = %v, want %v", field, got, want)
+		}
+	}
+
+	// notnull pointer fields stay strict.
+	rfs := props["required_at"].(bson.M)
+	if rfs["bsonType"] != "date" {
+		t.Errorf("notnull pointer should keep strict bsonType=date, got %v", rfs["bsonType"])
+	}
+}
+
 func TestCreateCollectionQuery_BuildSchema(t *testing.T) {
 	db := &MongoDB{}
 	q := db.NewCreateCollection((*testSchemaUser)(nil))

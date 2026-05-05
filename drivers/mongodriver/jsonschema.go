@@ -52,18 +52,31 @@ func buildJSONSchema(table *schema.Table, additionalProps *bool) bson.M {
 }
 
 // buildFieldSchema creates a BSON schema definition for a single field.
+//
+// Pointer types (e.g. *time.Time) are nullable in Go semantics: a nil pointer
+// is encoded as BSON null on insert. Unless the field is marked notnull, the
+// generated schema therefore accepts both the value type and "null" so the
+// $jsonSchema validator doesn't reject documents whose nullable pointer fields
+// are nil.
 func buildFieldSchema(f *schema.Field) bson.M {
 	fieldSchema := bson.M{}
 
-	// Check for explicit bsonType override via type tag (e.g., grove:"type:objectId").
+	// Determine the base bsonType: explicit override via type tag wins,
+	// otherwise infer from the Go type.
+	var base string
 	if f.Options.SQLType != "" {
-		fieldSchema["bsonType"] = f.Options.SQLType
+		base = f.Options.SQLType
+	} else {
+		base = goTypeToBSONType(f.GoType)
+	}
+
+	// Pointer fields that aren't notnull may legitimately serialize as null.
+	if f.GoType != nil && f.GoType.Kind() == reflect.Ptr && !f.Options.NotNull {
+		fieldSchema["bsonType"] = bson.A{base, "null"}
 		return fieldSchema
 	}
 
-	bsonType := goTypeToBSONType(f.GoType)
-	fieldSchema["bsonType"] = bsonType
-
+	fieldSchema["bsonType"] = base
 	return fieldSchema
 }
 
