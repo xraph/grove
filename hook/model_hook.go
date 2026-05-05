@@ -165,7 +165,7 @@ func runModelHook(ctx context.Context, qc *QueryContext, model any, fn hookFn) e
 	val := reflect.ValueOf(model)
 
 	// Dereference pointer(s).
-	for val.Kind() == reflect.Ptr {
+	for val.Kind() == reflect.Pointer {
 		if val.IsNil() {
 			return nil
 		}
@@ -178,7 +178,7 @@ func runModelHook(ctx context.Context, qc *QueryContext, model any, fn hookFn) e
 			elem := val.Index(i)
 			var iface any
 			switch {
-			case elem.Kind() == reflect.Ptr:
+			case elem.Kind() == reflect.Pointer:
 				if elem.IsNil() {
 					continue
 				}

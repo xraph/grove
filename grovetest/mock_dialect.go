@@ -33,7 +33,7 @@ func (d *MockDialect) GoToDBType(goType reflect.Type, opts schema.FieldOptions) 
 		return opts.SQLType
 	}
 	t := goType
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if t == reflect.TypeOf(time.Time{}) {
