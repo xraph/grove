@@ -169,7 +169,7 @@ func resolveModelType(model any) reflect.Type {
 	typ := reflect.TypeOf(model)
 
 	// Dereference pointers.
-	for typ.Kind() == reflect.Ptr {
+	for typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
 	}
 
