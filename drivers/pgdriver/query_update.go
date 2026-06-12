@@ -226,9 +226,11 @@ func (q *UpdateQuery) buildUpdateHookContext() *hook.QueryContext {
 		tableName = q.table.Name
 	}
 	return &hook.QueryContext{
-		Operation: hook.OpUpdate,
-		Table:     tableName,
-		ModelType: modelType,
+		Operation:     hook.OpUpdate,
+		Table:         tableName,
+		ModelType:     modelType,
+		Conditions:    hookConditionsFor(q.wheres),
+		InTransaction: inTransactionFor(q.db),
 	}
 }
 

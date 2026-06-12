@@ -69,12 +69,15 @@ func (t *PgTx) Rollback() error {
 }
 
 // txDB creates a thin PgDB wrapper that routes Exec/Query/QueryRow through
-// the transaction instead of the pool.
+// the transaction instead of the pool. It carries the parent's hook
+// engine so lifecycle hooks fire identically on both paths (hooks tell
+// them apart via QueryContext.InTransaction).
 func (t *PgTx) txDB() *PgDB {
 	return &PgDB{
 		dialect:  t.db.dialect,
 		opts:     t.db.opts,
 		txConn:   t.tx,
+		hooks:    t.db.hooks,
 		registry: t.db.registry,
 	}
 }

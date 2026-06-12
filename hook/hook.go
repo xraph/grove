@@ -110,6 +110,13 @@ type QueryContext struct {
 	// TenantID from context, if set.
 	TenantID string
 
+	// InTransaction reports whether the query runs inside an explicit
+	// transaction (built through a driver's Tx wrapper). Hooks that apply
+	// different policies per path — e.g. a tenant backstop that trusts
+	// RLS inside stamped transactions but denies pool-path access —
+	// branch on this.
+	InTransaction bool
+
 	// TagSource indicates whether the model uses grove:"..." or bun:"..." tags.
 	TagSource TagSource
 

@@ -219,9 +219,11 @@ func (q *DeleteQuery) buildDeleteHookContext() *hook.QueryContext {
 		tableName = q.table.Name
 	}
 	return &hook.QueryContext{
-		Operation: hook.OpDelete,
-		Table:     tableName,
-		ModelType: modelType,
+		Operation:     hook.OpDelete,
+		Table:         tableName,
+		ModelType:     modelType,
+		Conditions:    hookConditionsFor(q.wheres),
+		InTransaction: inTransactionFor(q.db),
 	}
 }
 

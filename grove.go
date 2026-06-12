@@ -79,6 +79,13 @@ func Open(drv GroveDriver, opts ...Option) (*DB, error) {
 		models: make(map[string]any),
 	}
 
+	// Drivers that support lifecycle hooks receive the DB's engine, so
+	// db.Hooks().AddHook(...) registrations fire on driver-built queries
+	// without the caller having to wire the engine manually.
+	if hookable, ok := drv.(interface{ SetHooks(engine *hook.Engine) }); ok {
+		hookable.SetHooks(db.hooks)
+	}
+
 	return db, nil
 }
 

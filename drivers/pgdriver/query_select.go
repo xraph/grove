@@ -550,9 +550,11 @@ func (q *SelectQuery) buildSelectHookContext() *hook.QueryContext {
 		tableName = q.table.Name
 	}
 	return &hook.QueryContext{
-		Operation: hook.OpSelect,
-		Table:     tableName,
-		ModelType: modelType,
+		Operation:     hook.OpSelect,
+		Table:         tableName,
+		ModelType:     modelType,
+		Conditions:    q.hookConditions(),
+		InTransaction: q.inTransaction(),
 	}
 }
 
