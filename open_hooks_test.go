@@ -14,10 +14,10 @@ type hookableDriver struct {
 	engine *hook.Engine
 }
 
-func (d *hookableDriver) Name() string                  { return "fake" }
-func (d *hookableDriver) Close() error                  { return nil }
-func (d *hookableDriver) Ping(context.Context) error    { return nil }
-func (d *hookableDriver) SetHooks(engine *hook.Engine)  { d.engine = engine }
+func (d *hookableDriver) Name() string                 { return "fake" }
+func (d *hookableDriver) Close() error                 { return nil }
+func (d *hookableDriver) Ping(context.Context) error   { return nil }
+func (d *hookableDriver) SetHooks(engine *hook.Engine) { d.engine = engine }
 
 // plainDriver implements only the mandatory GroveDriver surface.
 type plainDriver struct{}

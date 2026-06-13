@@ -3,6 +3,8 @@ package pgdriver
 import (
 	"context"
 	"fmt"
+	"math"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -57,20 +59,41 @@ func (db *PgDB) SupportsStreaming() bool { return true }
 // for change data capture.
 func (db *PgDB) SupportsCDC() bool { return true }
 
+// defaultMaxConns is the pool ceiling applied when neither the PoolSize
+// option nor a pool_max_conns DSN parameter is set. pgxpool's own default of
+// max(4, NumCPU) starves shared pools on small machines: polling extensions
+// (dispatch workers, relay delivery, cron scheduling, health checks) alone
+// hold around a dozen connections.
+const defaultMaxConns = 20
+
+// buildPoolConfig parses the DSN and applies driver options on top. The
+// MaxConns floor is only applied when the caller expressed no preference:
+// the PoolSize option and the DSN's pool_max_conns both win over it.
+func buildPoolConfig(dsn string, opts *driver.DriverOptions) (*pgxpool.Config, error) {
+	poolCfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("pgdriver: parse dsn: %w", err)
+	}
+
+	switch {
+	case opts.PoolSize > 0:
+		poolCfg.MaxConns = int32(min(opts.PoolSize, math.MaxInt32)) //nolint:gosec // clamped above
+	case !strings.Contains(dsn, "pool_max_conns") && poolCfg.MaxConns < defaultMaxConns:
+		poolCfg.MaxConns = defaultMaxConns
+	}
+	return poolCfg, nil
+}
+
 // Open parses the DSN, applies configuration options, creates the pgxpool
 // connection pool, and verifies connectivity.
 func (db *PgDB) Open(ctx context.Context, dsn string, opts ...driver.Option) error {
 	db.opts = driver.ApplyOptions(opts)
 
-	poolCfg, err := pgxpool.ParseConfig(dsn)
+	poolCfg, err := buildPoolConfig(dsn, db.opts)
 	if err != nil {
-		return fmt.Errorf("pgdriver: parse dsn: %w", err)
+		return err
 	}
 
-	// Apply pool options.
-	if db.opts.PoolSize > 0 {
-		poolCfg.MaxConns = int32(db.opts.PoolSize)
-	}
 	if db.opts.MinConns > 0 {
 		poolCfg.MinConns = db.opts.MinConns
 	}

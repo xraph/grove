@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"database/sql"
 	"reflect"
 	"testing"
 	"time"
@@ -133,15 +134,21 @@ func TestFieldPtr_NestedStructFields(t *testing.T) {
 		fieldMap[f.GoName] = f
 	}
 
-	// Test accessing the nested CreatedAt field.
+	// Test accessing the nested CreatedAt field. Time destinations are
+	// returned as sql.Scanner adapters; writing through one must land on
+	// the nested field.
 	if f, ok := fieldMap["CreatedAt"]; ok {
 		ptr := FieldPtr(v, f)
-		p, ok := ptr.(*time.Time)
+		sc, ok := ptr.(sql.Scanner)
 		if !ok {
-			t.Fatalf("CreatedAt: expected *time.Time, got %T", ptr)
+			t.Fatalf("CreatedAt: expected sql.Scanner, got %T", ptr)
 		}
-		if !p.Equal(now) {
-			t.Errorf("CreatedAt = %v, want %v", *p, now)
+		later := now.Add(time.Hour)
+		if err := sc.Scan(later); err != nil {
+			t.Fatalf("CreatedAt: scan: %v", err)
+		}
+		if !item.CreatedAt.Equal(later) {
+			t.Errorf("CreatedAt = %v, want %v", item.CreatedAt, later)
 		}
 	} else {
 		t.Fatal("CreatedAt field not found in table")
@@ -161,12 +168,13 @@ func TestFieldPtr_NestedStructFields(t *testing.T) {
 		t.Fatal("ID field not found in table")
 	}
 
-	// Test modifying nested field through pointer.
+	// Test modifying nested field through the scanner adapter.
 	if f, ok := fieldMap["UpdatedAt"]; ok {
-		ptr := FieldPtr(v, f)
-		p := ptr.(*time.Time)
+		sc := FieldPtr(v, f).(sql.Scanner)
 		newTime := now.Add(time.Hour)
-		*p = newTime
+		if err := sc.Scan(newTime); err != nil {
+			t.Fatalf("UpdatedAt: scan: %v", err)
+		}
 		if !item.UpdatedAt.Equal(newTime) {
 			t.Errorf("UpdatedAt = %v, want %v", item.UpdatedAt, newTime)
 		}
@@ -250,5 +258,98 @@ func TestIsNilable(t *testing.T) {
 				t.Errorf("IsNilable(%v) = %v, want %v", tt.typ, got, tt.want)
 			}
 		})
+	}
+}
+
+// ---------- time destination wrapping ----------
+
+type ConvTimed struct {
+	grove.BaseModel `grove:"table:timed"`
+
+	ID    int64      `grove:"id,pk"`
+	At    time.Time  `grove:"at,notnull"`
+	Maybe *time.Time `grove:"maybe"`
+}
+
+// TestFieldPtr_TimeFromString locks in the TEXT-driver contract: sqlite and
+// turso store timestamps as RFC3339 strings, so time destinations must be
+// returned as sql.Scanner implementations that parse them. Without this,
+// every model read with a time field fails on those drivers.
+func TestFieldPtr_TimeFromString(t *testing.T) {
+	table, err := schema.NewTable((*ConvTimed)(nil))
+	if err != nil {
+		t.Fatalf("NewTable failed: %v", err)
+	}
+
+	var m ConvTimed
+	v := reflect.ValueOf(&m).Elem()
+	want := time.Date(2026, 6, 12, 10, 30, 0, 500_000_000, time.UTC)
+
+	for _, field := range table.Fields {
+		ptr := FieldPtr(v, field)
+		switch field.GoName {
+		case "At", "Maybe":
+			sc, ok := ptr.(sql.Scanner)
+			if !ok {
+				t.Fatalf("%s: expected sql.Scanner dest for time field, got %T", field.GoName, ptr)
+			}
+			if scanErr := sc.Scan("2026-06-12T10:30:00.5Z"); scanErr != nil {
+				t.Fatalf("%s: scan string: %v", field.GoName, scanErr)
+			}
+		}
+	}
+
+	if !m.At.Equal(want) {
+		t.Errorf("At = %v, want %v", m.At, want)
+	}
+	if m.Maybe == nil || !m.Maybe.Equal(want) {
+		t.Errorf("Maybe = %v, want %v", m.Maybe, want)
+	}
+}
+
+// TestFieldPtr_TimePassthroughAndNil verifies drivers that already produce
+// time.Time (postgres, clickhouse) pass through unchanged, []byte sources
+// parse, and NULL clears the destination.
+func TestFieldPtr_TimePassthroughAndNil(t *testing.T) {
+	table, err := schema.NewTable((*ConvTimed)(nil))
+	if err != nil {
+		t.Fatalf("NewTable failed: %v", err)
+	}
+
+	stale := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	m := ConvTimed{Maybe: &stale}
+	v := reflect.ValueOf(&m).Elem()
+	want := time.Date(2026, 6, 12, 10, 30, 0, 0, time.UTC)
+
+	for _, field := range table.Fields {
+		switch field.GoName {
+		case "At":
+			sc := FieldPtr(v, field).(sql.Scanner)
+			if err := sc.Scan(want); err != nil {
+				t.Fatalf("At: scan time.Time: %v", err)
+			}
+		case "Maybe":
+			sc := FieldPtr(v, field).(sql.Scanner)
+			if err := sc.Scan(nil); err != nil {
+				t.Fatalf("Maybe: scan nil: %v", err)
+			}
+		}
+	}
+
+	if !m.At.Equal(want) {
+		t.Errorf("At = %v, want %v", m.At, want)
+	}
+	if m.Maybe != nil {
+		t.Errorf("Maybe = %v, want nil after NULL scan", m.Maybe)
+	}
+
+	// []byte sources (some drivers hand TEXT back as bytes) must parse too.
+	for _, field := range table.Fields {
+		if field.GoName == "At" {
+			sc := FieldPtr(v, field).(sql.Scanner)
+			if err := sc.Scan([]byte("2026-06-12T10:30:00Z")); err != nil {
+				t.Fatalf("At: scan []byte: %v", err)
+			}
+		}
 	}
 }

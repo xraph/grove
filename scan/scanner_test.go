@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"testing"
@@ -84,6 +85,12 @@ func (r *mockRows) Err() error {
 
 // assignValue copies src into the pointer dest, mimicking database/sql Scan behavior.
 func assignValue(dest any, src any) error {
+	// database/sql consults sql.Scanner destinations first, including for
+	// NULL values; the time adapters returned by FieldPtr rely on this.
+	if sc, ok := dest.(sql.Scanner); ok {
+		return sc.Scan(src)
+	}
+
 	if src == nil {
 		return nil
 	}
