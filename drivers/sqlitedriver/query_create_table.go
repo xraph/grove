@@ -2,6 +2,7 @@ package sqlitedriver
 
 import (
 	"context"
+	"strings"
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/internal/pool"
@@ -117,7 +118,7 @@ func (q *CreateTableQuery) Build() (string, []any, error) {
 		// DEFAULT value.
 		if f.Options.Default != "" {
 			buf.WriteString(" DEFAULT ")
-			buf.WriteString(f.Options.Default)
+			buf.WriteString(formatDefaultValue(f.Options.Default))
 		}
 
 		// Track primary key columns.
@@ -237,4 +238,81 @@ func (q *DropTableQuery) Exec(ctx context.Context) (driver.Result, error) {
 		return nil, err
 	}
 	return q.db.Exec(ctx, query, args...)
+}
+
+// keywordDefaults are bare SQL tokens that are valid DEFAULT expressions on
+// their own and must never be quoted as string literals.
+var keywordDefaults = map[string]struct{}{
+	"true": {}, "false": {}, "null": {},
+	"current_timestamp": {}, "current_date": {}, "current_time": {},
+	"localtime": {}, "localtimestamp": {},
+}
+
+// formatDefaultValue renders a column DEFAULT for the generated DDL.
+//
+// The struct-tag parser strips the surrounding single quotes from
+// `default:'active'`, leaving the bare word `active`. Emitting that verbatim
+// produces `DEFAULT active`, but a bare identifier is not a valid SQLite column
+// DEFAULT — SQLite wants a literal, a parenthesized constant expression, or one
+// of CURRENT_TIME/CURRENT_DATE/CURRENT_TIMESTAMP. Anything that isn't a number,
+// boolean/NULL/keyword, cast, or function-call expression is therefore treated
+// as a string literal and quoted. Values that already carry quotes are passed
+// through untouched.
+func formatDefaultValue(v string) string {
+	if v == "" {
+		return v
+	}
+
+	// Already a quoted string literal — leave as-is.
+	if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' {
+		return v
+	}
+
+	// Bare keyword/boolean/NULL default.
+	if _, ok := keywordDefaults[strings.ToLower(v)]; ok {
+		return v
+	}
+
+	// Numeric literal.
+	if isNumericLiteral(v) {
+		return v
+	}
+
+	// Expression: function call (now(), gen_random_uuid()) or a cast
+	// (e.g. '{}'::jsonb). Emit verbatim. SQLite is typeless so casts are
+	// unlikely, but the rule is harmless.
+	if strings.ContainsAny(v, "()") || strings.Contains(v, "::") {
+		return v
+	}
+
+	// Treat as a string literal, escaping embedded single quotes.
+	return "'" + strings.ReplaceAll(v, "'", "''") + "'"
+}
+
+// isNumericLiteral reports whether v is a plain integer or decimal literal,
+// optionally signed — the forms that are valid unquoted SQL DEFAULTs.
+func isNumericLiteral(v string) bool {
+	if v == "" {
+		return false
+	}
+	i := 0
+	if v[0] == '+' || v[0] == '-' {
+		i++
+		if i == len(v) {
+			return false
+		}
+	}
+	dotSeen := false
+	digitSeen := false
+	for ; i < len(v); i++ {
+		switch {
+		case v[i] >= '0' && v[i] <= '9':
+			digitSeen = true
+		case v[i] == '.' && !dotSeen:
+			dotSeen = true
+		default:
+			return false
+		}
+	}
+	return digitSeen
 }
