@@ -173,7 +173,10 @@ func (q *UpdateQuery) Build() (string, []any, error) {
 			buf.WriteString(dialect.Quote(f.Options.Column))
 			buf.WriteString(" = ")
 			buf.WriteString(dialect.Placeholder(argIdx))
-			args = append(args, fv.Interface())
+			// Honor nullzero on UPDATE exactly as INSERT does: a zero-valued
+			// nullable nullzero field (e.g. an empty project_id FK) binds NULL
+			// instead of the zero literal, which would otherwise fail the FK.
+			args = append(args, fieldInsertValue(f, fv))
 		}
 
 		if first {
