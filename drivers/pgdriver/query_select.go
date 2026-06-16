@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
@@ -252,9 +253,25 @@ func (q *SelectQuery) applySoftDeleteFilter() {
 		return
 	}
 
+	// Determine which alias the soft-delete column must be qualified with.
+	// Normally it's the model alias, but a raw TableExpr overrides the FROM,
+	// so the model alias may not match what's actually in the FROM (e.g. a
+	// self-join subquery using `function_definitions AS sub`). In that case
+	// qualify with the TableExpr's own alias; if we can't determine one
+	// (subquery/join/multi-table expr), skip the filter rather than emit a
+	// dangling `fd.deleted_at` that fails with "missing FROM-clause entry".
+	alias := q.table.Alias
+	if q.tableExpr != "" {
+		a, ok := aliasFromTableExpr(q.tableExpr)
+		if !ok {
+			return
+		}
+		alias = a
+	}
+
 	sdCol := q.db.dialect.Quote(q.table.SoftDelete.Options.Column)
-	if q.table.Alias != "" {
-		sdCol = q.db.dialect.Quote(q.table.Alias) + "." + sdCol
+	if alias != "" {
+		sdCol = q.db.dialect.Quote(alias) + "." + sdCol
 	}
 	clause := sdCol + " IS NULL"
 
@@ -266,6 +283,33 @@ func (q *SelectQuery) applySoftDeleteFilter() {
 	}
 
 	q.addWhere("AND", clause, nil)
+}
+
+// aliasFromTableExpr extracts the FROM-entry alias from a simple raw table
+// expression — "table AS a" or "table a" → "a", bare "table" → "" (the table
+// itself is the single FROM entry, so an unqualified column is unambiguous).
+// Returns ok=false for anything it can't safely reason about (subqueries,
+// joins, comma-separated multi-table lists), so callers don't qualify columns
+// against a guessed alias.
+func aliasFromTableExpr(expr string) (string, bool) {
+	e := strings.TrimSpace(expr)
+	if e == "" {
+		return "", false
+	}
+	if strings.ContainsAny(e, "(),") || strings.Contains(strings.ToUpper(e), " JOIN ") {
+		return "", false
+	}
+	fields := strings.Fields(e)
+	switch {
+	case len(fields) >= 2 && strings.EqualFold(fields[len(fields)-2], "AS"):
+		return strings.Trim(fields[len(fields)-1], `"`), true
+	case len(fields) == 2:
+		return strings.Trim(fields[1], `"`), true
+	case len(fields) == 1:
+		return "", true
+	default:
+		return "", false
+	}
 }
 
 // Build generates the SQL string and args without executing.

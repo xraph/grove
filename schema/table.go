@@ -57,6 +57,15 @@ func NewTable(model any) (*Table, error) {
 		return nil, err
 	}
 
+	// Honor Go's field shadowing. processFields recurses into embedded
+	// structs first, so an outer field that maps to the same column as an
+	// embedded one (e.g. a model overriding the embedded Entity.UpdatedAt to
+	// change its json tag) yields two entries for that column. Go resolves
+	// such a selector to the shallower (outer) field, so collapse duplicates
+	// keeping the shallowest — otherwise CREATE TABLE and insert column lists
+	// emit the column twice ("column specified more than once").
+	t.dedupeShadowedColumns()
+
 	// Pre-build column -> field lookup so scanners can reuse it.
 	t.FieldsByColumn = make(map[string]*Field, len(t.Fields))
 	for _, f := range t.Fields {
@@ -64,6 +73,37 @@ func NewTable(model any) (*Table, error) {
 	}
 
 	return t, nil
+}
+
+// dedupeShadowedColumns collapses fields that resolve to the same column,
+// keeping the shallowest (fewest embedding hops) to match Go's field-promotion
+// shadowing rules, then rebuilds the PK and soft-delete sets from the winners.
+func (t *Table) dedupeShadowedColumns() {
+	pos := make(map[string]int, len(t.Fields)) // column -> index in deduped
+	deduped := t.Fields[:0:0]
+	for _, f := range t.Fields {
+		col := f.Options.Column
+		if i, ok := pos[col]; ok {
+			if len(f.GoIndex) < len(deduped[i].GoIndex) {
+				deduped[i] = f // outer field shadows the embedded one
+			}
+			continue
+		}
+		pos[col] = len(deduped)
+		deduped = append(deduped, f)
+	}
+	t.Fields = deduped
+
+	t.PKFields = nil
+	t.SoftDelete = nil
+	for _, f := range t.Fields {
+		if f.Options.IsPK {
+			t.PKFields = append(t.PKFields, f)
+		}
+		if f.Options.SoftDelete {
+			t.SoftDelete = f
+		}
+	}
 }
 
 // processFields walks the struct fields and populates the table metadata.

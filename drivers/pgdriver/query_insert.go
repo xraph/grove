@@ -427,7 +427,7 @@ func (q *InsertQuery) execPreparedWith(ctx context.Context, db *PgDB, fields []*
 			for _, idx := range f.GoIndex {
 				fv = fv.Field(idx)
 			}
-			rowArgs[j] = fv.Interface()
+			rowArgs[j] = fieldInsertValue(f, fv)
 		}
 
 		res, err := stmt.Exec(ctx, rowArgs...)
@@ -580,7 +580,21 @@ func extractFieldValues(structVal reflect.Value, fields []*schema.Field) ([]any,
 		for _, idx := range f.GoIndex {
 			fv = fv.Field(idx)
 		}
-		values[i] = fv.Interface()
+		values[i] = fieldInsertValue(f, fv)
 	}
 	return values, nil
+}
+
+// fieldInsertValue returns the value to bind for a field on INSERT. A nullzero
+// field that is nullable (not NOT NULL) and currently holds its zero value is
+// bound as SQL NULL instead of the zero literal. This lets an empty Go string
+// on a nullable foreign-key column (e.g. project_id) insert NULL rather than
+// ” — ” would fail the FK since no referenced row has an empty id. NOT NULL
+// columns are never nulled, so notnull+nullzero fields (e.g. timestamps with a
+// DB default) keep their value and behavior is unchanged for them.
+func fieldInsertValue(f *schema.Field, fv reflect.Value) any {
+	if f.Options.NullZero && !f.Options.NotNull && fv.IsZero() {
+		return nil
+	}
+	return fv.Interface()
 }

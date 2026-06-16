@@ -4,7 +4,11 @@ package pgmigrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/migrate"
@@ -95,7 +99,7 @@ func (e *Executor) EnsureMigrationTable(ctx context.Context) error {
 		UNIQUE(version, "group")
 	)`, migrationTableName)
 	_, err := e.exec(ctx, query)
-	return err
+	return ignoreConcurrentCreate(err)
 }
 
 // EnsureLockTable creates the grove_migration_locks table if it doesn't exist.
@@ -107,6 +111,33 @@ func (e *Executor) EnsureLockTable(ctx context.Context) error {
 		CONSTRAINT single_lock CHECK (id = 1)
 	)`, lockTableName)
 	_, err := e.exec(ctx, query)
+	return ignoreConcurrentCreate(err)
+}
+
+// ignoreConcurrentCreate swallows the unique_violation (SQLSTATE 23505) that a
+// concurrent CREATE TABLE IF NOT EXISTS produces. CREATE TABLE IF NOT EXISTS is
+// NOT atomic against concurrent creation in Postgres: two sessions both pass
+// the existence check, then the loser collides on pg_type_typname_nsp_index
+// when it inserts the table's rowtype. This happens on first boot when several
+// processes/extensions migrate the same database at once (e.g. forge dev
+// starting twinos+atlas, or identity+portal+studio on the platform DB). The
+// winner has committed by the time 23505 fires, so the table now exists and the
+// ensure step has effectively succeeded.
+func ignoreConcurrentCreate(err error) error {
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		if pgErr.Code == "23505" {
+			return nil
+		}
+		return err
+	}
+	// Fallback when the driver doesn't surface a typed *pgconn.PgError.
+	if strings.Contains(err.Error(), "SQLSTATE 23505") {
+		return nil
+	}
 	return err
 }
 

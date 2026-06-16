@@ -21,25 +21,56 @@ import (
 // v must be the reflect.Value of the struct (not a pointer to it).
 func FieldPtr(v reflect.Value, field *schema.Field) any {
 	if len(field.GoIndex) == 1 {
-		return wrapDest(v.Field(field.GoIndex[0]).Addr().Interface())
+		return wrapDest(v.Field(field.GoIndex[0]).Addr().Interface(), field)
 	}
 	fv := v
 	for _, idx := range field.GoIndex {
 		fv = fv.Field(idx)
 	}
-	return wrapDest(fv.Addr().Interface())
+	return wrapDest(fv.Addr().Interface(), field)
 }
 
 // wrapDest substitutes scanner adapters for destinations the drivers cannot
-// fill directly. Non-time destinations are returned as-is.
-func wrapDest(ptr any) any {
+// fill directly. Non-adapted destinations are returned as-is.
+func wrapDest(ptr any, field *schema.Field) any {
 	switch p := ptr.(type) {
 	case *time.Time:
 		return &timeDest{dst: p}
 	case **time.Time:
 		return &timePtrDest{dst: p}
+	case *string:
+		// pgx cannot scan SQL NULL into *string and errors. For a nullable
+		// column, wrap the destination so NULL coerces to "" — the same
+		// NULL→zero-value treatment timeDest gives non-pointer time.Time. This
+		// lets a plain `string` field round-trip a nullable column (e.g.
+		// project_id, written as NULL when empty via the nullzero insert path).
+		// NOT NULL columns never return NULL, so they keep the raw pointer.
+		if field != nil && !field.Options.NotNull {
+			return &stringDest{dst: p}
+		}
+		return ptr
 	default:
 		return ptr
+	}
+}
+
+// stringDest scans a driver value into a non-pointer string field, mapping SQL
+// NULL to the empty string instead of failing.
+type stringDest struct{ dst *string }
+
+func (d *stringDest) Scan(src any) error {
+	switch v := src.(type) {
+	case nil:
+		*d.dst = ""
+		return nil
+	case string:
+		*d.dst = v
+		return nil
+	case []byte:
+		*d.dst = string(v)
+		return nil
+	default:
+		return fmt.Errorf("scan: cannot convert %T into string", src)
 	}
 }
 
