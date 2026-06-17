@@ -17,16 +17,24 @@ type MigrateResult struct { //nolint:revive // MigrateResult is the established 
 
 // Orchestrator manages migration execution across multiple groups.
 type Orchestrator struct {
-	executor Executor
-	groups   []*Group
+	executor    Executor
+	groups      []*Group
+	lockTimeout time.Duration
 }
 
 // NewOrchestrator creates a new migration orchestrator.
 func NewOrchestrator(executor Executor, groups ...*Group) *Orchestrator {
 	return &Orchestrator{
-		executor: executor,
-		groups:   groups,
+		executor:    executor,
+		groups:      groups,
+		lockTimeout: DefaultLockTimeout,
 	}
+}
+
+// SetLockTimeout overrides the lock-wait budget. 0 = wait until ctx deadline.
+func (o *Orchestrator) SetLockTimeout(d time.Duration) *Orchestrator {
+	o.lockTimeout = d
+	return o
 }
 
 // Migrate runs all pending migrations in dependency-resolved order.
@@ -208,15 +216,18 @@ func (o *Orchestrator) Status(ctx context.Context) ([]*GroupStatus, error) {
 // acquireLockWithRetry attempts to acquire the migration lock with
 // exponential backoff. It retries only when the error is a lock-held
 // error (another migration is in progress). Other errors are returned
-// immediately. The total retry window is capped at 30 seconds.
+// immediately. The total retry window is controlled by o.lockTimeout:
+// a positive value sets a hard deadline; 0 means wait until ctx deadline.
 func (o *Orchestrator) acquireLockWithRetry(ctx context.Context, lockedBy string) error {
 	const (
-		maxWait     = 30 * time.Second
 		initialWait = 100 * time.Millisecond
 		maxInterval = 2 * time.Second
 	)
 
-	deadline := time.Now().Add(maxWait)
+	var deadline time.Time
+	if o.lockTimeout > 0 {
+		deadline = time.Now().Add(o.lockTimeout)
+	}
 
 	for attempt := 0; ; attempt++ {
 		err := o.executor.AcquireLock(ctx, lockedBy)
@@ -231,8 +242,8 @@ func (o *Orchestrator) acquireLockWithRetry(ctx context.Context, lockedBy string
 		}
 
 		// Check if we have exceeded the time budget.
-		if time.Now().After(deadline) {
-			return err
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return o.enrichLockError(ctx, err)
 		}
 
 		// Exponential backoff with jitter (matches kv/middleware/retry.go).
@@ -248,4 +259,18 @@ func (o *Orchestrator) acquireLockWithRetry(ctx context.Context, lockedBy string
 		case <-time.After(backoff):
 		}
 	}
+}
+
+// enrichLockError adds lock-holder details to a budget-exhausted lock error
+// when the executor can report them.
+func (o *Orchestrator) enrichLockError(ctx context.Context, err error) error {
+	insp, ok := o.executor.(LockInspector)
+	if !ok {
+		return err
+	}
+	info, ierr := insp.LockInfo(context.WithoutCancel(ctx))
+	if ierr != nil || info == nil || !info.Held {
+		return err
+	}
+	return fmt.Errorf("%w (held by %s since %s)", err, info.LockedBy, info.LockedAt)
 }

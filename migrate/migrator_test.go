@@ -110,6 +110,52 @@ func TestAcquireLockWithRetry_ContextCancellation(t *testing.T) {
 	assert.Less(t, elapsed, 1*time.Second, "should return promptly on cancelled context")
 }
 
+func TestAcquireLockWithRetry_WaitsThenSucceeds(t *testing.T) {
+	var callCount atomic.Int32
+	mock := &retryMockExecutor{
+		acquireFn: func() error {
+			n := callCount.Add(1)
+			if n <= 2 {
+				return fmt.Errorf("pgmigrate: %w", ErrLockHeld)
+			}
+			return nil
+		},
+	}
+	orch := NewOrchestrator(mock).SetLockTimeout(5 * time.Second)
+
+	err := orch.acquireLockWithRetry(context.Background(), "test:1")
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, mock.calls.Load(), int32(3), "expected at least 3 acquire attempts")
+}
+
+func TestAcquireLockWithRetry_ZeroTimeoutWaitsUntilContext(t *testing.T) {
+	mock := &retryMockExecutor{
+		acquireFn: func() error {
+			return fmt.Errorf("pgmigrate: %w", ErrLockHeld)
+		},
+	}
+	orch := NewOrchestrator(mock).SetLockTimeout(0) // wait until ctx deadline
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	err := orch.acquireLockWithRetry(ctx, "test:1")
+	require.Error(t, err, "expected error when context deadline elapses while lock held")
+}
+
+func TestAcquireLockWithRetry_BudgetExhausted(t *testing.T) {
+	mock := &retryMockExecutor{
+		acquireFn: func() error {
+			return fmt.Errorf("pgmigrate: %w", ErrLockHeld)
+		},
+	}
+	orch := NewOrchestrator(mock).SetLockTimeout(200 * time.Millisecond)
+
+	err := orch.acquireLockWithRetry(context.Background(), "test:1")
+	require.Error(t, err)
+	assert.True(t, IsLockError(err), "expected a lock error when budget is exhausted")
+}
+
 func TestMigrate_ReleaseLockCalledWithUncancelledContext(t *testing.T) {
 	// Verify that ReleaseLock receives an uncancelled context even when
 	// the caller's context is cancelled during migration execution.
