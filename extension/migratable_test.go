@@ -84,6 +84,8 @@ func TestBuildOrchestrator_AppliesLockTimeout(t *testing.T) {
 	if !migrate.IsLockError(err) {
 		t.Fatalf("expected lock error, got: %v", err)
 	}
+	// The 2s bound proves SetLockTimeout was applied (vs the 5m DefaultLockTimeout);
+	// it assumes the orchestrator's backoff stays well under that bound for a 200ms timeout.
 	if elapsed >= 2*time.Second {
 		t.Fatalf("Migrate took %v — lock timeout not applied (want < 2s)", elapsed)
 	}

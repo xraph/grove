@@ -36,7 +36,7 @@ type Config struct {
 	// LockTimeout caps how long migrations wait for the database migration
 	// lock. 0 uses migrate.DefaultLockTimeout. Negative means wait until the
 	// context deadline (maps to migrate's 0).
-	LockTimeout time.Duration `yaml:"lock_timeout" json:"lock_timeout"`
+	LockTimeout time.Duration `json:"lock_timeout" mapstructure:"lock_timeout" yaml:"lock_timeout"`
 
 	// RequireConfig requires config to be present in YAML files.
 	// If true and no config is found, Register returns an error.
