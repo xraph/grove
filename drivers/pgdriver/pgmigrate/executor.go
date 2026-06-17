@@ -38,6 +38,7 @@ type Executor struct {
 }
 
 var _ migrate.Executor = (*Executor)(nil)
+var _ migrate.LockInspector = (*Executor)(nil)
 
 // New creates a new PostgreSQL migration executor.
 func New(drv driver.Driver) *Executor {
@@ -241,6 +242,28 @@ func (e *Executor) RecordApplied(ctx context.Context, m *migrate.Migration) erro
 		migrationTableName)
 	_, err := e.exec(ctx, query, m.Version, m.Name, m.Group)
 	return err
+}
+
+// LockInfo reports the current migration lock holder recorded in the lock table.
+// It satisfies migrate.LockInspector, letting the orchestrator produce a
+// diagnosable error when the lock-wait budget is exhausted.
+func (e *Executor) LockInfo(ctx context.Context) (*migrate.LockInfo, error) {
+	query := fmt.Sprintf(
+		`SELECT locked_by, locked_at::text FROM %s WHERE id = 1`, lockTableName)
+	row := e.queryRow(ctx, query)
+	var by, at *string
+	if err := row.Scan(&by, &at); err != nil {
+		// No row / not initialized: report not held rather than erroring.
+		return &migrate.LockInfo{Held: false}, nil //nolint:nilerr // absence == not held
+	}
+	info := &migrate.LockInfo{Held: by != nil}
+	if by != nil {
+		info.LockedBy = *by
+	}
+	if at != nil {
+		info.LockedAt = *at
+	}
+	return info, nil
 }
 
 // RemoveApplied removes the record of an applied migration (for rollback).
