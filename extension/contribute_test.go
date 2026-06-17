@@ -68,6 +68,19 @@ func TestWithCentralMigrations_SetsConfig(t *testing.T) {
 	}
 }
 
+// TestMergeConfigurations_PropagatesCentralMigrations verifies that a
+// programmatic CentralMigrations=true is preserved when merging over a
+// YAML config that has CentralMigrations=false.
+func TestMergeConfigurations_PropagatesCentralMigrations(t *testing.T) {
+	e := New()
+	yamlConfig := Config{CentralMigrations: false}
+	programmaticConfig := Config{CentralMigrations: true}
+	merged := e.mergeConfigurations(yamlConfig, programmaticConfig)
+	if !merged.CentralMigrations {
+		t.Fatal("expected merged CentralMigrations to be true when programmatic config sets it")
+	}
+}
+
 // TestTryClaimHook_Once verifies that tryClaimHook returns true exactly once
 // across multiple calls on the same registry.
 func TestTryClaimHook_Once(t *testing.T) {

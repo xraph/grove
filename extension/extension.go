@@ -173,20 +173,22 @@ func (e *Extension) Register(fapp forge.App) error {
 			// as a once-guard so only the first contributing extension registers it.
 			if reg.tryClaimHook() {
 				capturedReg := reg
-				_ = fapp.RegisterHook(
+				if err := fapp.RegisterHook(
 					forge.PhaseAfterRegister,
 					func(ctx context.Context, a forge.App) error {
 						if a.MigrationsDisabled() {
 							return nil
 						}
-						_, err := capturedReg.RunAll(ctx)
-						return err
+						_, rerr := capturedReg.RunAll(ctx)
+						return rerr
 					},
 					forge.LifecycleHookOptions{
 						Name:     "grove-central-migrate",
 						Priority: 1000,
 					},
-				)
+				); err != nil {
+					return fmt.Errorf("grove: register central migrate hook: %w", err)
+				}
 			}
 		}
 	}
@@ -603,6 +605,9 @@ func (e *Extension) mergeConfigurations(yamlConfig, programmaticConfig Config) C
 	}
 	if programmaticConfig.DisableMigrate {
 		yamlConfig.DisableMigrate = true
+	}
+	if programmaticConfig.CentralMigrations {
+		yamlConfig.CentralMigrations = true
 	}
 
 	// BasePath: YAML takes precedence.
