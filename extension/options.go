@@ -150,6 +150,15 @@ func WithLockTimeout(d time.Duration) ExtOption {
 // Instead of running its own migration pass, the extension contributes its
 // groups to the shared MigrationRegistry. A single RunAll trigger (registered
 // by the first contributing extension) runs them all in one ordered pass.
+//
+// This option is OPT-IN and defaults off. It should remain off until forge
+// CentralMigrator (Phase 3) support is in place. On forge ≤ 1.7.1 it is
+// effectively unsafe: the central migration trigger fires on PhaseAfterRegister,
+// which on that version runs after all extensions have started — schema is NOT
+// guaranteed before Start, making this worse than the default per-extension path
+// for any extension that seeds or queries during Start. Additionally, central
+// rollback is not available until the forge CentralMigrator split-phase lands;
+// calling Rollback while in central mode returns an explicit error.
 func WithCentralMigrations() ExtOption {
 	return func(e *Extension) { e.config.CentralMigrations = true }
 }

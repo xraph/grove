@@ -48,8 +48,8 @@ func (e *Extension) Rollback(ctx context.Context) (*forge.MigrationResult, error
 		return nil, errors.New("grove: migrations are disabled via configuration")
 	}
 	if e.contributed {
-		// Central migration registry owns execution; nothing to do per-extension.
-		return &forge.MigrationResult{}, nil
+		return nil, errors.New("grove: rollback is unavailable in central migration mode; " +
+			"central rollback requires the forge CentralMigrator (not yet wired) — applied migrations are unchanged")
 	}
 
 	result := &forge.MigrationResult{}

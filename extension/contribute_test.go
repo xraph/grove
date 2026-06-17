@@ -30,8 +30,9 @@ func TestRegistryFromContainer_GetOrCreateSameInstance(t *testing.T) {
 	}
 }
 
-// TestMigrate_NoOpWhenContributed verifies that Migrate and Rollback return
-// immediately with zero counts when e.contributed is true.
+// TestMigrate_NoOpWhenContributed verifies that Migrate returns a non-nil
+// empty result with no error when e.contributed is true (central registry
+// owns forward migration; per-extension pass is legitimately a no-op).
 func TestMigrate_NoOpWhenContributed(t *testing.T) {
 	e := New()
 	e.contributed = true
@@ -46,16 +47,23 @@ func TestMigrate_NoOpWhenContributed(t *testing.T) {
 	if res.Applied != 0 {
 		t.Fatalf("Migrate: Applied = %d, want 0", res.Applied)
 	}
+}
 
-	res2, err2 := e.Rollback(context.Background())
-	if err2 != nil {
-		t.Fatalf("Rollback: unexpected error: %v", err2)
+// TestRollback_ErrorsWhenContributed verifies that Rollback returns a non-nil
+// error when e.contributed is true. Central rollback is not available until
+// the forge CentralMigrator (Phase 3) lands; silently no-oping would leave
+// applied migrations in place with no indication to the caller.
+func TestRollback_ErrorsWhenContributed(t *testing.T) {
+	e := New()
+	e.contributed = true
+
+	res, err := e.Rollback(context.Background())
+	if err == nil {
+		t.Fatal("Rollback: expected a non-nil error in central migration mode, got nil")
 	}
-	if res2 == nil {
-		t.Fatal("Rollback: expected non-nil result")
-	}
-	if res2.RolledBack != 0 {
-		t.Fatalf("Rollback: RolledBack = %d, want 0", res2.RolledBack)
+	// result may be nil or zero — either is acceptable; only the error matters.
+	if res != nil && res.RolledBack != 0 {
+		t.Fatalf("Rollback: RolledBack = %d, want 0", res.RolledBack)
 	}
 }
 
