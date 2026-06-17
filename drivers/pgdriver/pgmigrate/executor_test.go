@@ -49,6 +49,22 @@ func newTestExecutor(t *testing.T) *Executor {
 	return New(db)
 }
 
+func TestExecutor_LockInfo_NotHeld(t *testing.T) {
+	exec := newTestExecutor(t)
+	ctx := context.Background()
+	if err := exec.EnsureLockTable(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Do NOT acquire the lock: the lock table has no id=1 row yet.
+	info, err := exec.LockInfo(ctx)
+	if err != nil {
+		t.Fatalf("expected no error for unacquired lock, got: %v", err)
+	}
+	if info.Held {
+		t.Fatalf("expected Held=false for unacquired lock, got %+v", info)
+	}
+}
+
 func TestExecutor_LockInfo_ReportsHolder(t *testing.T) {
 	exec := newTestExecutor(t)
 	ctx := context.Background()

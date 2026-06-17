@@ -4,10 +4,12 @@ package pgmigrate
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/xraph/grove/driver"
@@ -253,8 +255,14 @@ func (e *Executor) LockInfo(ctx context.Context) (*migrate.LockInfo, error) {
 	row := e.queryRow(ctx, query)
 	var by, at *string
 	if err := row.Scan(&by, &at); err != nil {
-		// No row / not initialized: report not held rather than erroring.
-		return &migrate.LockInfo{Held: false}, nil //nolint:nilerr // absence == not held
+		// No row means the lock table exists but has no id=1 record yet
+		// (i.e. the lock has never been acquired). Treat this as not held.
+		// Any other error (connection reset, ctx cancelled, schema mismatch,
+		// etc.) is a real failure and must be surfaced to the caller.
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
+			return &migrate.LockInfo{Held: false}, nil //nolint:nilerr // no-rows == not held
+		}
+		return nil, fmt.Errorf("pgmigrate: read lock info: %w", err)
 	}
 	info := &migrate.LockInfo{Held: by != nil}
 	if by != nil {
