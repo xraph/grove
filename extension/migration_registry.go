@@ -21,8 +21,13 @@ import (
 type MigrationRegistry struct {
 	mu          sync.Mutex
 	dbs         map[string]*dbContribution
-	order       []string // dbKeys in first-contribution order, for deterministic runs
 	lockTimeout time.Duration
+}
+
+// dbEntry pairs a database key with its contribution, used by snapshot-driven loops.
+type dbEntry struct {
+	key string
+	c   *dbContribution
 }
 
 type dbContribution struct {
@@ -62,7 +67,6 @@ func (r *MigrationRegistry) Contribute(dbKey string, drv grove.GroveDriver, grou
 	if !ok {
 		c = &dbContribution{drv: drv}
 		r.dbs[dbKey] = c
-		r.order = append(r.order, dbKey)
 	}
 	if c.drv == nil {
 		c.drv = drv
@@ -70,23 +74,19 @@ func (r *MigrationRegistry) Contribute(dbKey string, drv grove.GroveDriver, grou
 	c.groups = append(c.groups, groups...)
 }
 
-func (r *MigrationRegistry) snapshot() []struct {
-	key string
-	c   *dbContribution
-} {
+// snapshot returns all contributed databases in deterministic (alphabetical key)
+// order. "" sorts first. RollbackAll iterates the slice in reverse.
+func (r *MigrationRegistry) snapshot() []dbEntry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]struct {
-		key string
-		c   *dbContribution
-	}, 0, len(r.order))
-	keys := append([]string(nil), r.order...)
+	keys := make([]string, 0, len(r.dbs))
+	for k := range r.dbs {
+		keys = append(keys, k)
+	}
 	sort.Strings(keys) // deterministic; "" sorts first
+	out := make([]dbEntry, 0, len(keys))
 	for _, k := range keys {
-		out = append(out, struct {
-			key string
-			c   *dbContribution
-		}{k, r.dbs[k]})
+		out = append(out, dbEntry{k, r.dbs[k]})
 	}
 	return out
 }
@@ -100,7 +100,7 @@ func (r *MigrationRegistry) orchestrator(c *dbContribution) (*migrate.Orchestrat
 	if r.lockTimeout != 0 {
 		d := r.lockTimeout
 		if d < 0 {
-			d = 0
+			d = 0 // negative configured timeout → wait until context deadline (migrate semantics: 0 = no timeout)
 		}
 		orch.SetLockTimeout(d)
 	}

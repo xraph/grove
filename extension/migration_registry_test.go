@@ -13,9 +13,23 @@ import (
 
 type fakeRegDriver struct{}
 
-func (f *fakeRegDriver) Name() string              { return "reg_test_driver" }
-func (f *fakeRegDriver) Close() error              { return nil }
+func (f *fakeRegDriver) Name() string                 { return "reg_test_driver" }
+func (f *fakeRegDriver) Close() error                 { return nil }
 func (f *fakeRegDriver) Ping(_ context.Context) error { return nil }
+
+// --- fake drivers for rollback-reverse test ---
+
+type fakeRegDriverA struct{}
+
+func (f *fakeRegDriverA) Name() string                 { return "reg_test_a" }
+func (f *fakeRegDriverA) Close() error                 { return nil }
+func (f *fakeRegDriverA) Ping(_ context.Context) error { return nil }
+
+type fakeRegDriverB struct{}
+
+func (f *fakeRegDriverB) Name() string                 { return "reg_test_b" }
+func (f *fakeRegDriverB) Close() error                 { return nil }
+func (f *fakeRegDriverB) Ping(_ context.Context) error { return nil }
 
 // --- recordingExecutor: succeeds every operation ---
 
@@ -41,9 +55,39 @@ func (r *recordingExecutor) Query(_ context.Context, _ string, _ ...any) (driver
 	return nil, nil
 }
 
+// --- rollbackExec: returns one applied migration so Rollback has something to do ---
+
+type rollbackExec struct {
+	group string
+}
+
+func (e *rollbackExec) AcquireLock(_ context.Context, _ string) error { return nil }
+func (e *rollbackExec) ReleaseLock(_ context.Context) error           { return nil }
+func (e *rollbackExec) EnsureMigrationTable(_ context.Context) error  { return nil }
+func (e *rollbackExec) EnsureLockTable(_ context.Context) error       { return nil }
+func (e *rollbackExec) ListApplied(_ context.Context) ([]*migrate.AppliedMigration, error) {
+	return []*migrate.AppliedMigration{
+		{Group: e.group, Version: "0001", Name: "m"},
+	}, nil
+}
+func (e *rollbackExec) RecordApplied(_ context.Context, _ *migrate.Migration) error { return nil }
+func (e *rollbackExec) RemoveApplied(_ context.Context, _ *migrate.Migration) error { return nil }
+func (e *rollbackExec) Exec(_ context.Context, _ string, _ ...any) (driver.Result, error) {
+	return nil, nil
+}
+func (e *rollbackExec) Query(_ context.Context, _ string, _ ...any) (driver.Rows, error) {
+	return nil, nil
+}
+
 func init() {
 	migrate.RegisterExecutor("reg_test_driver", func(_ any) migrate.Executor {
 		return &recordingExecutor{}
+	})
+	migrate.RegisterExecutor("reg_test_a", func(_ any) migrate.Executor {
+		return &rollbackExec{group: "group_a"}
+	})
+	migrate.RegisterExecutor("reg_test_b", func(_ any) migrate.Executor {
+		return &rollbackExec{group: "group_b"}
 	})
 }
 
@@ -119,44 +163,49 @@ func TestMigrationRegistry_UnresolvedDepFails(t *testing.T) {
 	}
 }
 
-// TestMigrationRegistry_RollbackReverse verifies RollbackAll runs without error.
-// Because recordingExecutor.ListApplied returns nil, the orchestrator's rollback
-// is a no-op (nothing applied), so RolledBack == 0.
+// TestMigrationRegistry_RollbackReverse verifies RollbackAll iterates databases
+// in reverse alphabetical order. db_a < db_b alphabetically, so forward order is
+// [db_a, db_b] and rollback order must be [db_b, db_a] — i.e. "b" before "a".
 func TestMigrationRegistry_RollbackReverse(t *testing.T) {
-	identity := migrate.NewGroup("identity/postgres")
-	if err := identity.Register(&migrate.Migration{
+	var rollbackOrder []string
+
+	ga := migrate.NewGroup("group_a")
+	if err := ga.Register(&migrate.Migration{
 		Version: "0001",
-		Name:    "users",
-		Up:      func(ctx context.Context, e migrate.Executor) error { return nil },
+		Name:    "m",
+		Up:      func(_ context.Context, _ migrate.Executor) error { return nil },
+		Down: func(_ context.Context, _ migrate.Executor) error {
+			rollbackOrder = append(rollbackOrder, "a")
+			return nil
+		},
 	}); err != nil {
-		t.Fatalf("identity.Register: %v", err)
+		t.Fatalf("ga.Register: %v", err)
 	}
 
-	trove := migrate.NewGroup("trove/postgres", migrate.DependsOn("identity/postgres"))
-	if err := trove.Register(&migrate.Migration{
+	gb := migrate.NewGroup("group_b")
+	if err := gb.Register(&migrate.Migration{
 		Version: "0001",
-		Name:    "items",
-		Up:      func(ctx context.Context, e migrate.Executor) error { return nil },
+		Name:    "m",
+		Up:      func(_ context.Context, _ migrate.Executor) error { return nil },
+		Down: func(_ context.Context, _ migrate.Executor) error {
+			rollbackOrder = append(rollbackOrder, "b")
+			return nil
+		},
 	}); err != nil {
-		t.Fatalf("trove.Register: %v", err)
+		t.Fatalf("gb.Register: %v", err)
 	}
 
 	r := NewMigrationRegistry()
-	r.Contribute("", &fakeRegDriver{}, identity)
-	r.Contribute("", &fakeRegDriver{}, trove)
+	r.Contribute("db_a", &fakeRegDriverA{}, ga)
+	r.Contribute("db_b", &fakeRegDriverB{}, gb)
 
-	// Run forward first.
-	if _, err := r.RunAll(context.Background()); err != nil {
-		t.Fatalf("RunAll: %v", err)
-	}
-
-	// Now rollback — recordingExecutor returns no applied migrations so this is a no-op.
-	res, err := r.RollbackAll(context.Background())
+	// RollbackAll must reverse alphabetical order: db_b rolls back before db_a.
+	_, err := r.RollbackAll(context.Background())
 	if err != nil {
 		t.Fatalf("RollbackAll: %v", err)
 	}
-	// No-op executor returns 0 rolled back — that's the honest assertion.
-	if res.RolledBack != 0 {
-		t.Errorf("RolledBack = %d, want 0 (no-op executor)", res.RolledBack)
+
+	if len(rollbackOrder) != 2 || rollbackOrder[0] != "b" || rollbackOrder[1] != "a" {
+		t.Errorf("rollback order = %v, want [b a]", rollbackOrder)
 	}
 }
