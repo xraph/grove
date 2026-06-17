@@ -156,6 +156,35 @@ func TestAcquireLockWithRetry_BudgetExhausted(t *testing.T) {
 	assert.True(t, IsLockError(err), "expected a lock error when budget is exhausted")
 }
 
+// lockInspectorExecutor wraps retryMockExecutor and also implements LockInspector.
+type lockInspectorExecutor struct {
+	retryMockExecutor
+}
+
+func (e *lockInspectorExecutor) LockInfo(_ context.Context) (*LockInfo, error) {
+	return &LockInfo{
+		Held:     true,
+		LockedBy: "host:123",
+		LockedAt: "2026-01-01T00:00:00Z",
+	}, nil
+}
+
+func TestEnrichLockError_IncludesLockHolder(t *testing.T) {
+	mock := &lockInspectorExecutor{
+		retryMockExecutor: retryMockExecutor{
+			acquireFn: func() error {
+				return fmt.Errorf("pgmigrate: %w", ErrLockHeld)
+			},
+		},
+	}
+	orch := NewOrchestrator(mock).SetLockTimeout(150 * time.Millisecond)
+
+	err := orch.acquireLockWithRetry(context.Background(), "test:1")
+	require.Error(t, err)
+	assert.True(t, IsLockError(err), "expected a lock error")
+	assert.Contains(t, err.Error(), "held by host:123", "error should name the lock holder")
+}
+
 func TestMigrate_ReleaseLockCalledWithUncancelledContext(t *testing.T) {
 	// Verify that ReleaseLock receives an uncancelled context even when
 	// the caller's context is cancelled during migration execution.
