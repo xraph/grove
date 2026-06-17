@@ -14,8 +14,8 @@ import (
 
 type fakeLTDriver struct{}
 
-func (f *fakeLTDriver) Name() string             { return "lt_test_driver" }
-func (f *fakeLTDriver) Close() error             { return nil }
+func (f *fakeLTDriver) Name() string                 { return "lt_test_driver" }
+func (f *fakeLTDriver) Close() error                 { return nil }
 func (f *fakeLTDriver) Ping(_ context.Context) error { return nil }
 
 // --- alwaysLockedExecutor: AcquireLock always returns ErrLockHeld ---
