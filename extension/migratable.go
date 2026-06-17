@@ -257,7 +257,16 @@ func (e *Extension) buildOrchestrator(drv any, groups []*migrate.Group) (*migrat
 	if err != nil {
 		return nil, fmt.Errorf("grove: create migration executor: %w", err)
 	}
-	return migrate.NewOrchestrator(executor, groups...), nil
+	orch := migrate.NewOrchestrator(executor, groups...)
+	if e.config.LockTimeout != 0 {
+		// Negative config => wait until context deadline (migrate's 0).
+		d := e.config.LockTimeout
+		if d < 0 {
+			d = 0
+		}
+		orch.SetLockTimeout(d)
+	}
+	return orch, nil
 }
 
 // convertGroupStatuses converts grove migrate.GroupStatus to forge.MigrationGroupInfo.

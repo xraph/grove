@@ -2,6 +2,7 @@ package extension
 
 import (
 	"context"
+	"time"
 
 	"github.com/xraph/grove"
 	"github.com/xraph/grove/crdt"
@@ -137,6 +138,12 @@ func WithDisableRoutes() ExtOption {
 // WithDisableMigrate disables automatic migration execution.
 func WithDisableMigrate() ExtOption {
 	return func(e *Extension) { e.config.DisableMigrate = true }
+}
+
+// WithLockTimeout sets how long migrations wait for the migration lock.
+// 0 uses migrate.DefaultLockTimeout. Negative means wait until the context deadline.
+func WithLockTimeout(d time.Duration) ExtOption {
+	return func(e *Extension) { e.config.LockTimeout = d }
 }
 
 // WithBasePath sets the URL prefix for CRDT sync routes.
