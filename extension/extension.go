@@ -34,11 +34,12 @@ var _ forge.Extension = (*Extension)(nil)
 type Extension struct {
 	*forge.BaseExtension
 
-	config Config
-	db     *grove.DB
-	driver grove.GroveDriver
-	groups []*migrate.Group
-	hooks  []hookEntry
+	config      Config
+	db          *grove.DB
+	driver      grove.GroveDriver
+	groups      []*migrate.Group
+	hooks       []hookEntry
+	contributed bool // true when groups have been contributed to a MigrationRegistry
 
 	// Multi-DB support.
 	databases    []databaseEntry
@@ -104,6 +105,22 @@ func (e *Extension) isMultiDB() bool {
 	return len(e.databases) > 0 || len(e.config.Databases) > 0
 }
 
+// registryFromContainer returns the shared MigrationRegistry, creating and
+// providing it on first use. Forge registers extensions sequentially, so the
+// check-then-provide is race-free.
+func (e *Extension) registryFromContainer(c vessel.Vessel) *MigrationRegistry {
+	if c == nil {
+		return nil
+	}
+	if !vessel.HasType[*MigrationRegistry](c) {
+		reg := NewMigrationRegistry(WithRegistryLockTimeout(e.config.LockTimeout))
+		if err := vessel.ProvideValue(c, reg); err != nil {
+			return nil
+		}
+	}
+	return vessel.MustInject[*MigrationRegistry](c)
+}
+
 // Register implements [forge.Extension].
 func (e *Extension) Register(fapp forge.App) error {
 	// 1. BaseExtension.Register stores app, logger, metrics.
@@ -127,7 +144,54 @@ func (e *Extension) Register(fapp forge.App) error {
 		}
 	}
 
-	// 4. Register CRDT sync controller if enabled and routes not disabled.
+	// 4. Central migration mode: contribute groups to the shared MigrationRegistry
+	// and register the single RunAll trigger hook (once across all extensions).
+	// Correct schema-before-Start timing requires forge's CentralMigrations
+	// split-phase (Register-all → migrate → Start-all). PhaseAfterRegister
+	// currently fires after extensions start on forge ≤ 1.7.1; this grove
+	// wiring is forward-compatible with that forge change when it ships.
+	if e.config.CentralMigrations {
+		reg := e.registryFromContainer(fapp.Container())
+		if reg != nil {
+			// Contribute groups to the shared registry.
+			if e.isMultiDB() {
+				for name, groups := range e.dbMigrations {
+					if db, err := e.manager.Get(name); err == nil {
+						reg.Contribute(name, db.Driver(), groups...)
+					}
+				}
+				// Single-DB groups on the default DB (multi-DB may have both).
+				if len(e.groups) > 0 && e.db != nil {
+					reg.Contribute("", e.db.Driver(), e.groups...)
+				}
+			} else if len(e.groups) > 0 && e.db != nil {
+				reg.Contribute("", e.db.Driver(), e.groups...)
+			}
+			e.contributed = true
+
+			// Register the RunAll lifecycle hook exactly once, using tryClaimHook
+			// as a once-guard so only the first contributing extension registers it.
+			if reg.tryClaimHook() {
+				capturedReg := reg
+				_ = fapp.RegisterHook(
+					forge.PhaseAfterRegister,
+					func(ctx context.Context, a forge.App) error {
+						if a.MigrationsDisabled() {
+							return nil
+						}
+						_, err := capturedReg.RunAll(ctx)
+						return err
+					},
+					forge.LifecycleHookOptions{
+						Name:     "grove-central-migrate",
+						Priority: 1000,
+					},
+				)
+			}
+		}
+	}
+
+	// 5. Register CRDT sync controller if enabled and routes not disabled.
 	return e.registerCRDT(fapp)
 }
 

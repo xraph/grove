@@ -146,6 +146,14 @@ func WithLockTimeout(d time.Duration) ExtOption {
 	return func(e *Extension) { e.config.LockTimeout = d }
 }
 
+// WithCentralMigrations opts this extension into central migration mode.
+// Instead of running its own migration pass, the extension contributes its
+// groups to the shared MigrationRegistry. A single RunAll trigger (registered
+// by the first contributing extension) runs them all in one ordered pass.
+func WithCentralMigrations() ExtOption {
+	return func(e *Extension) { e.config.CentralMigrations = true }
+}
+
 // WithBasePath sets the URL prefix for CRDT sync routes.
 func WithBasePath(path string) ExtOption {
 	return func(e *Extension) { e.config.BasePath = path }

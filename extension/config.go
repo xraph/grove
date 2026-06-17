@@ -38,6 +38,13 @@ type Config struct {
 	// context deadline (maps to migrate's 0).
 	LockTimeout time.Duration `json:"lock_timeout" mapstructure:"lock_timeout" yaml:"lock_timeout"`
 
+	// CentralMigrations opts this extension into the shared MigrationRegistry
+	// instead of running its own per-extension migration pass. When true, the
+	// extension contributes its groups to the registry during Register and
+	// Migrate/Rollback become no-ops (the registry's RunAll trigger owns
+	// execution). Default false — existing apps are unaffected.
+	CentralMigrations bool `json:"central_migrations" mapstructure:"central_migrations" yaml:"central_migrations"`
+
 	// RequireConfig requires config to be present in YAML files.
 	// If true and no config is found, Register returns an error.
 	RequireConfig bool `json:"-" yaml:"-"`

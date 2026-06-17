@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xraph/forge"
@@ -22,6 +23,11 @@ type MigrationRegistry struct {
 	mu          sync.Mutex
 	dbs         map[string]*dbContribution
 	lockTimeout time.Duration
+
+	// hookClaimed ensures only the first contributing extension registers the
+	// PhaseAfterRegister RunAll trigger. tryClaimHook uses CAS so the guard is
+	// race-free even if two extensions Register concurrently.
+	hookClaimed atomic.Bool
 }
 
 // dbEntry pairs a database key with its contribution, used by snapshot-driven loops.
@@ -176,4 +182,11 @@ func label(dbKey, group, name string) string {
 		return group + "/" + name
 	}
 	return dbKey + ":" + group + "/" + name
+}
+
+// tryClaimHook returns true exactly once — the first caller registers the
+// central migration trigger; later callers get false. The CAS is race-free
+// even if two extensions' Register calls overlap.
+func (r *MigrationRegistry) tryClaimHook() bool {
+	return r.hookClaimed.CompareAndSwap(false, true)
 }

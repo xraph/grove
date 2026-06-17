@@ -20,6 +20,10 @@ func (e *Extension) Migrate(ctx context.Context) (*forge.MigrationResult, error)
 	if e.config.DisableMigrate {
 		return nil, errors.New("grove: migrations are disabled via configuration")
 	}
+	if e.contributed {
+		// Central migration registry owns execution; nothing to do per-extension.
+		return &forge.MigrationResult{}, nil
+	}
 
 	result := &forge.MigrationResult{}
 
@@ -42,6 +46,10 @@ func (e *Extension) Migrate(ctx context.Context) (*forge.MigrationResult, error)
 func (e *Extension) Rollback(ctx context.Context) (*forge.MigrationResult, error) {
 	if e.config.DisableMigrate {
 		return nil, errors.New("grove: migrations are disabled via configuration")
+	}
+	if e.contributed {
+		// Central migration registry owns execution; nothing to do per-extension.
+		return &forge.MigrationResult{}, nil
 	}
 
 	result := &forge.MigrationResult{}
