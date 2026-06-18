@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/elastic/go-elasticsearch/v8"
@@ -30,6 +31,28 @@ import (
 
 	"github.com/xraph/grove/hook"
 )
+
+// elasticProductHeader is the response header the go-elasticsearch v8 client's
+// product check requires. OpenSearch never sends it, so WithOpenSearch wraps
+// the transport to add it.
+const elasticProductHeader = "X-Elastic-Product"
+
+// productHeaderTransport injects the X-Elastic-Product header onto responses so
+// the v8 client's product check accepts an OpenSearch (or other ES-API) server.
+// It composes over a base transport (the WithTransport one, or the default).
+type productHeaderTransport struct{ base http.RoundTripper }
+
+func (t productHeaderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	resp, err := base.RoundTrip(req)
+	if err == nil && resp != nil && resp.Header.Get(elasticProductHeader) == "" {
+		resp.Header.Set(elasticProductHeader, "Elasticsearch")
+	}
+	return resp, err
+}
 
 // ElasticDB implements grove.GroveDriver for Elasticsearch using the
 // official Go client github.com/elastic/go-elasticsearch/v8.
@@ -88,6 +111,11 @@ func (db *ElasticDB) Open(ctx context.Context, addresses string, opts ...EsOptio
 	}
 	if o.Transport != nil {
 		cfg.Transport = o.Transport
+	}
+	if o.OpenSearch {
+		// Wrap whatever transport is configured (custom or default) so the
+		// v8 product check accepts OpenSearch's header-less responses.
+		cfg.Transport = productHeaderTransport{base: cfg.Transport}
 	}
 
 	client, err := elasticsearch.NewClient(cfg)

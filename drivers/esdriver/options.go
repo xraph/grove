@@ -16,6 +16,7 @@ type esOptions struct {
 	Refresh    string            // Refresh policy: "true", "false", "wait_for"
 	MaxRetries int               // Maximum number of retries
 	Transport  http.RoundTripper // Custom HTTP transport
+	OpenSearch bool              // Target is OpenSearch (or another ES-API server) — relax the v8 product check
 }
 
 func defaultEsOptions() *esOptions {
@@ -83,5 +84,18 @@ func WithTransport(t http.RoundTripper) EsOption {
 func WithAddresses(addrs ...string) EsOption {
 	return func(o *esOptions) {
 		o.Addresses = addrs
+	}
+}
+
+// WithOpenSearch targets an OpenSearch cluster (or any ES-API-compatible
+// server that isn't genuine Elasticsearch). The go-elasticsearch v8 client
+// runs a product check that rejects servers not returning the
+// "X-Elastic-Product: Elasticsearch" response header — which OpenSearch never
+// sends. This wraps the transport to inject that header so the check passes;
+// it composes over any transport set via WithTransport. Leave off for real
+// Elasticsearch.
+func WithOpenSearch() EsOption {
+	return func(o *esOptions) {
+		o.OpenSearch = true
 	}
 }
