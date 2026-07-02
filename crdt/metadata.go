@@ -245,8 +245,16 @@ func (ms *MetadataStore) ReadChangesSince(ctx context.Context, table string, sin
 			if err := json.Unmarshal(row.CRDTState, &fs); err == nil {
 				cr.CRDTType = fs.Type
 				cr.Value = fs.Value
-				cr.CounterDelta = extractCounterDelta(fs.CounterState, row.NodeID)
-				cr.SetOp = extractSetOp(&fs)
+				switch fs.Type {
+				case TypeCounter:
+					cr.CounterDelta = extractCounterDelta(fs.CounterState, row.NodeID)
+				case TypeSet, TypeList, TypeDocument:
+					// State-based propagation: ops can't reconstruct these
+					// losslessly from a resolved value (set removes were
+					// previously dropped entirely), so carry the full state.
+					state := fs
+					cr.State = &state
+				}
 			}
 		}
 
@@ -328,20 +336,3 @@ func extractCounterDelta(cs *PNCounterState, nodeID string) *CounterDelta {
 	}
 }
 
-func extractSetOp(fs *FieldState) *SetOperation {
-	if fs.SetState == nil {
-		return nil
-	}
-	elements := fs.SetState.Elements()
-	if len(elements) == 0 {
-		return nil
-	}
-	raw, err := json.Marshal(elements)
-	if err != nil {
-		return nil
-	}
-	return &SetOperation{
-		Op:       SetOpAdd,
-		Elements: raw,
-	}
-}

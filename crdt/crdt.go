@@ -126,6 +126,11 @@ type ChangeRecord struct {
 	CounterDelta *CounterDelta `json:"counter_delta,omitempty"`
 	SetOp        *SetOperation `json:"set_op,omitempty"`
 	ListOp       *ListOp       `json:"list_op,omitempty"`
+
+	// State optionally carries the field's full CRDT state for state-based
+	// propagation (sets/lists/documents sync losslessly this way). When set,
+	// ApplyChange merges it directly and ignores the op payloads.
+	State *FieldState `json:"state,omitempty"`
 }
 
 // CounterDelta represents a single node's counter change.
@@ -138,6 +143,11 @@ type CounterDelta struct {
 type SetOperation struct {
 	Op       SetOp           `json:"op"`       // "add" or "remove"
 	Elements json.RawMessage `json:"elements"` // JSON array of elements
+
+	// Tags names the observed add-tags a remove is deleting (exact
+	// observed-remove semantics). Removes without tags fall back to
+	// removing every local tag older than the op's HLC.
+	Tags []Tag `json:"tags,omitempty"`
 }
 
 // SetOp is the type of set operation.
