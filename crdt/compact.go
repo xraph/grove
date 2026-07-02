@@ -60,9 +60,9 @@ func (s *ORSetState) Compact(before HLC) int {
 	for elem, tags := range s.Entries {
 		kept := tags[:0]
 		for _, tag := range tags {
-			key := tagKey(tag)
-			if s.Removed[key] && before.After(tag.HLC) {
-				delete(s.Removed, key)
+			if s.tagRemoved(elem, tag) && before.After(tag.HLC) {
+				delete(s.Removed, removedKey(elem, tag))
+				delete(s.Removed, tagKey(tag))
 				dropped++
 				continue
 			}

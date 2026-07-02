@@ -111,6 +111,24 @@ export function tagKey(tag: ORSetTag): string {
   return tag.node + ":" + hlcString(tag.hlc);
 }
 
+/**
+ * Element-scoped removal key (matches Go's removedKey). Tags are per-ADD,
+ * not per-(element, add) — a multi-element add shares one tag — so
+ * removals keyed by tag alone would leak across elements added together.
+ */
+export function removedKey(elem: string, tag: ORSetTag): string {
+  return elem + "|" + tagKey(tag);
+}
+
+/** Removal check honoring both element-scoped and legacy tag-only keys. */
+function tagRemoved(
+  removed: Record<string, boolean>,
+  elem: string,
+  tag: ORSetTag
+): boolean {
+  return Boolean(removed[removedKey(elem, tag)] || removed[tagKey(tag)]);
+}
+
 /** Create an empty OR-Set state. */
 export function newORSetState(): ORSetState {
   return { entries: {}, removed: {} };
@@ -164,7 +182,7 @@ export function setElements(state: ORSetState): unknown[] {
 
   for (const key of keys) {
     const tags = state.entries[key];
-    if (hasActiveTags(tags, state.removed)) {
+    if (hasActiveTags(key, tags, state.removed)) {
       try {
         result.push(JSON.parse(key));
       } catch {
@@ -178,11 +196,12 @@ export function setElements(state: ORSetState): unknown[] {
 
 /** Check if any tag is not in the removed set. */
 function hasActiveTags(
+  elem: string,
   tags: ORSetTag[],
   removed: Record<string, boolean>
 ): boolean {
   for (const tag of tags) {
-    if (!removed[tagKey(tag)]) {
+    if (!tagRemoved(removed, elem, tag)) {
       return true;
     }
   }
@@ -553,9 +572,13 @@ export function mergeFieldState(
           }
         } else if (op.op === "remove") {
           if (op.tags && op.tags.length > 0) {
-            // Exact observed-remove: the op names the tags it saw.
-            for (const t of op.tags) {
-              localSet.removed[tagKey(t)] = true;
+            // Exact observed-remove: the op names the tags it saw, scoped
+            // to the elements it removes.
+            for (const elem of op.elements) {
+              const key = JSON.stringify(elem);
+              for (const t of op.tags) {
+                localSet.removed[removedKey(key, t)] = true;
+              }
             }
           } else {
             // Legacy remove: only tags older than the remove's HLC —
@@ -565,7 +588,7 @@ export function mergeFieldState(
               const tags = localSet.entries[key] ?? [];
               for (const t of tags) {
                 if (hlcAfter(change.hlc, t.hlc)) {
-                  localSet.removed[tagKey(t)] = true;
+                  localSet.removed[removedKey(key, t)] = true;
                 }
               }
             }

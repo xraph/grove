@@ -118,9 +118,13 @@ func setOpState(local *FieldState, c *ChangeRecord) (*FieldState, error) {
 
 	case SetOpRemove:
 		if len(c.SetOp.Tags) > 0 {
-			// Exact observed-remove: the op names the tags it saw.
-			for _, tag := range c.SetOp.Tags {
-				remote.Removed[tagKey(tag)] = true
+			// Exact observed-remove: the op names the tags it saw, scoped
+			// to the elements it removes (a multi-element add shares one
+			// tag; scoping keeps siblings alive).
+			for _, el := range elements {
+				for _, tag := range c.SetOp.Tags {
+					remote.Removed[removedKey(string(el), tag)] = true
+				}
 			}
 		} else {
 			// Legacy remove (no tags on the wire): remove every local tag
@@ -131,7 +135,7 @@ func setOpState(local *FieldState, c *ChangeRecord) (*FieldState, error) {
 				for _, el := range elements {
 					for _, tag := range localSet.Entries[string(el)] {
 						if c.HLC.After(tag.HLC) {
-							remote.Removed[tagKey(tag)] = true
+							remote.Removed[removedKey(string(el), tag)] = true
 						}
 					}
 				}
