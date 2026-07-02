@@ -637,3 +637,160 @@ func attrsEqual(a, b map[string]json.RawMessage) bool {
 	}
 	return reflect.DeepEqual(a, b)
 }
+
+// --- State-based merge ---
+
+// MergeText merges two text states: per-origin union with both sides
+// normalized to the finest common fragment partition, then per-fragment
+// tombstone-OR and per-attribute LWW. Commutative, associative, idempotent.
+// Inputs are never mutated.
+func MergeText(local, remote *TextState) *TextState {
+	if local == nil {
+		return remote
+	}
+	if remote == nil {
+		return local
+	}
+	merged := NewTextState()
+	keys := make(map[string]bool, len(local.Frags)+len(remote.Frags))
+	for k := range local.Frags {
+		keys[k] = true
+	}
+	for k := range remote.Frags {
+		keys[k] = true
+	}
+	for k := range keys {
+		merged.Frags[k] = mergeOriginFrags(local.Frags[k], remote.Frags[k])
+	}
+	return merged
+}
+
+// mergeOriginFrags merges one origin's fragments from both sides.
+func mergeOriginFrags(a, b []*TextFragment) []*TextFragment {
+	if len(a) == 0 {
+		return copyFrags(b)
+	}
+	if len(b) == 0 {
+		return copyFrags(a)
+	}
+
+	// Finest common partition: every boundary from both sides.
+	bounds := make(map[int]bool)
+	for _, f := range append(append([]*TextFragment{}, a...), b...) {
+		bounds[f.Start] = true
+		bounds[f.Start+f.Length] = true
+	}
+	cuts := make([]int, 0, len(bounds))
+	for p := range bounds {
+		cuts = append(cuts, p)
+	}
+	sort.Ints(cuts)
+
+	na := normalizeFrags(a, cuts)
+	nb := normalizeFrags(b, cuts)
+
+	starts := make([]int, 0, len(na)+len(nb))
+	seen := make(map[int]bool)
+	for s := range na {
+		if !seen[s] {
+			seen[s] = true
+			starts = append(starts, s)
+		}
+	}
+	for s := range nb {
+		if !seen[s] {
+			seen[s] = true
+			starts = append(starts, s)
+		}
+	}
+	sort.Ints(starts)
+
+	out := make([]*TextFragment, 0, len(starts))
+	for _, s := range starts {
+		fa, fb := na[s], nb[s]
+		switch {
+		case fa == nil:
+			out = append(out, fb)
+		case fb == nil:
+			out = append(out, fa)
+		default:
+			out = append(out, combineFrags(fa, fb))
+		}
+	}
+	return out
+}
+
+func copyFrags(frags []*TextFragment) []*TextFragment {
+	out := make([]*TextFragment, len(frags))
+	for i, f := range frags {
+		cp := *f
+		if f.Attrs != nil {
+			cp.Attrs = cloneAttrs(f.Attrs)
+		}
+		out[i] = &cp
+	}
+	return out
+}
+
+// normalizeFrags splits copies of frags at every cut point, keyed by Start.
+func normalizeFrags(frags []*TextFragment, cuts []int) map[int]*TextFragment {
+	out := make(map[int]*TextFragment, len(frags))
+	for _, f := range frags {
+		start := f.Start
+		end := f.Start + f.Length
+		prev := start
+		for _, c := range cuts {
+			if c <= prev || c >= end {
+				continue
+			}
+			out[prev] = subFragment(f, prev, c)
+			prev = c
+		}
+		out[prev] = subFragment(f, prev, end)
+	}
+	return out
+}
+
+// subFragment copies the [from, to) address slice of f.
+func subFragment(f *TextFragment, from, to int) *TextFragment {
+	cp := *f
+	cp.Start = from
+	cp.Length = to - from
+	if f.Content != "" {
+		cp.Content = substring(f.Content, from-f.Start, to-f.Start)
+	}
+	if from != f.Start {
+		cp.Parent = TextRef{}
+	}
+	if f.Attrs != nil {
+		cp.Attrs = cloneAttrs(f.Attrs)
+	}
+	return &cp
+}
+
+// combineFrags merges two aligned fragments (same origin, Start, Length).
+func combineFrags(a, b *TextFragment) *TextFragment {
+	out := *a
+	out.Tombstone = a.Tombstone || b.Tombstone
+	if out.Content == "" {
+		out.Content = b.Content
+	}
+	if out.Parent.IsHead() && !b.Parent.IsHead() {
+		out.Parent = b.Parent
+	}
+	if len(a.Attrs) == 0 && len(b.Attrs) == 0 {
+		out.Attrs = nil
+		return &out
+	}
+	attrs := make(map[string]AttrState, len(a.Attrs)+len(b.Attrs))
+	for k, v := range a.Attrs {
+		attrs[k] = v
+	}
+	for k, v := range b.Attrs {
+		if existing, ok := attrs[k]; !ok || v.HLC.After(existing.HLC) {
+			attrs[k] = v
+		}
+	}
+	out.Attrs = attrs
+	return &out
+}
