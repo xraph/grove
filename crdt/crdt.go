@@ -45,12 +45,16 @@ const (
 	// Each nested field is independently mergeable with its own CRDT type,
 	// enabling JSON-like nested structures.
 	TypeDocument CRDTType = "document"
+
+	// TypeText is a character-level collaborative text sequence with
+	// formatting attributes (origin-span fragments; see text.go).
+	TypeText CRDTType = "text"
 )
 
 // ValidCRDTType returns true if t is a recognized CRDT type.
 func ValidCRDTType(t string) bool {
 	switch CRDTType(t) {
-	case TypeLWW, TypeCounter, TypeSet, TypeList, TypeDocument:
+	case TypeLWW, TypeCounter, TypeSet, TypeList, TypeDocument, TypeText:
 		return true
 	default:
 		return false
@@ -109,6 +113,9 @@ type FieldState struct {
 
 	// DocState holds nested document CRDT state (Document only).
 	DocState *DocumentCRDTState `json:"doc_state,omitempty"`
+
+	// TextState holds collaborative text state (Text only).
+	TextState *TextState `json:"text_state,omitempty"`
 }
 
 // ChangeRecord represents a single field-level change for sync transport.
@@ -126,6 +133,7 @@ type ChangeRecord struct {
 	CounterDelta *CounterDelta `json:"counter_delta,omitempty"`
 	SetOp        *SetOperation `json:"set_op,omitempty"`
 	ListOp       *ListOp       `json:"list_op,omitempty"`
+	TextOp       *TextOp       `json:"text_op,omitempty"`
 
 	// State optionally carries the field's full CRDT state for state-based
 	// propagation (sets/lists/documents sync losslessly this way). When set,

@@ -104,6 +104,13 @@ func InspectState(state *State) *InspectResult {
 				field.DocPaths = ds.Paths()
 				field.Value = ds.Resolve()
 			}
+
+		case TypeText:
+			ts := TextFromFieldState(fs)
+			if ts != nil {
+				field.Value = ts.Value()
+				field.ListLength = ts.Len()
+			}
 		}
 
 		result.Fields[name] = field
@@ -141,6 +148,8 @@ func (r *InspectResult) String() string {
 			fmt.Fprintf(&b, "[%d items] %v", field.ListLength, field.Elements)
 		case TypeDocument:
 			fmt.Fprintf(&b, "{%d paths} %v", len(field.DocPaths), field.Value)
+		case TypeText:
+			fmt.Fprintf(&b, "[%d chars] %q", field.ListLength, field.Value)
 		}
 		b.WriteString("\n")
 	}

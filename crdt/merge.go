@@ -68,6 +68,18 @@ func (m *MergeEngine) MergeField(local, remote *FieldState) (*FieldState, error)
 		}
 		return merged.ToFieldState(clock, nodeID), nil
 
+	case TypeText:
+		localText := TextFromFieldState(local)
+		remoteText := TextFromFieldState(remote)
+		merged := MergeText(localText, remoteText)
+		clock := local.HLC
+		nodeID := local.NodeID
+		if remote.HLC.After(local.HLC) {
+			clock = remote.HLC
+			nodeID = remote.NodeID
+		}
+		return merged.ToFieldState(clock, nodeID), nil
+
 	case TypeDocument:
 		localDoc := DocumentFromFieldState(local)
 		remoteDoc := DocumentFromFieldState(remote)

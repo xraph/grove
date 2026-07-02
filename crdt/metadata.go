@@ -248,7 +248,7 @@ func (ms *MetadataStore) ReadChangesSince(ctx context.Context, table string, sin
 				switch fs.Type {
 				case TypeCounter:
 					cr.CounterDelta = extractCounterDelta(fs.CounterState, row.NodeID)
-				case TypeSet, TypeList, TypeDocument:
+				case TypeSet, TypeList, TypeDocument, TypeText:
 					// State-based propagation: ops can't reconstruct these
 					// losslessly from a resolved value (set removes were
 					// previously dropped entirely), so carry the full state.

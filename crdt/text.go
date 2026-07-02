@@ -794,3 +794,81 @@ func combineFrags(a, b *TextFragment) *TextFragment {
 	out.Attrs = attrs
 	return &out
 }
+
+// --- Engine integration ---
+
+// ToFieldState converts to the generic FieldState representation.
+func (t *TextState) ToFieldState(clock HLC, nodeID string) *FieldState {
+	value, err := json.Marshal(t.Value())
+	if err != nil {
+		return nil
+	}
+	return &FieldState{
+		Type:      TypeText,
+		HLC:       clock,
+		NodeID:    nodeID,
+		Value:     value,
+		TextState: t,
+	}
+}
+
+// TextFromFieldState reconstructs a TextState from a FieldState.
+func TextFromFieldState(fs *FieldState) *TextState {
+	if fs == nil || fs.Type != TypeText {
+		return nil
+	}
+	if fs.TextState == nil {
+		return NewTextState()
+	}
+	if fs.TextState.Frags == nil {
+		fs.TextState.Frags = make(map[string][]*TextFragment)
+	}
+	return fs.TextState
+}
+
+// SetString reconciles the text toward the given whole string using a
+// common prefix/suffix diff — the ORM write path for crdt:"text" fields,
+// where the caller only has the new full value. Returns the ops emitted.
+func (t *TextState) SetString(s, nodeID string, clock HLC) ([]*TextOp, error) {
+	oldRunes := []rune(t.Value())
+	newRunes := []rune(s)
+
+	prefix := 0
+	for prefix < len(oldRunes) && prefix < len(newRunes) && oldRunes[prefix] == newRunes[prefix] {
+		prefix++
+	}
+	suffix := 0
+	for suffix < len(oldRunes)-prefix && suffix < len(newRunes)-prefix &&
+		oldRunes[len(oldRunes)-1-suffix] == newRunes[len(newRunes)-1-suffix] {
+		suffix++
+	}
+
+	var ops []*TextOp
+	if del := len(oldRunes) - prefix - suffix; del > 0 {
+		ref, ok := t.RefAt(prefix)
+		if !ok {
+			return nil, fmt.Errorf("crdt: text diff: no char at %d", prefix)
+		}
+		op, err := t.Delete(ref, del)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, op)
+	}
+	if ins := string(newRunes[prefix : len(newRunes)-suffix]); ins != "" {
+		ref := TextRef{}
+		if prefix > 0 {
+			var ok bool
+			ref, ok = t.RefAt(prefix - 1)
+			if !ok {
+				return nil, fmt.Errorf("crdt: text diff: no char at %d", prefix-1)
+			}
+		}
+		op, err := t.Insert(ref, ins, nodeID, clock)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, op)
+	}
+	return ops, nil
+}

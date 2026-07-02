@@ -78,6 +78,19 @@ func ApplyChange(engine *MergeEngine, local *FieldState, c *ChangeRecord) (*Fiel
 		}
 		return engine.MergeField(local, remote)
 
+	case TypeText:
+		if c.TextOp == nil {
+			return nil, fmt.Errorf("crdt: text change missing text_op")
+		}
+		txt := TextFromFieldState(local)
+		if txt == nil {
+			txt = NewTextState()
+		}
+		if err := txt.Apply(c.TextOp, c.NodeID, c.HLC); err != nil {
+			return nil, err
+		}
+		return txt.ToFieldState(pickNewer(local, c)), nil
+
 	case TypeDocument:
 		return applyDocumentChange(engine, local, c)
 

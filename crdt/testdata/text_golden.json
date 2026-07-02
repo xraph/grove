@@ -1,0 +1,591 @@
+[
+  {
+    "name": "typing_coalesces",
+    "records": [
+      {
+        "node_id": "a",
+        "hlc": {
+          "ts": 1,
+          "c": 0,
+          "node": "a"
+        },
+        "op": {
+          "op": "insert",
+          "ref": {
+            "origin": {
+              "ts": 0,
+              "c": 0,
+              "node": ""
+            },
+            "offset": 0
+          },
+          "origin": {
+            "ts": 1,
+            "c": 0,
+            "node": "a"
+          },
+          "content": "h"
+        }
+      },
+      {
+        "node_id": "a",
+        "hlc": {
+          "ts": 2,
+          "c": 0,
+          "node": "a"
+        },
+        "op": {
+          "op": "insert",
+          "ref": {
+            "origin": {
+              "ts": 1,
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 0
+          },
+          "origin": {
+            "ts": 1,
+            "c": 0,
+            "node": "a"
+          },
+          "content": "e"
+        }
+      },
+      {
+        "node_id": "a",
+        "hlc": {
+          "ts": 3,
+          "c": 0,
+          "node": "a"
+        },
+        "op": {
+          "op": "insert",
+          "ref": {
+            "origin": {
+              "ts": 1,
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 1
+          },
+          "origin": {
+            "ts": 1,
+            "c": 0,
+            "node": "a"
+          },
+          "content": "l"
+        }
+      },
+      {
+        "node_id": "a",
+        "hlc": {
+          "ts": 4,
+          "c": 0,
+          "node": "a"
+        },
+        "op": {
+          "op": "insert",
+          "ref": {
+            "origin": {
+              "ts": 1,
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 2
+          },
+          "origin": {
+            "ts": 1,
+            "c": 0,
+            "node": "a"
+          },
+          "content": "l"
+        }
+      },
+      {
+        "node_id": "a",
+        "hlc": {
+          "ts": 5,
+          "c": 0,
+          "node": "a"
+        },
+        "op": {
+          "op": "insert",
+          "ref": {
+            "origin": {
+              "ts": 1,
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 3
+          },
+          "origin": {
+            "ts": 1,
+            "c": 0,
+            "node": "a"
+          },
+          "content": "o"
+        }
+      }
+    ],
+    "expected_value": "hello",
+    "expected_delta": [
+      {
+        "insert": "hello"
+      }
+    ],
+    "final_state": {
+      "text": {
+        "frags": {
+          "HLC{ts:1 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": 1,
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "hello",
+              "length": 5,
+              "parent": {
+                "origin": {
+                  "ts": 0,
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "concurrent_insert_same_point",
+    "records": [
+      {
+        "node_id": "a",
+        "hlc": {
+          "ts": 1,
+          "c": 0,
+          "node": "a"
+        },
+        "op": {
+          "op": "insert",
+          "ref": {
+            "origin": {
+              "ts": 0,
+              "c": 0,
+              "node": ""
+            },
+            "offset": 0
+          },
+          "origin": {
+            "ts": 1,
+            "c": 0,
+            "node": "a"
+          },
+          "content": "ab"
+        }
+      },
+      {
+        "node_id": "n1",
+        "hlc": {
+          "ts": 100,
+          "c": 0,
+          "node": "n1"
+        },
+        "op": {
+          "op": "insert",
+          "ref": {
+            "origin": {
+              "ts": 1,
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 0
+          },
+          "origin": {
+            "ts": 100,
+            "c": 0,
+            "node": "n1"
+          },
+          "content": "X"
+        }
+      },
+      {
+        "node_id": "n2",
+        "hlc": {
+          "ts": 101,
+          "c": 0,
+          "node": "n2"
+        },
+        "op": {
+          "op": "insert",
+          "ref": {
+            "origin": {
+              "ts": 1,
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 0
+          },
+          "origin": {
+            "ts": 101,
+            "c": 0,
+            "node": "n2"
+          },
+          "content": "Y"
+        }
+      }
+    ],
+    "expected_value": "aYXb",
+    "expected_delta": [
+      {
+        "insert": "aYXb"
+      }
+    ],
+    "final_state": {
+      "text": {
+        "frags": {
+          "HLC{ts:1 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": 1,
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "ab",
+              "length": 2,
+              "parent": {
+                "origin": {
+                  "ts": 0,
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              }
+            }
+          ],
+          "HLC{ts:100 c:0 node:n1}": [
+            {
+              "origin": {
+                "ts": 100,
+                "c": 0,
+                "node": "n1"
+              },
+              "start": 0,
+              "content": "X",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": 1,
+                  "c": 0,
+                  "node": "a"
+                },
+                "offset": 0
+              }
+            }
+          ],
+          "HLC{ts:101 c:0 node:n2}": [
+            {
+              "origin": {
+                "ts": 101,
+                "c": 0,
+                "node": "n2"
+              },
+              "start": 0,
+              "content": "Y",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": 1,
+                  "c": 0,
+                  "node": "a"
+                },
+                "offset": 0
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "delete_and_format",
+    "records": [
+      {
+        "node_id": "a",
+        "hlc": {
+          "ts": 1,
+          "c": 0,
+          "node": "a"
+        },
+        "op": {
+          "op": "insert",
+          "ref": {
+            "origin": {
+              "ts": 0,
+              "c": 0,
+              "node": ""
+            },
+            "offset": 0
+          },
+          "origin": {
+            "ts": 1,
+            "c": 0,
+            "node": "a"
+          },
+          "content": "hello world"
+        }
+      },
+      {
+        "node_id": "a",
+        "hlc": {
+          "ts": 2,
+          "c": 0,
+          "node": "a"
+        },
+        "op": {
+          "op": "delete",
+          "ref": {
+            "origin": {
+              "ts": 0,
+              "c": 0,
+              "node": ""
+            },
+            "offset": 0
+          },
+          "origin": {
+            "ts": 0,
+            "c": 0,
+            "node": ""
+          },
+          "spans": [
+            {
+              "origin": {
+                "ts": 1,
+                "c": 0,
+                "node": "a"
+              },
+              "start": 5,
+              "length": 6
+            }
+          ]
+        }
+      },
+      {
+        "node_id": "b",
+        "hlc": {
+          "ts": 50,
+          "c": 0,
+          "node": "b"
+        },
+        "op": {
+          "op": "format",
+          "ref": {
+            "origin": {
+              "ts": 0,
+              "c": 0,
+              "node": ""
+            },
+            "offset": 0
+          },
+          "origin": {
+            "ts": 0,
+            "c": 0,
+            "node": ""
+          },
+          "spans": [
+            {
+              "origin": {
+                "ts": 1,
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "length": 5
+            }
+          ],
+          "attrs": {
+            "bold": true
+          }
+        }
+      }
+    ],
+    "expected_value": "hello",
+    "expected_delta": [
+      {
+        "insert": "hello",
+        "attributes": {
+          "bold": true
+        }
+      }
+    ],
+    "final_state": {
+      "text": {
+        "frags": {
+          "HLC{ts:1 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": 1,
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "hello",
+              "length": 5,
+              "parent": {
+                "origin": {
+                  "ts": 0,
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "attrs": {
+                "bold": {
+                  "value": true,
+                  "hlc": {
+                    "ts": 50,
+                    "c": 0,
+                    "node": "b"
+                  },
+                  "node_id": "b"
+                }
+              }
+            },
+            {
+              "origin": {
+                "ts": 1,
+                "c": 0,
+                "node": "a"
+              },
+              "start": 5,
+              "content": " world",
+              "length": 6,
+              "parent": {
+                "origin": {
+                  "ts": 0,
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "tombstone": true
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "unicode",
+    "records": [
+      {
+        "node_id": "a",
+        "hlc": {
+          "ts": 1,
+          "c": 0,
+          "node": "a"
+        },
+        "op": {
+          "op": "insert",
+          "ref": {
+            "origin": {
+              "ts": 0,
+              "c": 0,
+              "node": ""
+            },
+            "offset": 0
+          },
+          "origin": {
+            "ts": 1,
+            "c": 0,
+            "node": "a"
+          },
+          "content": "héllo 🌍"
+        }
+      },
+      {
+        "node_id": "b",
+        "hlc": {
+          "ts": 100,
+          "c": 0,
+          "node": "b"
+        },
+        "op": {
+          "op": "insert",
+          "ref": {
+            "origin": {
+              "ts": 1,
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 5
+          },
+          "origin": {
+            "ts": 100,
+            "c": 0,
+            "node": "b"
+          },
+          "content": "brave "
+        }
+      }
+    ],
+    "expected_value": "héllo brave 🌍",
+    "expected_delta": [
+      {
+        "insert": "héllo brave 🌍"
+      }
+    ],
+    "final_state": {
+      "text": {
+        "frags": {
+          "HLC{ts:1 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": 1,
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "héllo 🌍",
+              "length": 7,
+              "parent": {
+                "origin": {
+                  "ts": 0,
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              }
+            }
+          ],
+          "HLC{ts:100 c:0 node:b}": [
+            {
+              "origin": {
+                "ts": 100,
+                "c": 0,
+                "node": "b"
+              },
+              "start": 0,
+              "content": "brave ",
+              "length": 6,
+              "parent": {
+                "origin": {
+                  "ts": 1,
+                  "c": 0,
+                  "node": "a"
+                },
+                "offset": 5
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+]
