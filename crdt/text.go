@@ -176,10 +176,13 @@ func (t *TextState) Format(ref TextRef, length int, attrs map[string]json.RawMes
 
 // --- Remote application ---
 
-// Apply folds one TextOp into the state. Application is deterministic and
-// order-independent: inserts place content at creator-chosen addresses,
-// deletes/formats touch the exact spans the op names. Duplicate inserts
-// (same origin range already covered) are ignored, making Apply idempotent.
+// Apply folds one TextOp into the state. Inserts place content at
+// creator-chosen addresses and are idempotent (duplicate delivery is
+// ignored). Delete/format ops touch the exact spans they name and assume
+// CAUSAL DELIVERY per origin — they must arrive after the insert whose
+// addresses they reference (the same assumption Yjs makes; fabriq's
+// seq-ordered log and grove's HLC-ordered pull both satisfy it).
+// Arbitrary-order convergence across replicas is provided by MergeText.
 func (t *TextState) Apply(op *TextOp, nodeID string, clock HLC) error {
 	if op == nil {
 		return fmt.Errorf("crdt: apply nil text op")

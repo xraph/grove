@@ -17,6 +17,7 @@ import type {
   DocumentCRDTState,
 } from "./types.js";
 import { hlcAfter, hlcCompare, hlcString } from "./hlc.js";
+import { applyTextOp, mergeText, newTextState } from "./text.js";
 
 // --- LWW Register ---
 
@@ -204,9 +205,13 @@ function deduplicateTags(tags: ORSetTag[]): ORSetTag[] {
 
 // --- RGA List ---
 
-/** Compute a deterministic string key for an HLC (used as node map key). */
+/**
+ * Compute a deterministic string key for an HLC (used as node map key).
+ * MUST match Go's rgaNodeKey (HLC.String()) so state carried across
+ * engines keys identically.
+ */
 function hlcKey(hlc: HLC): string {
-  return `${hlc.ts}:${hlc.c}:${hlc.node}`;
+  return hlcString(hlc);
 }
 
 /** Create an empty RGA list state. */
@@ -232,21 +237,14 @@ export function mergeListState(
     merged.nodes[key] = { ...node };
   }
 
-  // Merge remote nodes.
+  // Merge remote nodes. Same key = same node; tombstone wins if either
+  // side is tombstoned (matches Go MergeList).
   for (const [key, remoteNode] of Object.entries(remote.nodes)) {
     const existing = merged.nodes[key];
     if (!existing) {
       merged.nodes[key] = { ...remoteNode };
-    } else {
-      // Higher HLC wins.
-      if (hlcAfter(remoteNode.id, existing.id)) {
-        merged.nodes[key] = { ...remoteNode };
-      } else if (!hlcAfter(existing.id, remoteNode.id)) {
-        // Equal HLC — prefer non-tombstoned.
-        if (existing.tombstone && !remoteNode.tombstone) {
-          merged.nodes[key] = { ...remoteNode };
-        }
-      }
+    } else if (remoteNode.tombstone && !existing.tombstone) {
+      merged.nodes[key] = { ...existing, tombstone: true };
     }
   }
 
@@ -431,13 +429,76 @@ export function documentResolve(state: DocumentCRDTState): Record<string, unknow
 // --- Field-Level Merge ---
 
 /**
+ * Merge two full FieldStates of the same type (state-based propagation).
+ * Mirrors Go MergeEngine.MergeField.
+ */
+export function mergeFullFieldState(
+  local: FieldState | null,
+  remote: FieldState
+): FieldState {
+  if (!local) return remote;
+  const newerMeta = hlcAfter(remote.hlc, local.hlc)
+    ? { hlc: remote.hlc, node_id: remote.node_id }
+    : { hlc: local.hlc, node_id: local.node_id };
+
+  switch (remote.type) {
+    case "lww":
+      return hlcAfter(remote.hlc, local.hlc) ? { ...remote } : { ...local };
+    case "counter":
+      return {
+        type: "counter",
+        ...newerMeta,
+        counter_state: mergeCounter(
+          local.counter_state ?? newPNCounterState(),
+          remote.counter_state ?? newPNCounterState()
+        ),
+      };
+    case "set":
+      return {
+        type: "set",
+        ...newerMeta,
+        set_state: mergeSet(
+          local.set_state ?? newORSetState(),
+          remote.set_state ?? newORSetState()
+        ),
+      };
+    case "list":
+      return {
+        type: "list",
+        ...newerMeta,
+        list_state: mergeListState(local.list_state, remote.list_state),
+      };
+    case "document":
+      return {
+        type: "document",
+        ...newerMeta,
+        doc_state: mergeDocumentState(local.doc_state, remote.doc_state),
+      };
+    case "text":
+      return {
+        type: "text",
+        ...newerMeta,
+        text_state: mergeText(local.text_state ?? newTextState(), remote.text_state ?? newTextState()),
+      };
+    default:
+      return hlcAfter(remote.hlc, local.hlc) ? { ...remote } : { ...local };
+  }
+}
+
+/**
  * Merge a ChangeRecord into existing FieldState.
  * Dispatches to the correct merge function based on CRDTType.
+ * Mirrors Go crdt.ApplyChange.
  */
 export function mergeFieldState(
   local: FieldState | null,
   change: ChangeRecord
 ): FieldState {
+  // Full-state carrier: pure state-based merge.
+  if (change.state) {
+    return mergeFullFieldState(local, change.state);
+  }
+
   switch (change.crdt_type) {
     case "lww": {
       const localLWW: LWWValue | null = local
@@ -459,22 +520,13 @@ export function mergeFieldState(
 
     case "counter": {
       let localCounter = local?.counter_state ?? newPNCounterState();
-      // Apply delta from the change.
+      // The delta is the sending node's CUMULATIVE totals (a snapshot),
+      // merged max-per-node — idempotent under redelivery. Matches Go
+      // ApplyChange; the store emits cumulative totals accordingly.
       if (change.counter_delta) {
-        const delta = change.counter_delta;
         const remoteCounter = newPNCounterState();
-        // Copy local state.
-        for (const [k, v] of Object.entries(localCounter.inc)) {
-          remoteCounter.inc[k] = v;
-        }
-        for (const [k, v] of Object.entries(localCounter.dec)) {
-          remoteCounter.dec[k] = v;
-        }
-        // Apply delta to the remote node's counters.
-        remoteCounter.inc[change.node_id] =
-          (remoteCounter.inc[change.node_id] ?? 0) + delta.inc;
-        remoteCounter.dec[change.node_id] =
-          (remoteCounter.dec[change.node_id] ?? 0) + delta.dec;
+        remoteCounter.inc[change.node_id] = change.counter_delta.inc;
+        remoteCounter.dec[change.node_id] = change.counter_delta.dec;
         localCounter = mergeCounter(localCounter, remoteCounter);
       }
       return {
@@ -500,11 +552,22 @@ export function mergeFieldState(
             ];
           }
         } else if (op.op === "remove") {
-          for (const elem of op.elements) {
-            const key = JSON.stringify(elem);
-            const tags = localSet.entries[key] ?? [];
-            for (const t of tags) {
+          if (op.tags && op.tags.length > 0) {
+            // Exact observed-remove: the op names the tags it saw.
+            for (const t of op.tags) {
               localSet.removed[tagKey(t)] = true;
+            }
+          } else {
+            // Legacy remove: only tags older than the remove's HLC —
+            // concurrent-or-newer adds survive (add-wins). Matches Go.
+            for (const elem of op.elements) {
+              const key = JSON.stringify(elem);
+              const tags = localSet.entries[key] ?? [];
+              for (const t of tags) {
+                if (hlcAfter(change.hlc, t.hlc)) {
+                  localSet.removed[tagKey(t)] = true;
+                }
+              }
             }
           }
         }
@@ -535,7 +598,39 @@ export function mergeFieldState(
           const existing = localList.nodes[key];
           if (existing) {
             localList.nodes[key] = { ...existing, tombstone: true };
+          } else {
+            // Keep the tombstone even when the insert hasn't arrived:
+            // a late insert must stay deleted (matches Go).
+            localList.nodes[key] = {
+              id: op.node_id,
+              node_id: change.node_id,
+              parent_id: { ts: 0, c: 0, node: "" },
+              value: undefined,
+              tombstone: true,
+            };
           }
+        } else if (op.op === "move" && op.node_id) {
+          // Move = tombstone the old id + re-insert under the new parent
+          // with the op's HLC as the new id (matches Go).
+          const oldKey = hlcKey(op.node_id);
+          const existing = localList.nodes[oldKey];
+          if (existing) {
+            localList.nodes[oldKey] = { ...existing, tombstone: true };
+          } else {
+            localList.nodes[oldKey] = {
+              id: op.node_id,
+              node_id: change.node_id,
+              parent_id: { ts: 0, c: 0, node: "" },
+              value: undefined,
+              tombstone: true,
+            };
+          }
+          localList.nodes[hlcKey(change.hlc)] = {
+            id: change.hlc,
+            node_id: change.node_id,
+            parent_id: op.parent_id ?? { ts: 0, c: 0, node: "" },
+            value: op.value,
+          };
         }
       }
       return {
@@ -547,23 +642,57 @@ export function mergeFieldState(
     }
 
     case "document": {
-      let localDoc = local?.doc_state ?? newDocumentCRDTState();
-      // For document type, the change carries a field path in the value.
-      // Apply as an LWW field within the nested document.
-      if (change.value !== undefined) {
-        const path = change.field;
-        localDoc.fields[path] = {
-          type: "lww",
-          hlc: change.hlc,
-          node_id: change.node_id,
-          value: change.value,
-        };
+      const localDoc = local?.doc_state ?? newDocumentCRDTState();
+      // Document changes carry {path, value} in the record value (the
+      // path is INSIDE the nested document; change.field is the column).
+      const payload = change.value as { path?: string; value?: unknown } | undefined;
+      const path = payload?.path;
+      if (path) {
+        if (change.tombstone) {
+          // LWW-guarded path delete (matches Go applyDocumentChange).
+          const existing = localDoc.fields[path];
+          if (existing && hlcAfter(change.hlc, existing.hlc)) {
+            const prefix = path + ".";
+            for (const key of Object.keys(localDoc.fields)) {
+              if (key === path || key.startsWith(prefix)) {
+                delete localDoc.fields[key];
+              }
+            }
+          }
+        } else {
+          const remoteDoc = newDocumentCRDTState();
+          remoteDoc.fields[path] = {
+            type: "lww",
+            hlc: change.hlc,
+            node_id: change.node_id,
+            value: payload?.value,
+          };
+          return {
+            type: "document",
+            hlc: change.hlc,
+            node_id: change.node_id,
+            doc_state: mergeDocumentState(localDoc, remoteDoc),
+          };
+        }
       }
       return {
         type: "document",
         hlc: change.hlc,
         node_id: change.node_id,
         doc_state: localDoc,
+      };
+    }
+
+    case "text": {
+      const localText = local?.text_state ?? newTextState();
+      if (change.text_op) {
+        applyTextOp(localText, change.text_op, change.node_id, change.hlc);
+      }
+      return {
+        type: "text",
+        hlc: change.hlc,
+        node_id: change.node_id,
+        text_state: localText,
       };
     }
 

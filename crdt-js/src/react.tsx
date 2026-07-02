@@ -54,6 +54,8 @@ import type {
   ChangeRecord,
   SyncStatus,
   HLC,
+  TextRef,
+  TextDeltaSegment,
 } from "./types.js";
 
 // --- Context ---
@@ -595,13 +597,7 @@ export function useList<T = unknown>(
 
   const nodeIds = useSyncExternalStore(
     (cb) => store.subscribeDocument(table, pk, cb),
-    () => {
-      const doc = store.getDocument<Record<string, unknown>>(table, pk);
-      // Access internal state to get the RGA node IDs.
-      // The store resolves lists to arrays, but we need the node IDs for
-      // insert-after and delete operations.
-      return [] as HLC[];
-    },
+    () => store.getListNodeIds(table, pk, field),
     () => [] as HLC[]
   );
 
@@ -620,6 +616,84 @@ export function useList<T = unknown>(
   );
 
   return { items, insert, remove, nodeIds };
+}
+
+// --- useText ---
+
+/** Return type for useText hook. */
+export interface UseTextReturn {
+  /** The visible text. */
+  text: string;
+  /** Insert content at a visible character index. */
+  insert: (index: number, content: string) => void;
+  /** Delete `length` visible characters starting at index. */
+  remove: (index: number, length: number) => void;
+  /** Apply formatting attributes to a range (null value clears). */
+  format: (index: number, length: number, attrs: Record<string, unknown>) => void;
+  /** Quill-style attribute-run segments (computed on call). */
+  getDelta: () => TextDeltaSegment[];
+  /** Stable address of the char at index (cursor anchoring). */
+  refAt: (index: number) => TextRef | null;
+  /** Current index of a stable address (survives concurrent edits). */
+  indexOf: (ref: TextRef) => number | null;
+}
+
+/**
+ * Bind a collaborative text field.
+ *
+ * @example
+ * ```tsx
+ * function Editor() {
+ *   const { text, insert, remove } = useText("notes", "n1", "body");
+ *   // wire to a textarea/editor of your choice
+ * }
+ * ```
+ */
+export function useText(
+  table: string,
+  pk: string,
+  field: string
+): UseTextReturn {
+  const { store } = useCRDTContext();
+
+  const text = useSyncExternalStore(
+    (cb) => store.subscribeDocument(table, pk, cb),
+    () => store.getText(table, pk, field),
+    () => ""
+  );
+
+  const insert = useCallback(
+    (index: number, content: string) => {
+      store.insertText(table, pk, field, index, content);
+    },
+    [store, table, pk, field]
+  );
+  const remove = useCallback(
+    (index: number, length: number) => {
+      store.deleteText(table, pk, field, index, length);
+    },
+    [store, table, pk, field]
+  );
+  const format = useCallback(
+    (index: number, length: number, attrs: Record<string, unknown>) => {
+      store.formatText(table, pk, field, index, length, attrs);
+    },
+    [store, table, pk, field]
+  );
+  const getDelta = useCallback(
+    () => store.getTextDelta(table, pk, field),
+    [store, table, pk, field]
+  );
+  const refAt = useCallback(
+    (index: number) => store.getTextRefAt(table, pk, field, index),
+    [store, table, pk, field]
+  );
+  const indexOf = useCallback(
+    (ref: TextRef) => store.getTextIndexOf(table, pk, field, ref),
+    [store, table, pk, field]
+  );
+
+  return { text, insert, remove, format, getDelta, refAt, indexOf };
 }
 
 // --- useNestedDocument ---

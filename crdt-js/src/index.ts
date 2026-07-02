@@ -59,6 +59,14 @@ export type {
   RGAListState,
   ListOperation,
   DocumentCRDTState,
+  TextRef,
+  TextSpan,
+  AttrState,
+  TextFragment,
+  TextState,
+  TextOpType,
+  TextOperation,
+  TextDeltaSegment,
 } from "./types.js";
 
 // Plugin interfaces
@@ -111,7 +119,25 @@ export {
   mergeDocumentState,
   documentResolve,
   mergeFieldState,
+  mergeFullFieldState,
 } from "./merge.js";
+
+// Text CRDT
+export {
+  newTextState,
+  textInsert,
+  textDeleteOp,
+  textFormat,
+  textValue,
+  textLength,
+  textDelta,
+  textRefAt,
+  textIndexOf,
+  resolveTextSpans,
+  applyTextOp,
+  mergeText,
+  textOriginKey,
+} from "./text.js";
 
 // Errors
 export {
