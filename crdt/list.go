@@ -61,13 +61,13 @@ func (l *RGAListState) Insert(value any, parentID HLC, nodeID string, clock HLC)
 	return nil
 }
 
-// Delete marks the node with the given ID as tombstoned.
+// Delete marks the node with the given ID as tombstoned. The order cache
+// stays valid: tombstones remain traversal anchors and are filtered on read.
 func (l *RGAListState) Delete(id HLC) {
 	key := rgaNodeKey(id)
 	if node, ok := l.Nodes[key]; ok {
 		node.Tombstone = true
 	}
-	l.order = nil
 }
 
 // Move moves an element to a new position after the given parentID.
@@ -129,9 +129,23 @@ func (l *RGAListState) NodeIDs() []HLC {
 // RGA ordering: nodes are sorted topologically by parent chains, with
 // siblings (same parent) sorted by HLC descending (newer inserts first
 // among concurrent operations at the same position).
+//
+// The traversal is cached in l.order (node keys) and reused until a
+// structural mutation (Insert/Move/merge) invalidates it — repeated reads
+// of an unchanged list are O(n) map lookups instead of a rebuild + sort.
 func (l *RGAListState) sortedNodes() []*RGANode {
 	if len(l.Nodes) == 0 {
 		return nil
+	}
+
+	if l.order != nil {
+		result := make([]*RGANode, 0, len(l.order))
+		for _, key := range l.order {
+			if node, ok := l.Nodes[key]; ok {
+				result = append(result, node)
+			}
+		}
+		return result
 	}
 
 	// Build children map: parentKey → []*RGANode.
@@ -151,15 +165,18 @@ func (l *RGAListState) sortedNodes() []*RGANode {
 	}
 
 	// DFS traversal starting from root (zero parent).
-	var result []*RGANode
+	result := make([]*RGANode, 0, len(l.Nodes))
+	order := make([]string, 0, len(l.Nodes))
 	var dfs func(parentKey string)
 	dfs = func(parentKey string) {
 		for _, child := range children[parentKey] {
 			result = append(result, child)
+			order = append(order, rgaNodeKey(child.ID))
 			dfs(rgaNodeKey(child.ID))
 		}
 	}
 	dfs(zeroKey)
+	l.order = order
 
 	return result
 }

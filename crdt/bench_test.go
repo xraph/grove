@@ -637,3 +637,21 @@ func BenchmarkRoomManager_UpdateCursor(b *testing.B) {
 		rm.UpdateCursor("bench-room", "node-1", cursor)
 	}
 }
+
+func BenchmarkRGAList_Elements_Cached(b *testing.B) {
+	l := NewRGAListState()
+	prev := HLC{}
+	for i := 0; i < 1000; i++ {
+		clock := HLC{Timestamp: int64(i + 1), NodeID: "a"}
+		if err := l.Insert(i, prev, "a", clock); err != nil {
+			b.Fatal(err)
+		}
+		prev = clock
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if got := len(l.Elements()); got != 1000 {
+			b.Fatalf("got %d", got)
+		}
+	}
+}
