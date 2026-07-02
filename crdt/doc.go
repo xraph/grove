@@ -116,6 +116,24 @@
 //	handler := crdt.NewHTTPHandler(crdtPlugin)
 //	mux.Handle("/sync/", handler)
 //
+// # Collaborative Text
+//
+// crdt:text fields are character-level collaborative sequences with
+// formatting attributes (the YText analog): [TextState] with origin-span
+// addressing, stable cursor positions ([TextRef], [TextState.RefAt],
+// [TextState.IndexOf]), Quill-style deltas ([TextState.Delta]) and
+// run-coalesced sequential typing. ORM writes reconcile whole strings via
+// [TextState.SetString]; transports carry [TextOp] payloads.
+//
+// # Op Application And Compaction
+//
+// [ApplyChange] is the canonical ChangeRecord → FieldState fold every
+// transport and downstream store uses: it honors all type-specific
+// payloads (counter deltas, set/list/text ops, document path writes, and
+// full-state carriers via ChangeRecord.State). Long-lived states GC their
+// tombstones with the horizon-based Compact methods ([State.Compact],
+// [RGAListState.Compact], [ORSetState.Compact], [TextState.Compact]).
+//
 // # Architecture
 //
 //	grove/crdt/
@@ -124,7 +142,12 @@
 //	├── register.go      — LWW-Register merge
 //	├── counter.go       — PN-Counter merge
 //	├── set.go           — OR-Set merge (add-wins)
+//	├── list.go          — RGA list merge (cached document order)
+//	├── text.go          — Text CRDT (origin-span fragments, formatting)
+//	├── document.go      — Nested path-keyed document merge
 //	├── merge.go         — MergeEngine: field + state merging
+//	├── apply.go         — ApplyChange: canonical op application
+//	├── compact.go       — Horizon-based tombstone compaction (GC)
 //	├── plugin.go        — Plugin (Grove hook integration)
 //	├── hooks.go         — PostMutation/PreQuery hooks for CRDT
 //	├── metadata.go      — Shadow table read/write operations

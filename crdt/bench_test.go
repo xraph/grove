@@ -655,3 +655,64 @@ func BenchmarkRGAList_Elements_Cached(b *testing.B) {
 		}
 	}
 }
+
+// --- Text Benchmarks ---
+
+func benchTextDoc(b *testing.B, chars int) *TextState {
+	b.Helper()
+	st := NewTextState()
+	ref := TextRef{}
+	for i := 0; i < chars/10; i++ {
+		clock := HLC{Timestamp: int64(i + 1), NodeID: "a"}
+		op, err := st.Insert(ref, "helloworld", "a", clock)
+		if err != nil {
+			b.Fatal(err)
+		}
+		_ = op
+		r, ok := st.RefAt(st.Len() - 1)
+		if !ok {
+			b.Fatal("RefAt")
+		}
+		ref = r
+	}
+	return st
+}
+
+func BenchmarkText_SequentialTyping(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		st := NewTextState()
+		ref := TextRef{}
+		for j := 0; j < 100; j++ {
+			clock := HLC{Timestamp: int64(j + 1), NodeID: "a"}
+			if _, err := st.Insert(ref, "x", "a", clock); err != nil {
+				b.Fatal(err)
+			}
+			r, _ := st.RefAt(st.Len() - 1)
+			ref = r
+		}
+	}
+}
+
+func BenchmarkText_Value(b *testing.B) {
+	for _, chars := range []int{1000, 100000} {
+		st := benchTextDoc(b, chars)
+		b.Run(fmt.Sprintf("%d-chars", chars), func(b *testing.B) {
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if got := len(st.Value()); got != chars {
+					b.Fatalf("len %d", got)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkText_MergeText(b *testing.B) {
+	a := benchTextDoc(b, 10000)
+	c := benchTextDoc(b, 10000)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		MergeText(a, c)
+	}
+}
