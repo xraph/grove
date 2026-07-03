@@ -17,7 +17,7 @@ import type {
   TextDeltaSegment,
   AttrState,
 } from "./types.js";
-import { hlcAfter, hlcString } from "./hlc.js";
+import { hlcAfter, hlcString, hlcTsString } from "./hlc.js";
 
 const ZERO_HLC: HLC = { ts: 0, c: 0, node: "" };
 
@@ -31,7 +31,7 @@ export function textOriginKey(h: HLC): string {
 }
 
 function isZeroHLC(h: HLC | undefined): boolean {
-  return !h || (h.ts === 0 && h.c === 0 && h.node === "");
+  return !h || (h.c === 0 && h.node === "" && hlcTsString(h.ts) === "0");
 }
 
 function isHeadRef(r: TextRef | undefined): boolean {

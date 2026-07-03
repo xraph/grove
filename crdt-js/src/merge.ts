@@ -711,10 +711,13 @@ export function mergeFieldState(
       if (change.text_op) {
         applyTextOp(localText, change.text_op, change.node_id, change.hlc);
       }
+      // Stamp with whichever of local/change is newer (Go pickNewer
+      // parity) — a redelivered older op must not regress the field clock.
+      const keepLocal = local && hlcAfter(local.hlc, change.hlc);
       return {
         type: "text",
-        hlc: change.hlc,
-        node_id: change.node_id,
+        hlc: keepLocal ? local.hlc : change.hlc,
+        node_id: keepLocal ? local.node_id : change.node_id,
         text_state: localText,
       };
     }

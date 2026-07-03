@@ -5,7 +5,7 @@
       {
         "node_id": "a",
         "hlc": {
-          "ts": 1,
+          "ts": "1",
           "c": 0,
           "node": "a"
         },
@@ -13,14 +13,14 @@
           "op": "insert",
           "ref": {
             "origin": {
-              "ts": 0,
+              "ts": "0",
               "c": 0,
               "node": ""
             },
             "offset": 0
           },
           "origin": {
-            "ts": 1,
+            "ts": "1",
             "c": 0,
             "node": "a"
           },
@@ -30,7 +30,7 @@
       {
         "node_id": "a",
         "hlc": {
-          "ts": 2,
+          "ts": "2",
           "c": 0,
           "node": "a"
         },
@@ -38,14 +38,14 @@
           "op": "insert",
           "ref": {
             "origin": {
-              "ts": 1,
+              "ts": "1",
               "c": 0,
               "node": "a"
             },
             "offset": 0
           },
           "origin": {
-            "ts": 1,
+            "ts": "1",
             "c": 0,
             "node": "a"
           },
@@ -55,7 +55,7 @@
       {
         "node_id": "a",
         "hlc": {
-          "ts": 3,
+          "ts": "3",
           "c": 0,
           "node": "a"
         },
@@ -63,14 +63,14 @@
           "op": "insert",
           "ref": {
             "origin": {
-              "ts": 1,
+              "ts": "1",
               "c": 0,
               "node": "a"
             },
             "offset": 1
           },
           "origin": {
-            "ts": 1,
+            "ts": "1",
             "c": 0,
             "node": "a"
           },
@@ -80,7 +80,7 @@
       {
         "node_id": "a",
         "hlc": {
-          "ts": 4,
+          "ts": "4",
           "c": 0,
           "node": "a"
         },
@@ -88,14 +88,14 @@
           "op": "insert",
           "ref": {
             "origin": {
-              "ts": 1,
+              "ts": "1",
               "c": 0,
               "node": "a"
             },
             "offset": 2
           },
           "origin": {
-            "ts": 1,
+            "ts": "1",
             "c": 0,
             "node": "a"
           },
@@ -105,7 +105,7 @@
       {
         "node_id": "a",
         "hlc": {
-          "ts": 5,
+          "ts": "5",
           "c": 0,
           "node": "a"
         },
@@ -113,14 +113,14 @@
           "op": "insert",
           "ref": {
             "origin": {
-              "ts": 1,
+              "ts": "1",
               "c": 0,
               "node": "a"
             },
             "offset": 3
           },
           "origin": {
-            "ts": 1,
+            "ts": "1",
             "c": 0,
             "node": "a"
           },
@@ -140,7 +140,7 @@
           "HLC{ts:1 c:0 node:a}": [
             {
               "origin": {
-                "ts": 1,
+                "ts": "1",
                 "c": 0,
                 "node": "a"
               },
@@ -149,7 +149,7 @@
               "length": 5,
               "parent": {
                 "origin": {
-                  "ts": 0,
+                  "ts": "0",
                   "c": 0,
                   "node": ""
                 },
@@ -167,7 +167,7 @@
       {
         "node_id": "a",
         "hlc": {
-          "ts": 1,
+          "ts": "1",
           "c": 0,
           "node": "a"
         },
@@ -175,14 +175,14 @@
           "op": "insert",
           "ref": {
             "origin": {
-              "ts": 0,
+              "ts": "0",
               "c": 0,
               "node": ""
             },
             "offset": 0
           },
           "origin": {
-            "ts": 1,
+            "ts": "1",
             "c": 0,
             "node": "a"
           },
@@ -192,7 +192,7 @@
       {
         "node_id": "n1",
         "hlc": {
-          "ts": 100,
+          "ts": "100",
           "c": 0,
           "node": "n1"
         },
@@ -200,14 +200,14 @@
           "op": "insert",
           "ref": {
             "origin": {
-              "ts": 1,
+              "ts": "1",
               "c": 0,
               "node": "a"
             },
             "offset": 0
           },
           "origin": {
-            "ts": 100,
+            "ts": "100",
             "c": 0,
             "node": "n1"
           },
@@ -217,7 +217,7 @@
       {
         "node_id": "n2",
         "hlc": {
-          "ts": 101,
+          "ts": "101",
           "c": 0,
           "node": "n2"
         },
@@ -225,14 +225,14 @@
           "op": "insert",
           "ref": {
             "origin": {
-              "ts": 1,
+              "ts": "1",
               "c": 0,
               "node": "a"
             },
             "offset": 0
           },
           "origin": {
-            "ts": 101,
+            "ts": "101",
             "c": 0,
             "node": "n2"
           },
@@ -252,7 +252,7 @@
           "HLC{ts:1 c:0 node:a}": [
             {
               "origin": {
-                "ts": 1,
+                "ts": "1",
                 "c": 0,
                 "node": "a"
               },
@@ -261,7 +261,7 @@
               "length": 2,
               "parent": {
                 "origin": {
-                  "ts": 0,
+                  "ts": "0",
                   "c": 0,
                   "node": ""
                 },
@@ -272,7 +272,7 @@
           "HLC{ts:100 c:0 node:n1}": [
             {
               "origin": {
-                "ts": 100,
+                "ts": "100",
                 "c": 0,
                 "node": "n1"
               },
@@ -281,7 +281,7 @@
               "length": 1,
               "parent": {
                 "origin": {
-                  "ts": 1,
+                  "ts": "1",
                   "c": 0,
                   "node": "a"
                 },
@@ -292,7 +292,7 @@
           "HLC{ts:101 c:0 node:n2}": [
             {
               "origin": {
-                "ts": 101,
+                "ts": "101",
                 "c": 0,
                 "node": "n2"
               },
@@ -301,7 +301,7 @@
               "length": 1,
               "parent": {
                 "origin": {
-                  "ts": 1,
+                  "ts": "1",
                   "c": 0,
                   "node": "a"
                 },
@@ -319,7 +319,7 @@
       {
         "node_id": "a",
         "hlc": {
-          "ts": 1,
+          "ts": "1",
           "c": 0,
           "node": "a"
         },
@@ -327,14 +327,14 @@
           "op": "insert",
           "ref": {
             "origin": {
-              "ts": 0,
+              "ts": "0",
               "c": 0,
               "node": ""
             },
             "offset": 0
           },
           "origin": {
-            "ts": 1,
+            "ts": "1",
             "c": 0,
             "node": "a"
           },
@@ -344,7 +344,7 @@
       {
         "node_id": "a",
         "hlc": {
-          "ts": 2,
+          "ts": "2",
           "c": 0,
           "node": "a"
         },
@@ -352,21 +352,21 @@
           "op": "delete",
           "ref": {
             "origin": {
-              "ts": 0,
+              "ts": "0",
               "c": 0,
               "node": ""
             },
             "offset": 0
           },
           "origin": {
-            "ts": 0,
+            "ts": "0",
             "c": 0,
             "node": ""
           },
           "spans": [
             {
               "origin": {
-                "ts": 1,
+                "ts": "1",
                 "c": 0,
                 "node": "a"
               },
@@ -379,7 +379,7 @@
       {
         "node_id": "b",
         "hlc": {
-          "ts": 50,
+          "ts": "50",
           "c": 0,
           "node": "b"
         },
@@ -387,21 +387,21 @@
           "op": "format",
           "ref": {
             "origin": {
-              "ts": 0,
+              "ts": "0",
               "c": 0,
               "node": ""
             },
             "offset": 0
           },
           "origin": {
-            "ts": 0,
+            "ts": "0",
             "c": 0,
             "node": ""
           },
           "spans": [
             {
               "origin": {
-                "ts": 1,
+                "ts": "1",
                 "c": 0,
                 "node": "a"
               },
@@ -430,7 +430,7 @@
           "HLC{ts:1 c:0 node:a}": [
             {
               "origin": {
-                "ts": 1,
+                "ts": "1",
                 "c": 0,
                 "node": "a"
               },
@@ -439,7 +439,7 @@
               "length": 5,
               "parent": {
                 "origin": {
-                  "ts": 0,
+                  "ts": "0",
                   "c": 0,
                   "node": ""
                 },
@@ -449,7 +449,7 @@
                 "bold": {
                   "value": true,
                   "hlc": {
-                    "ts": 50,
+                    "ts": "50",
                     "c": 0,
                     "node": "b"
                   },
@@ -459,7 +459,7 @@
             },
             {
               "origin": {
-                "ts": 1,
+                "ts": "1",
                 "c": 0,
                 "node": "a"
               },
@@ -468,7 +468,7 @@
               "length": 6,
               "parent": {
                 "origin": {
-                  "ts": 0,
+                  "ts": "0",
                   "c": 0,
                   "node": ""
                 },
@@ -487,7 +487,7 @@
       {
         "node_id": "a",
         "hlc": {
-          "ts": 1,
+          "ts": "1",
           "c": 0,
           "node": "a"
         },
@@ -495,14 +495,14 @@
           "op": "insert",
           "ref": {
             "origin": {
-              "ts": 0,
+              "ts": "0",
               "c": 0,
               "node": ""
             },
             "offset": 0
           },
           "origin": {
-            "ts": 1,
+            "ts": "1",
             "c": 0,
             "node": "a"
           },
@@ -512,7 +512,7 @@
       {
         "node_id": "b",
         "hlc": {
-          "ts": 100,
+          "ts": "100",
           "c": 0,
           "node": "b"
         },
@@ -520,14 +520,14 @@
           "op": "insert",
           "ref": {
             "origin": {
-              "ts": 1,
+              "ts": "1",
               "c": 0,
               "node": "a"
             },
             "offset": 5
           },
           "origin": {
-            "ts": 100,
+            "ts": "100",
             "c": 0,
             "node": "b"
           },
@@ -547,7 +547,7 @@
           "HLC{ts:1 c:0 node:a}": [
             {
               "origin": {
-                "ts": 1,
+                "ts": "1",
                 "c": 0,
                 "node": "a"
               },
@@ -556,7 +556,7 @@
               "length": 7,
               "parent": {
                 "origin": {
-                  "ts": 0,
+                  "ts": "0",
                   "c": 0,
                   "node": ""
                 },
@@ -567,7 +567,7 @@
           "HLC{ts:100 c:0 node:b}": [
             {
               "origin": {
-                "ts": 100,
+                "ts": "100",
                 "c": 0,
                 "node": "b"
               },
@@ -576,7 +576,7 @@
               "length": 6,
               "parent": {
                 "origin": {
-                  "ts": 1,
+                  "ts": "1",
                   "c": 0,
                   "node": "a"
                 },

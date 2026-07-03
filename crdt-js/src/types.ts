@@ -7,8 +7,12 @@
 
 /** Hybrid Logical Clock value. Mirrors Go crdt.HLC. */
 export interface HLC {
-  /** Physical timestamp in nanoseconds since Unix epoch. */
-  ts: number;
+  /**
+   * Physical timestamp in nanoseconds since Unix epoch. Carried as a
+   * DECIMAL STRING on the wire (int64 exceeds 2^53; numbers round in JS);
+   * legacy numeric values are still accepted.
+   */
+  ts: number | string;
   /** Logical counter (incremented when physical clock hasn't advanced). */
   c: number;
   /** Node identifier that produced this clock value. */

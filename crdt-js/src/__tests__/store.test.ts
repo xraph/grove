@@ -103,7 +103,7 @@ describe("CRDTStore", () => {
       expect(change.crdt_type).toBe("lww");
       expect(change.node_id).toBe("test-node");
       expect(change.value).toBe("Alice");
-      expect(change.hlc.ts).toBeGreaterThan(0);
+      expect(Number(change.hlc.ts)).toBeGreaterThan(0);
     });
 
     it("adds the change to pending", () => {
@@ -117,7 +117,7 @@ describe("CRDTStore", () => {
       const { store } = createTestStore();
       const c1 = store.setField("users", "1", "name", "a")!;
       const c2 = store.setField("users", "1", "name", "b")!;
-      expect(c2.hlc.ts >= c1.hlc.ts).toBe(true);
+      expect(Number(c2.hlc.ts) >= Number(c1.hlc.ts)).toBe(true);
       if (c2.hlc.ts === c1.hlc.ts) {
         expect(c2.hlc.c).toBeGreaterThan(c1.hlc.c);
       }

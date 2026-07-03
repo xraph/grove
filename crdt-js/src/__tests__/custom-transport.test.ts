@@ -148,7 +148,7 @@ describe("CRDTClient with custom Transport", () => {
     await client.pull();
     // Transport returns latest_hlc with ts=1000
     const next = client.clock.now();
-    expect(next.ts >= 1000 || next.c > 0).toBe(true);
+    expect(Number(next.ts) >= 1000 || next.c > 0).toBe(true);
   });
 
   it("pull() passes tables and since correctly", async () => {

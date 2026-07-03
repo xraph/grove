@@ -586,14 +586,18 @@ export function useList<T = unknown>(
 ): UseListReturn<T> {
   const { store } = useCRDTContext();
 
-  const items = useSyncExternalStore(
-    (cb) => store.subscribeDocument(table, pk, cb),
-    () => {
-      const doc = store.getDocument<Record<string, unknown>>(table, pk);
-      return Array.isArray(doc?.[field]) ? (doc![field] as T[]) : [];
-    },
-    () => [] as T[]
-  );
+  // Resolved documents are rebuilt per call, so their arrays cannot serve
+  // as useSyncExternalStore snapshots (fresh reference every render =
+  // infinite re-render). Subscription-driven state keeps identity stable.
+  const readItems = useCallback((): T[] => {
+    const doc = store.getDocument<Record<string, unknown>>(table, pk);
+    return Array.isArray(doc?.[field]) ? (doc![field] as T[]) : [];
+  }, [store, table, pk, field]);
+  const [items, setItems] = useState<T[]>(readItems);
+  useEffect(() => {
+    setItems(readItems());
+    return store.subscribeDocument(table, pk, () => setItems(readItems()));
+  }, [store, table, pk, readItems]);
 
   // getListNodeIds builds a fresh array per call, so it cannot serve as a
   // useSyncExternalStore snapshot (Object.is on a new reference every
