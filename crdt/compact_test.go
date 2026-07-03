@@ -82,8 +82,9 @@ func TestSetCompact_DropsRemovedTags(t *testing.T) {
 	fresh := HLC{Timestamp: 90, NodeID: "b"}
 	_ = s.Add("x", "a", old)
 	_ = s.Add("x", "b", fresh) // second, newer tag
-	// Remove only the old tag (observed-remove of the first add).
-	s.Removed[tagKey(Tag{NodeID: "a", HLC: old})] = true
+	// Remove the element, then re-add the fresh tag: only the old tag
+	// stays observed-removed (element-scoped markers).
+	s.Removed[removedKey(`"x"`, Tag{NodeID: "a", HLC: old})] = true
 
 	dropped := s.Compact(HLC{Timestamp: 50, NodeID: "z"})
 	if dropped != 1 {
@@ -99,6 +100,31 @@ func TestSetCompact_DropsRemovedTags(t *testing.T) {
 	}
 	if len(s.Removed) != 0 {
 		t.Fatalf("removed markers = %d, want 0", len(s.Removed))
+	}
+}
+
+func TestSetCompact_LegacySharedMarkerPreserved(t *testing.T) {
+	// Legacy states keyed removals by tag only, and a multi-element add
+	// shares one tag: compacting one element must NOT delete the shared
+	// marker — the sibling's removal evidence — or it would resurrect.
+	s := NewORSetState()
+	shared := Tag{NodeID: "a", HLC: HLC{Timestamp: 10, NodeID: "a"}}
+	s.Entries[`"A"`] = []Tag{shared}
+	s.Entries[`"B"`] = []Tag{shared}
+	s.Removed[tagKey(shared)] = true // legacy, tag-only, shared
+
+	dropped := s.Compact(HLC{Timestamp: 50, NodeID: "z"})
+	if dropped != 2 {
+		t.Fatalf("dropped = %d, want 2", dropped)
+	}
+	if !s.Removed[tagKey(shared)] {
+		t.Fatal("legacy shared marker must survive compaction")
+	}
+	if okA, _ := s.Contains("A"); okA {
+		t.Fatal("A resurrected")
+	}
+	if okB, _ := s.Contains("B"); okB {
+		t.Fatal("B resurrected")
 	}
 }
 

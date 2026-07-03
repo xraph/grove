@@ -148,9 +148,15 @@ func (p *Plugin) writeFieldStates(ctx context.Context, table, pk string, fields 
 			}
 
 			if hasValue {
-				s, _ := value.(string)
-				if _, err := txt.SetString(s, p.nodeID, clock); err != nil {
-					return fmt.Errorf("crdt: reconcile text %s: %w", fieldName, err)
+				// Only reconcile actual strings: a failed assertion would
+				// yield "" and SetString("") tombstones the whole document —
+				// a destructive wipe that would replicate as valid ops.
+				if s, ok := value.(string); ok {
+					if _, err := txt.SetString(s, p.nodeID, clock); err != nil {
+						return fmt.Errorf("crdt: reconcile text %s: %w", fieldName, err)
+					}
+				} else {
+					return fmt.Errorf("crdt: text field %s requires a string value, got %T", fieldName, value)
 				}
 			}
 

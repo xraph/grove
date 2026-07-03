@@ -61,8 +61,13 @@ func (s *ORSetState) Compact(before HLC) int {
 		kept := tags[:0]
 		for _, tag := range tags {
 			if s.tagRemoved(elem, tag) && before.After(tag.HLC) {
+				// Only the element-scoped marker is consumed. Legacy
+				// tag-only markers are SHARED evidence: a multi-element add
+				// shares one tag, so deleting tagKey(tag) here would
+				// resurrect sibling elements still relying on it (and
+				// which sibling depends on map order — divergence). The
+				// tiny legacy marker simply stays.
 				delete(s.Removed, removedKey(elem, tag))
-				delete(s.Removed, tagKey(tag))
 				dropped++
 				continue
 			}

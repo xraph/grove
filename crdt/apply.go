@@ -89,7 +89,11 @@ func ApplyChange(engine *MergeEngine, local *FieldState, c *ChangeRecord) (*Fiel
 		if err := txt.Apply(c.TextOp, c.NodeID, c.HLC); err != nil {
 			return nil, err
 		}
-		return txt.ToFieldState(pickNewer(local, c)), nil
+		// Deliberately NOT ToFieldState: that would re-materialize and
+		// JSON-marshal the whole visible text per applied op — O(doc) per
+		// keystroke, O(n²) folding a log. Readers resolve via TextState.
+		hlc, nodeID := pickNewer(local, c)
+		return &FieldState{Type: TypeText, HLC: hlc, NodeID: nodeID, TextState: txt}, nil
 
 	case TypeDocument:
 		return applyDocumentChange(engine, local, c)

@@ -23,7 +23,7 @@ import type {
   TextRef,
   TextDeltaSegment,
 } from "./types.js";
-import { HybridClock } from "./hlc.js";
+import { HybridClock, hlcString } from "./hlc.js";
 import {
   mergeFieldState,
   counterValue,
@@ -69,6 +69,26 @@ export interface StateSnapshot {
  * - Dirty tracking for pending push
  * - Fine-grained subscriptions for React hooks
  */
+/**
+ * Migrate persisted CRDT states whose RGA list node maps were keyed with
+ * the pre-parity `${ts}:${c}:${node}` format to the Go HLC.String()
+ * format. Keys are authoritative-rebuilt from each node's id, so the
+ * migration is idempotent and format-agnostic.
+ */
+function normalizeHLCKeys(doc: DocumentState): void {
+  for (const fs of Object.values(doc.fields)) {
+    const nodes = fs.list_state?.nodes;
+    if (!nodes) continue;
+    for (const [key, node] of Object.entries(nodes)) {
+      const canonical = hlcString(node.id);
+      if (key !== canonical) {
+        delete nodes[key];
+        nodes[canonical] = node;
+      }
+    }
+  }
+}
+
 export class CRDTStore {
   private nodeID: string;
   private clock: HybridClock;
@@ -1007,6 +1027,7 @@ export class CRDTStore {
       for (const [pk, doc] of docs) {
         // Only set if no in-memory mutation happened during hydration.
         if (!tableMap.has(pk)) {
+          normalizeHLCKeys(doc);
           const hydrated = this.plugins.dispatchAfterHydrate(table, pk, doc);
           tableMap.set(pk, hydrated);
         }

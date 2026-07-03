@@ -595,11 +595,17 @@ export function useList<T = unknown>(
     () => [] as T[]
   );
 
-  const nodeIds = useSyncExternalStore(
-    (cb) => store.subscribeDocument(table, pk, cb),
-    () => store.getListNodeIds(table, pk, field),
-    () => [] as HLC[]
-  );
+  // getListNodeIds builds a fresh array per call, so it cannot serve as a
+  // useSyncExternalStore snapshot (Object.is on a new reference every
+  // render = infinite re-render). Subscription-driven state keeps the
+  // reference stable between store changes.
+  const [nodeIds, setNodeIds] = useState<HLC[]>(() => store.getListNodeIds(table, pk, field));
+  useEffect(() => {
+    setNodeIds(store.getListNodeIds(table, pk, field));
+    return store.subscribeDocument(table, pk, () => {
+      setNodeIds(store.getListNodeIds(table, pk, field));
+    });
+  }, [store, table, pk, field]);
 
   const insert = useCallback(
     (value: T, afterId?: HLC) => {

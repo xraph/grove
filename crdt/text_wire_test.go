@@ -38,10 +38,14 @@ func TestApplyChange_TextOps(t *testing.T) {
 	if got := TextFromFieldState(fs).Value(); got != "hello world" {
 		t.Fatalf("value = %q", got)
 	}
-	// Resolved LWW value rides ChangeRecord-free reads too.
-	var plain string
-	if err := json.Unmarshal(fs.Value, &plain); err != nil || plain != "hello world" {
-		t.Fatalf("fs.Value = %s (%v)", fs.Value, err)
+	// ApplyChange deliberately leaves fs.Value empty (per-op re-marshaling
+	// of the whole doc would be O(n²) across a log) — readers resolve via
+	// TextState; ToFieldState fills Value for state-persisting callers.
+	if full := TextFromFieldState(fs).ToFieldState(fs.HLC, fs.NodeID); full != nil {
+		var plain string
+		if err := json.Unmarshal(full.Value, &plain); err != nil || plain != "hello world" {
+			t.Fatalf("ToFieldState value = %s (%v)", full.Value, err)
+		}
 	}
 }
 

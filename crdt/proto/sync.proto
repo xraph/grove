@@ -24,6 +24,10 @@ message ChangeRecord {
   CounterDelta counter_delta = 9;
   SetOperation set_op = 10;
   ListOperation list_op = 11;
+  TextOperation text_op = 12;
+  // Full field state for state-based propagation (JSON-encoded
+  // crdt.FieldState; sets/lists/documents/text sync losslessly this way).
+  bytes state = 13;
 }
 
 // CounterDelta represents a single node's counter change.
@@ -36,6 +40,37 @@ message CounterDelta {
 message SetOperation {
   string op = 1;   // "add" or "remove"
   bytes elements = 2; // JSON array of elements
+  // Observed add-tags an exact remove is deleting.
+  repeated ORSetTag tags = 3;
+}
+
+// ORSetTag identifies one add operation (element-scoped on removal).
+message ORSetTag {
+  string node_id = 1;
+  HLC hlc = 2;
+}
+
+// TextRef addresses one character: rune offset within an insertion span.
+message TextRef {
+  HLC origin = 1;
+  int32 offset = 2;
+}
+
+// TextSpan names a contiguous address range within one origin.
+message TextSpan {
+  HLC origin = 1;
+  int32 start = 2;
+  int32 length = 3;
+}
+
+// TextOperation represents an operation on a collaborative text field.
+message TextOperation {
+  string op = 1;       // "insert", "delete", or "format"
+  TextRef ref = 2;     // insert anchor
+  HLC origin = 3;      // insert span identity (creator-decided)
+  string content = 4;  // insert content
+  repeated TextSpan spans = 5; // delete/format targets
+  bytes attrs = 6;     // JSON attribute map for insert/format
 }
 
 // ListOperation represents an operation on an RGA list.

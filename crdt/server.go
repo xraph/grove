@@ -222,7 +222,11 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 			continue // Hook says skip this change.
 		}
 
-		if processedChange.Tombstone {
+		// A tombstoned document-type change carrying a value is a PATH
+		// delete inside the nested document, not a record delete — it
+		// falls through to ApplyChange below (mirrors sync.go).
+		isDocPathDelete := processedChange.CRDTType == TypeDocument && len(processedChange.Value) > 0
+		if processedChange.Tombstone && !isDocPathDelete {
 			if writeErr := c.metadata.WriteTombstone(ctx, processedChange.Table, processedChange.PK, processedChange.HLC, processedChange.NodeID); writeErr != nil {
 				return nil, fmt.Errorf("crdt: merge tombstone: %w", writeErr)
 			}
@@ -239,17 +243,22 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 			return nil, fmt.Errorf("crdt: read state: %w", err)
 		}
 
-		remoteFS := &FieldState{
-			Type:   processedChange.CRDTType,
-			HLC:    processedChange.HLC,
-			NodeID: processedChange.NodeID,
-			Value:  processedChange.Value,
-		}
-		if processedChange.CounterDelta != nil {
-			cs := NewPNCounterState()
-			cs.Increments[processedChange.NodeID] = processedChange.CounterDelta.Increment
-			cs.Decrements[processedChange.NodeID] = processedChange.CounterDelta.Decrement
-			remoteFS.CounterState = cs
+		// The hook's remote view: the full-state carrier when present,
+		// otherwise the value-level projection of the change.
+		remoteFS := processedChange.State
+		if remoteFS == nil {
+			remoteFS = &FieldState{
+				Type:   processedChange.CRDTType,
+				HLC:    processedChange.HLC,
+				NodeID: processedChange.NodeID,
+				Value:  processedChange.Value,
+			}
+			if processedChange.CounterDelta != nil {
+				cs := NewPNCounterState()
+				cs.Increments[processedChange.NodeID] = processedChange.CounterDelta.Increment
+				cs.Decrements[processedChange.NodeID] = processedChange.CounterDelta.Decrement
+				remoteFS.CounterState = cs
+			}
 		}
 
 		var localFS *FieldState
@@ -273,9 +282,18 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 		if interceptedRemote == nil {
 			continue // Plugin says skip this merge.
 		}
-		remoteFS = interceptedRemote
 
-		mergedFS, err := c.plugin.merge.MergeField(localFS, remoteFS)
+		// A plugin that REPLACED the remote view wins verbatim (state-based
+		// merge of its substitute); otherwise the change applies through the
+		// canonical op-application seam, honoring every typed payload
+		// (counter deltas, set/list/text ops, document path writes, state
+		// carriers) — MergeField on the value projection would drop them.
+		var mergedFS *FieldState
+		if interceptedRemote != remoteFS {
+			mergedFS, err = c.plugin.merge.MergeField(localFS, interceptedRemote)
+		} else {
+			mergedFS, err = ApplyChange(c.plugin.merge, localFS, processedChange)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("crdt: merge field: %w", err)
 		}
