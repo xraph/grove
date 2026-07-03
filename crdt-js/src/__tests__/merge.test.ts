@@ -493,7 +493,9 @@ describe("mergeFieldState", () => {
       expect(counterValue(result.counter_state!)).toBe(0);
     });
 
-    it("accumulates increments from same node", () => {
+    it("treats deltas as cumulative per-node snapshots (max-merge, idempotent)", () => {
+      // The wire delta is the sending node's cumulative totals — matching
+      // Go's ApplyChange — so redelivery cannot double-count.
       const change1: ChangeRecord = {
         table: "t",
         pk: "1",
@@ -512,10 +514,14 @@ describe("mergeFieldState", () => {
         crdt_type: "counter",
         hlc: { ts: 200, c: 0, node: "a" },
         node_id: "a",
-        counter_delta: { inc: 4, dec: 0 },
+        counter_delta: { inc: 7, dec: 0 }, // cumulative: 3 then +4 more
       };
       const state2 = mergeFieldState(state1, change2);
-      expect(counterValue(state2.counter_state!)).toBe(7); // 3 + 4
+      expect(counterValue(state2.counter_state!)).toBe(7);
+
+      // Redelivering an older snapshot changes nothing.
+      const replayed = mergeFieldState(state2, change1);
+      expect(counterValue(replayed.counter_state!)).toBe(7);
     });
   });
 

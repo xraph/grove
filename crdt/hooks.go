@@ -129,6 +129,38 @@ func (p *Plugin) writeFieldStates(ctx context.Context, table, pk string, fields 
 			}
 
 			fs = set.ToFieldState(clock, p.nodeID)
+
+		case TypeText:
+			// For text, read existing state and reconcile the whole-string
+			// write into minimal insert/delete ops (prefix/suffix diff).
+			existing, err := p.metadata.ReadState(ctx, table, pk)
+			if err != nil {
+				return fmt.Errorf("crdt: read text state: %w", err)
+			}
+
+			txt := NewTextState()
+			if existing != nil {
+				if existingFS, ok := existing.Fields[fieldName]; ok {
+					if reconstructed := TextFromFieldState(existingFS); reconstructed != nil {
+						txt = reconstructed
+					}
+				}
+			}
+
+			if hasValue {
+				// Only reconcile actual strings: a failed assertion would
+				// yield "" and SetString("") tombstones the whole document —
+				// a destructive wipe that would replicate as valid ops.
+				if s, ok := value.(string); ok {
+					if _, err := txt.SetString(s, p.nodeID, clock); err != nil {
+						return fmt.Errorf("crdt: reconcile text %s: %w", fieldName, err)
+					}
+				} else {
+					return fmt.Errorf("crdt: text field %s requires a string value, got %T", fieldName, value)
+				}
+			}
+
+			fs = txt.ToFieldState(clock, p.nodeID)
 		}
 
 		if fs != nil {

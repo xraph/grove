@@ -29,6 +29,20 @@ func tagKey(t Tag) string {
 	return t.NodeID + ":" + t.HLC.String()
 }
 
+// removedKey scopes a removal to one element. Tags are per-ADD, not
+// per-(element, add) — a multi-element add shares one tag — so removals
+// keyed by tag alone would leak across elements added together.
+func removedKey(elem string, t Tag) string {
+	return elem + "|" + tagKey(t)
+}
+
+// tagRemoved reports whether elem's tag is removed, honoring both the
+// element-scoped key and the legacy tag-only key (states written before
+// element scoping).
+func (s *ORSetState) tagRemoved(elem string, t Tag) bool {
+	return s.Removed[removedKey(elem, t)] || s.Removed[tagKey(t)]
+}
+
 // NewORSetState creates an empty OR-Set.
 func NewORSetState() *ORSetState {
 	return &ORSetState{
@@ -55,7 +69,7 @@ func (s *ORSetState) Remove(element any) error {
 		return err
 	}
 	for _, tag := range s.Entries[key] {
-		s.Removed[tagKey(tag)] = true
+		s.Removed[removedKey(key, tag)] = true
 	}
 	return nil
 }
@@ -72,7 +86,7 @@ func (s *ORSetState) Elements() []json.RawMessage {
 
 	for _, key := range keys {
 		tags := s.Entries[key]
-		if s.hasActiveTags(tags) {
+		if s.hasActiveTags(key, tags) {
 			result = append(result, json.RawMessage(key))
 		}
 	}
@@ -89,12 +103,12 @@ func (s *ORSetState) Contains(element any) (bool, error) {
 	if !ok {
 		return false, nil
 	}
-	return s.hasActiveTags(tags), nil
+	return s.hasActiveTags(key, tags), nil
 }
 
-func (s *ORSetState) hasActiveTags(tags []Tag) bool {
+func (s *ORSetState) hasActiveTags(elem string, tags []Tag) bool {
 	for _, tag := range tags {
-		if !s.Removed[tagKey(tag)] {
+		if !s.tagRemoved(elem, tag) {
 			return true
 		}
 	}

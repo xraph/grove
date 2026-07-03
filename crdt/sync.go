@@ -286,7 +286,11 @@ func (s *Syncer) mergeRemoteChange(ctx context.Context, change ChangeRecord) err
 		}
 	}
 
-	if processedChange.Tombstone {
+	// A tombstoned document-type change carrying a value is a PATH delete
+	// inside the nested document, not a record delete — it falls through to
+	// ApplyChange below.
+	isDocPathDelete := processedChange.CRDTType == TypeDocument && len(processedChange.Value) > 0
+	if processedChange.Tombstone && !isDocPathDelete {
 		if err := s.metadata.WriteTombstone(ctx, processedChange.Table, processedChange.PK, processedChange.HLC, processedChange.NodeID); err != nil {
 			return err
 		}
@@ -303,27 +307,15 @@ func (s *Syncer) mergeRemoteChange(ctx context.Context, change ChangeRecord) err
 		return err
 	}
 
-	remoteFS := &FieldState{
-		Type:   processedChange.CRDTType,
-		HLC:    processedChange.HLC,
-		NodeID: processedChange.NodeID,
-		Value:  processedChange.Value,
-	}
-
-	// Reconstruct type-specific state from the change record.
-	if processedChange.CounterDelta != nil {
-		cs := NewPNCounterState()
-		cs.Increments[processedChange.NodeID] = processedChange.CounterDelta.Increment
-		cs.Decrements[processedChange.NodeID] = processedChange.CounterDelta.Decrement
-		remoteFS.CounterState = cs
-	}
-
 	var localFS *FieldState
 	if localState != nil {
 		localFS = localState.Fields[processedChange.Field]
 	}
 
-	merged, err := s.plugin.merge.MergeField(localFS, remoteFS)
+	// Canonical op application: honors every type-specific payload
+	// (counter deltas, set/list/text ops, document path writes, full-state
+	// carriers) — not just LWW values.
+	merged, err := ApplyChange(s.plugin.merge, localFS, processedChange)
 	if err != nil {
 		return err
 	}

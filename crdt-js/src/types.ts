@@ -7,8 +7,12 @@
 
 /** Hybrid Logical Clock value. Mirrors Go crdt.HLC. */
 export interface HLC {
-  /** Physical timestamp in nanoseconds since Unix epoch. */
-  ts: number;
+  /**
+   * Physical timestamp in nanoseconds since Unix epoch. Carried as a
+   * DECIMAL STRING on the wire (int64 exceeds 2^53; numbers round in JS);
+   * legacy numeric values are still accepted.
+   */
+  ts: number | string;
   /** Logical counter (incremented when physical clock hasn't advanced). */
   c: number;
   /** Node identifier that produced this clock value. */
@@ -16,7 +20,7 @@ export interface HLC {
 }
 
 /** CRDT type identifier. */
-export type CRDTType = "lww" | "counter" | "set" | "list" | "document";
+export type CRDTType = "lww" | "counter" | "set" | "list" | "document" | "text";
 
 /** Set operation type. */
 export type SetOpType = "add" | "remove";
@@ -58,6 +62,70 @@ export interface DocumentCRDTState {
 export interface SetOperation {
   op: SetOpType;
   elements: unknown[];
+  /**
+   * Observed add-tags a remove is deleting (exact observed-remove
+   * semantics). Removes without tags fall back to removing every local
+   * tag older than the op's HLC.
+   */
+  tags?: ORSetTag[];
+}
+
+// --- Text CRDT (mirrors Go crdt/text.go) ---
+
+/** Stable character address: rune offset within an insertion span. */
+export interface TextRef {
+  origin: HLC;
+  offset: number;
+}
+
+/** Contiguous address range within one origin. */
+export interface TextSpan {
+  origin: HLC;
+  start: number;
+  length: number;
+}
+
+/** One formatting attribute's LWW register on a fragment. */
+export interface AttrState {
+  value: unknown;
+  hlc: HLC;
+  node_id: string;
+}
+
+/** Stored piece of an origin's span. Mirrors Go crdt.TextFragment. */
+export interface TextFragment {
+  origin: HLC;
+  start: number;
+  content: string;
+  length: number;
+  parent?: TextRef;
+  tombstone?: boolean;
+  attrs?: Record<string, AttrState>;
+}
+
+/** Text CRDT state. Mirrors Go crdt.TextState. */
+export interface TextState {
+  /** Origin key (Go HLC.String() format) → fragments sorted by start. */
+  frags: Record<string, TextFragment[]>;
+}
+
+/** Text operation type. */
+export type TextOpType = "insert" | "delete" | "format";
+
+/** Text operation payload. Mirrors Go crdt.TextOp. */
+export interface TextOperation {
+  op: TextOpType;
+  ref?: TextRef;
+  origin?: HLC;
+  content?: string;
+  spans?: TextSpan[];
+  attrs?: Record<string, unknown>;
+}
+
+/** One Quill-style segment of visible text. Mirrors Go crdt.TextDelta. */
+export interface TextDeltaSegment {
+  insert: string;
+  attributes?: Record<string, unknown>;
 }
 
 /**
@@ -76,6 +144,13 @@ export interface ChangeRecord {
   counter_delta?: CounterDelta;
   set_op?: SetOperation;
   list_op?: ListOperation;
+  text_op?: TextOperation;
+  /**
+   * Full field state for state-based propagation (sets/lists/documents/
+   * text sync losslessly this way). When set, application merges it
+   * directly and ignores the op payloads.
+   */
+  state?: FieldState;
 }
 
 /** Pull request payload. Mirrors Go crdt.PullRequest. */
@@ -172,6 +247,7 @@ export interface FieldState {
   set_state?: ORSetState;
   list_state?: RGAListState;
   doc_state?: DocumentCRDTState;
+  text_state?: TextState;
 }
 
 /** Full document state (all fields for a single record). Mirrors Go crdt.State. */

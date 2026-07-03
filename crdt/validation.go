@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -44,8 +45,20 @@ func (vc *ValidationConfig) ValidateChangeRecord(change *ChangeRecord) error {
 	if !ValidCRDTType(string(change.CRDTType)) && !change.Tombstone {
 		return fmt.Errorf("crdt: unknown crdt type: %s", change.CRDTType)
 	}
-	if vc.MaxChangeValueSize > 0 && len(change.Value) > vc.MaxChangeValueSize {
-		return fmt.Errorf("crdt: change value exceeds max size (%d > %d bytes)", len(change.Value), vc.MaxChangeValueSize)
+	if vc.MaxChangeValueSize > 0 {
+		if len(change.Value) > vc.MaxChangeValueSize {
+			return fmt.Errorf("crdt: change value exceeds max size (%d > %d bytes)", len(change.Value), vc.MaxChangeValueSize)
+		}
+		// The typed payloads added for text/state-carrier sync are bounded
+		// by the same cap — Value alone no longer covers the wire surface.
+		if change.TextOp != nil && len(change.TextOp.Content) > vc.MaxChangeValueSize {
+			return fmt.Errorf("crdt: text op content exceeds max size (%d > %d bytes)", len(change.TextOp.Content), vc.MaxChangeValueSize)
+		}
+		if change.State != nil {
+			if raw, err := json.Marshal(change.State); err == nil && len(raw) > vc.MaxChangeValueSize {
+				return fmt.Errorf("crdt: change state exceeds max size (%d > %d bytes)", len(raw), vc.MaxChangeValueSize)
+			}
+		}
 	}
 	if vc.MaxHLCDrift > 0 {
 		now := time.Now().UnixNano()

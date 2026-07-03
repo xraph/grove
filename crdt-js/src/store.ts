@@ -18,16 +18,31 @@ import type {
   StorageAdapter,
   RGAListState,
   DocumentCRDTState,
+  TextState,
+  TextOperation,
+  TextRef,
+  TextDeltaSegment,
 } from "./types.js";
-import { HybridClock } from "./hlc.js";
+import { HybridClock, hlcString } from "./hlc.js";
 import {
   mergeFieldState,
   counterValue,
   setElements,
   listElements,
+  listNodeIds,
   documentResolve,
   tagKey,
 } from "./merge.js";
+import {
+  newTextState,
+  textInsert,
+  textDeleteOp,
+  textFormat,
+  textValue,
+  textDelta,
+  textRefAt,
+  textIndexOf,
+} from "./text.js";
 import { MemoryStorage } from "./storage.js";
 import { UndoManager } from "./undo.js";
 import { PluginManager } from "./plugin.js";
@@ -54,6 +69,26 @@ export interface StateSnapshot {
  * - Dirty tracking for pending push
  * - Fine-grained subscriptions for React hooks
  */
+/**
+ * Migrate persisted CRDT states whose RGA list node maps were keyed with
+ * the pre-parity `${ts}:${c}:${node}` format to the Go HLC.String()
+ * format. Keys are authoritative-rebuilt from each node's id, so the
+ * migration is idempotent and format-agnostic.
+ */
+function normalizeHLCKeys(doc: DocumentState): void {
+  for (const fs of Object.values(doc.fields)) {
+    const nodes = fs.list_state?.nodes;
+    if (!nodes) continue;
+    for (const [key, node] of Object.entries(nodes)) {
+      const canonical = hlcString(node.id);
+      if (key !== canonical) {
+        delete nodes[key];
+        nodes[canonical] = node;
+      }
+    }
+  }
+}
+
 export class CRDTStore {
   private nodeID: string;
   private clock: HybridClock;
@@ -215,6 +250,9 @@ export class CRDTStore {
     delta = 1
   ): ChangeRecord | null {
     const hlc = this.clock.now();
+    // The wire delta is this node's CUMULATIVE totals (merged max-per-node
+    // on every replica) — idempotent under redelivery, matching Go.
+    const totals = this.counterTotals(table, pk, field);
     const change: ChangeRecord = {
       table,
       pk,
@@ -222,7 +260,7 @@ export class CRDTStore {
       crdt_type: "counter",
       hlc,
       node_id: this.nodeID,
-      counter_delta: { inc: delta, dec: 0 },
+      counter_delta: { inc: totals.inc + delta, dec: totals.dec },
     };
 
     const previousState = this.captureFieldState(table, pk, field);
@@ -250,6 +288,7 @@ export class CRDTStore {
     delta = 1
   ): ChangeRecord | null {
     const hlc = this.clock.now();
+    const totals = this.counterTotals(table, pk, field);
     const change: ChangeRecord = {
       table,
       pk,
@@ -257,7 +296,7 @@ export class CRDTStore {
       crdt_type: "counter",
       hlc,
       node_id: this.nodeID,
-      counter_delta: { inc: 0, dec: delta },
+      counter_delta: { inc: totals.inc, dec: totals.dec + delta },
     };
 
     const previousState = this.captureFieldState(table, pk, field);
@@ -320,6 +359,12 @@ export class CRDTStore {
     elements: unknown[]
   ): ChangeRecord | null {
     const hlc = this.clock.now();
+    // Name the observed tags so the remove is exact everywhere (true
+    // observed-remove semantics; receivers don't guess by HLC).
+    const setState = this.state.get(table)?.get(pk)?.fields[field]?.set_state;
+    const tags = elements.flatMap(
+      (elem) => setState?.entries[JSON.stringify(elem)] ?? []
+    );
     const change: ChangeRecord = {
       table,
       pk,
@@ -327,7 +372,7 @@ export class CRDTStore {
       crdt_type: "set",
       hlc,
       node_id: this.nodeID,
-      set_op: { op: "remove", elements },
+      set_op: { op: "remove", elements, ...(tags.length > 0 ? { tags } : {}) },
     };
 
     const previousState = this.captureFieldState(table, pk, field);
@@ -414,6 +459,157 @@ export class CRDTStore {
     this.persistPending();
     this.notifyListeners(table, pk);
     return change;
+  }
+
+  /**
+   * Ordered RGA node IDs for a list field's live elements (parallel to the
+   * resolved array) — needed for insert-after and delete addressing.
+   */
+  getListNodeIds(table: string, pk: string, field: string): HLC[] {
+    const fs = this.state.get(table)?.get(pk)?.fields[field];
+    if (!fs?.list_state) return [];
+    return listNodeIds(fs.list_state);
+  }
+
+  // --- Text (collaborative rich text) ---
+
+  /** Current text field state (creating the accessor state lazily). */
+  private textStateOf(table: string, pk: string, field: string): TextState {
+    const doc = this.ensureDocument(table, pk);
+    let fs = doc.fields[field];
+    if (!fs || fs.type !== "text") {
+      fs = {
+        type: "text",
+        hlc: { ts: 0, c: 0, node: "" },
+        node_id: this.nodeID,
+        text_state: newTextState(),
+      };
+      doc.fields[field] = fs;
+    }
+    fs.text_state ??= newTextState();
+    return fs.text_state;
+  }
+
+  private emitTextChange(
+    table: string,
+    pk: string,
+    field: string,
+    hlc: HLC,
+    op: TextOperation,
+    previousState: FieldState | null
+  ): ChangeRecord {
+    const change: ChangeRecord = {
+      table,
+      pk,
+      field,
+      crdt_type: "text",
+      hlc,
+      node_id: this.nodeID,
+      text_op: op,
+    };
+    const doc = this.ensureDocument(table, pk);
+    const fs = doc.fields[field];
+    if (fs) {
+      fs.hlc = hlc;
+      fs.node_id = this.nodeID;
+    }
+    this.undoManager.record(change, previousState);
+    this.pending.push(change);
+    this.persistDocument(table, pk);
+    this.persistPending();
+    this.notifyListeners(table, pk);
+    return change;
+  }
+
+  /**
+   * Insert text at a visible character index. Returns the ChangeRecord
+   * for push. Sequential typing coalesces into one origin span.
+   */
+  insertText(
+    table: string,
+    pk: string,
+    field: string,
+    index: number,
+    content: string
+  ): ChangeRecord {
+    const hlc = this.clock.now();
+    const state = this.textStateOf(table, pk, field);
+    const previousState = this.captureFieldState(table, pk, field);
+    const ref = index > 0 ? textRefAt(state, index - 1) : null;
+    if (index > 0 && !ref) {
+      throw new Error(`crdt: no text character at index ${index - 1}`);
+    }
+    const op = textInsert(state, ref, content, this.nodeID, hlc);
+    return this.emitTextChange(table, pk, field, hlc, op, previousState);
+  }
+
+  /** Delete `length` visible characters starting at index. */
+  deleteText(
+    table: string,
+    pk: string,
+    field: string,
+    index: number,
+    length: number
+  ): ChangeRecord {
+    const hlc = this.clock.now();
+    const state = this.textStateOf(table, pk, field);
+    const previousState = this.captureFieldState(table, pk, field);
+    const ref = textRefAt(state, index);
+    if (!ref) throw new Error(`crdt: no text character at index ${index}`);
+    const op = textDeleteOp(state, ref, length);
+    return this.emitTextChange(table, pk, field, hlc, op, previousState);
+  }
+
+  /**
+   * Apply formatting attributes to `length` visible characters starting
+   * at index. A null attribute value clears the attribute.
+   */
+  formatText(
+    table: string,
+    pk: string,
+    field: string,
+    index: number,
+    length: number,
+    attrs: Record<string, unknown>
+  ): ChangeRecord {
+    const hlc = this.clock.now();
+    const state = this.textStateOf(table, pk, field);
+    const previousState = this.captureFieldState(table, pk, field);
+    const ref = textRefAt(state, index);
+    if (!ref) throw new Error(`crdt: no text character at index ${index}`);
+    const op = textFormat(state, ref, length, attrs, this.nodeID, hlc);
+    return this.emitTextChange(table, pk, field, hlc, op, previousState);
+  }
+
+  /** Visible text of a text field ("" when absent). */
+  getText(table: string, pk: string, field: string): string {
+    const fs = this.state.get(table)?.get(pk)?.fields[field];
+    if (!fs?.text_state) return "";
+    return textValue(fs.text_state);
+  }
+
+  /** Quill-style attribute-run segments of a text field. */
+  getTextDelta(table: string, pk: string, field: string): TextDeltaSegment[] {
+    const fs = this.state.get(table)?.get(pk)?.fields[field];
+    if (!fs?.text_state) return [];
+    return textDelta(fs.text_state);
+  }
+
+  /**
+   * Stable address of the character at a visible index — a relative
+   * position that survives concurrent edits (cursor anchoring).
+   */
+  getTextRefAt(table: string, pk: string, field: string, index: number): TextRef | null {
+    const fs = this.state.get(table)?.get(pk)?.fields[field];
+    if (!fs?.text_state) return null;
+    return textRefAt(fs.text_state, index);
+  }
+
+  /** Current visible index of a stable text address. */
+  getTextIndexOf(table: string, pk: string, field: string, ref: TextRef): number | null {
+    const fs = this.state.get(table)?.get(pk)?.fields[field];
+    if (!fs?.text_state) return null;
+    return textIndexOf(fs.text_state, ref);
   }
 
   /**
@@ -831,6 +1027,7 @@ export class CRDTStore {
       for (const [pk, doc] of docs) {
         // Only set if no in-memory mutation happened during hydration.
         if (!tableMap.has(pk)) {
+          normalizeHLCKeys(doc);
           const hydrated = this.plugins.dispatchAfterHydrate(table, pk, doc);
           tableMap.set(pk, hydrated);
         }
@@ -877,8 +1074,25 @@ export class CRDTStore {
     return JSON.parse(JSON.stringify(fs)) as FieldState;
   }
 
+  /** This node's current cumulative counter totals for a field. */
+  private counterTotals(
+    table: string,
+    pk: string,
+    field: string
+  ): { inc: number; dec: number } {
+    const cs = this.state.get(table)?.get(pk)?.fields[field]?.counter_state;
+    return {
+      inc: cs?.inc[this.nodeID] ?? 0,
+      dec: cs?.dec[this.nodeID] ?? 0,
+    };
+  }
+
   private applyChangeInternal(change: ChangeRecord): void {
-    if (change.tombstone) {
+    // A tombstoned document-type change carrying a value is a PATH delete
+    // inside the nested document, not a record delete.
+    const isDocPathDelete =
+      change.crdt_type === "document" && change.value !== undefined;
+    if (change.tombstone && !isDocPathDelete) {
       const doc = this.ensureDocument(change.table, change.pk);
       doc.tombstone = true;
       doc.tombstone_hlc = change.hlc;

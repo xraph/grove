@@ -1,7 +1,9 @@
 package crdt
 
 import (
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -174,4 +176,61 @@ func (c *HybridClock) Update(remote HLC) {
 			NodeID:    c.nodeID,
 		}
 	}
+}
+
+// hlcWire is the JSON shape of an HLC. Timestamp travels as a DECIMAL
+// STRING: nanosecond int64s exceed JavaScript's 2^53 safe-integer range,
+// so a numeric ts silently rounds in JS clients — corrupting recomputed
+// map keys (origin/tag/node identity) and clock comparisons. Numbers are
+// still accepted on read for states persisted before string encoding.
+type hlcWire struct {
+	Timestamp json.RawMessage `json:"ts"`
+	Counter   uint32          `json:"c"`
+	NodeID    string          `json:"node"`
+}
+
+// MarshalJSON implements json.Marshaler: ts as an exact decimal string.
+func (h HLC) MarshalJSON() ([]byte, error) {
+	ts, err := json.Marshal(strconv.FormatInt(h.Timestamp, 10))
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(hlcWire{Timestamp: ts, Counter: h.Counter, NodeID: h.NodeID})
+}
+
+// UnmarshalJSON implements json.Unmarshaler: ts as string or legacy number.
+func (h *HLC) UnmarshalJSON(data []byte) error {
+	var w hlcWire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	h.Counter = w.Counter
+	h.NodeID = w.NodeID
+	h.Timestamp = 0
+	if len(w.Timestamp) == 0 {
+		return nil
+	}
+	raw := string(w.Timestamp)
+	if len(raw) >= 2 && raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(w.Timestamp, &s); err != nil {
+			return err
+		}
+		if s == "" {
+			return nil
+		}
+		ts, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return fmt.Errorf("crdt: hlc ts %q: %w", s, err)
+		}
+		h.Timestamp = ts
+		return nil
+	}
+	// Legacy numeric encoding (may itself be a float in odd producers).
+	var num float64
+	if err := json.Unmarshal(w.Timestamp, &num); err != nil {
+		return err
+	}
+	h.Timestamp = int64(num)
+	return nil
 }

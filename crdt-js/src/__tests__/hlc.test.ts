@@ -180,13 +180,13 @@ describe("HybridClock", () => {
       time = 2000;
       const h3 = clock.now();
       expect(h3.c).toBe(0);
-      expect(h3.ts).toBe(2000 * 1_000_000);
+      expect(Number(h3.ts)).toBe(2000 * 1_000_000);
     });
 
     it("converts milliseconds to nanoseconds", () => {
       const clock = new HybridClock("node-1", { nowFn: () => 1000 });
       const h = clock.now();
-      expect(h.ts).toBe(1000 * 1_000_000);
+      expect(Number(h.ts)).toBe(1000 * 1_000_000);
     });
   });
 
@@ -253,7 +253,7 @@ describe("HybridClock", () => {
       const local = clock.now();
 
       const remote: HLC = {
-        ts: local.ts + 1_000_000,
+        ts: Number(local.ts) + 1_000_000,
         c: 5,
         node: "node-2",
       };
@@ -281,7 +281,7 @@ describe("HybridClock", () => {
       const after = clock.now();
       const maxAllowedNs = (fixedTime + 1000) * 1_000_000;
       // The timestamp should be clamped to maxDrift
-      expect(after.ts).toBeLessThanOrEqual(maxAllowedNs);
+      expect(Number(after.ts)).toBeLessThanOrEqual(maxAllowedNs);
     });
 
     it("handles remote with higher counter at same timestamp", () => {
