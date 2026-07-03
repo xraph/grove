@@ -21,8 +21,8 @@ func TestMergeText_SplitVsUnsplit(t *testing.T) {
 	// Both replicas share "hello"; one deletes "ll" (splitting the origin),
 	// the other formats the whole word. Merge must reconcile boundaries.
 	base, ops := typeText(t, "a", 1, "hello")
-	r1 := replay(t, ops, metasFor("a", 1, len(ops)))
-	r2 := replay(t, ops, metasFor("a", 1, len(ops)))
+	r1 := replay(t, ops, metasFor("a", len(ops)))
+	r2 := replay(t, ops, metasFor("a", len(ops)))
 	_ = base
 
 	ref1, _ := r1.RefAt(2)
@@ -52,8 +52,8 @@ func TestMergeText_SplitVsUnsplit(t *testing.T) {
 
 func TestMergeText_TombstoneOR(t *testing.T) {
 	_, ops := typeText(t, "a", 1, "abc")
-	r1 := replay(t, ops, metasFor("a", 1, len(ops)))
-	r2 := replay(t, ops, metasFor("a", 1, len(ops)))
+	r1 := replay(t, ops, metasFor("a", len(ops)))
+	r2 := replay(t, ops, metasFor("a", len(ops)))
 
 	ref, _ := r1.RefAt(0)
 	if _, err := r1.Delete(ref, 1); err != nil {
@@ -159,7 +159,7 @@ func TestText_ConvergenceRandomOps(t *testing.T) {
 		rng := rand.New(rand.NewSource(seed))
 
 		base, baseOps := typeText(t, "base", 1, "the quick brown fox")
-		baseMetas := metasFor("base", 1, len(baseOps))
+		baseMetas := metasFor("base", len(baseOps))
 		_ = base
 
 		replicas := make([]*TextState, 3)

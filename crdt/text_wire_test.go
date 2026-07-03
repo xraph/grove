@@ -16,7 +16,7 @@ func TestApplyChange_TextOps(t *testing.T) {
 
 	var fs *FieldState
 	fs = mustApply(t, nil, &ChangeRecord{
-		CRDTType: TypeText, HLC: applyHLC(10, 0, "a"), NodeID: "a", TextOp: insOp,
+		CRDTType: TypeText, HLC: applyHLC(10, "a"), NodeID: "a", TextOp: insOp,
 	})
 	txt := TextFromFieldState(fs)
 	if txt.Value() != "hello" {
@@ -33,7 +33,7 @@ func TestApplyChange_TextOps(t *testing.T) {
 		t.Fatal(err)
 	}
 	fs = mustApply(t, fs, &ChangeRecord{
-		CRDTType: TypeText, HLC: applyHLC(20, 0, "b"), NodeID: "b", TextOp: insOp2,
+		CRDTType: TypeText, HLC: applyHLC(20, "b"), NodeID: "b", TextOp: insOp2,
 	})
 	if got := TextFromFieldState(fs).Value(); got != "hello world" {
 		t.Fatalf("value = %q", got)
@@ -51,7 +51,7 @@ func TestApplyChange_TextOps(t *testing.T) {
 
 func TestMergeField_Text(t *testing.T) {
 	a, _ := typeText(t, "a", 1, "shared")
-	bOps := metasFor("a", 1, 1)
+	bOps := metasFor("a", 1)
 	_ = bOps
 	b := NewTextState()
 	if _, err := b.Insert(TextRef{}, "other", "b", HLC{Timestamp: 100, NodeID: "b"}); err != nil {

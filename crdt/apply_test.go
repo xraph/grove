@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-func applyHLC(ts int64, c uint32, node string) HLC {
-	return HLC{Timestamp: ts, Counter: c, NodeID: node}
+func applyHLC(ts int64, node string) HLC {
+	return HLC{Timestamp: ts, NodeID: node}
 }
 
 func mustApply(t *testing.T, local *FieldState, c *ChangeRecord) *FieldState {
@@ -23,7 +23,7 @@ func mustApply(t *testing.T, local *FieldState, c *ChangeRecord) *FieldState {
 func TestApplyChange_NilLocal_LWW(t *testing.T) {
 	c := &ChangeRecord{
 		CRDTType: TypeLWW,
-		HLC:      applyHLC(10, 0, "a"),
+		HLC:      applyHLC(10, "a"),
 		NodeID:   "a",
 		Value:    json.RawMessage(`"hello"`),
 	}
@@ -34,14 +34,14 @@ func TestApplyChange_NilLocal_LWW(t *testing.T) {
 }
 
 func TestApplyChange_LWW_HigherHLCWins(t *testing.T) {
-	local := &FieldState{Type: TypeLWW, HLC: applyHLC(10, 0, "a"), NodeID: "a", Value: json.RawMessage(`"old"`)}
-	c := &ChangeRecord{CRDTType: TypeLWW, HLC: applyHLC(20, 0, "b"), NodeID: "b", Value: json.RawMessage(`"new"`)}
+	local := &FieldState{Type: TypeLWW, HLC: applyHLC(10, "a"), NodeID: "a", Value: json.RawMessage(`"old"`)}
+	c := &ChangeRecord{CRDTType: TypeLWW, HLC: applyHLC(20, "b"), NodeID: "b", Value: json.RawMessage(`"new"`)}
 	out := mustApply(t, local, c)
 	if string(out.Value) != `"new"` {
 		t.Fatalf("want new, got %s", out.Value)
 	}
 	// Stale write loses.
-	stale := &ChangeRecord{CRDTType: TypeLWW, HLC: applyHLC(5, 0, "c"), NodeID: "c", Value: json.RawMessage(`"stale"`)}
+	stale := &ChangeRecord{CRDTType: TypeLWW, HLC: applyHLC(5, "c"), NodeID: "c", Value: json.RawMessage(`"stale"`)}
 	out = mustApply(t, out, stale)
 	if string(out.Value) != `"new"` {
 		t.Fatalf("stale write should lose, got %s", out.Value)
@@ -51,13 +51,13 @@ func TestApplyChange_LWW_HigherHLCWins(t *testing.T) {
 func TestApplyChange_CounterDelta(t *testing.T) {
 	c1 := &ChangeRecord{
 		CRDTType:     TypeCounter,
-		HLC:          applyHLC(10, 0, "a"),
+		HLC:          applyHLC(10, "a"),
 		NodeID:       "a",
 		CounterDelta: &CounterDelta{Increment: 5, Decrement: 1},
 	}
 	c2 := &ChangeRecord{
 		CRDTType:     TypeCounter,
-		HLC:          applyHLC(11, 0, "b"),
+		HLC:          applyHLC(11, "b"),
 		NodeID:       "b",
 		CounterDelta: &CounterDelta{Increment: 3},
 	}
@@ -77,7 +77,7 @@ func TestApplyChange_CounterDelta(t *testing.T) {
 func TestApplyChange_SetAdd(t *testing.T) {
 	c := &ChangeRecord{
 		CRDTType: TypeSet,
-		HLC:      applyHLC(10, 0, "a"),
+		HLC:      applyHLC(10, "a"),
 		NodeID:   "a",
 		SetOp:    &SetOperation{Op: SetOpAdd, Elements: json.RawMessage(`["x","y"]`)},
 	}
@@ -90,16 +90,16 @@ func TestApplyChange_SetAdd(t *testing.T) {
 
 func TestApplyChange_SetRemove_ExactTags(t *testing.T) {
 	add := &ChangeRecord{
-		CRDTType: TypeSet, HLC: applyHLC(10, 0, "a"), NodeID: "a",
+		CRDTType: TypeSet, HLC: applyHLC(10, "a"), NodeID: "a",
 		SetOp: &SetOperation{Op: SetOpAdd, Elements: json.RawMessage(`["x"]`)},
 	}
 	out := mustApply(t, nil, add)
 	rm := &ChangeRecord{
-		CRDTType: TypeSet, HLC: applyHLC(20, 0, "b"), NodeID: "b",
+		CRDTType: TypeSet, HLC: applyHLC(20, "b"), NodeID: "b",
 		SetOp: &SetOperation{
 			Op:       SetOpRemove,
 			Elements: json.RawMessage(`["x"]`),
-			Tags:     []Tag{{NodeID: "a", HLC: applyHLC(10, 0, "a")}},
+			Tags:     []Tag{{NodeID: "a", HLC: applyHLC(10, "a")}},
 		},
 	}
 	out = mustApply(t, out, rm)
@@ -113,19 +113,19 @@ func TestApplyChange_SetRemove_AddWins(t *testing.T) {
 	// Remove names only the tag it observed; a concurrent add with a
 	// different tag survives (add-wins).
 	addA := &ChangeRecord{
-		CRDTType: TypeSet, HLC: applyHLC(10, 0, "a"), NodeID: "a",
+		CRDTType: TypeSet, HLC: applyHLC(10, "a"), NodeID: "a",
 		SetOp: &SetOperation{Op: SetOpAdd, Elements: json.RawMessage(`["x"]`)},
 	}
 	addB := &ChangeRecord{
-		CRDTType: TypeSet, HLC: applyHLC(25, 0, "b"), NodeID: "b",
+		CRDTType: TypeSet, HLC: applyHLC(25, "b"), NodeID: "b",
 		SetOp: &SetOperation{Op: SetOpAdd, Elements: json.RawMessage(`["x"]`)},
 	}
 	rmA := &ChangeRecord{
-		CRDTType: TypeSet, HLC: applyHLC(20, 0, "c"), NodeID: "c",
+		CRDTType: TypeSet, HLC: applyHLC(20, "c"), NodeID: "c",
 		SetOp: &SetOperation{
 			Op:       SetOpRemove,
 			Elements: json.RawMessage(`["x"]`),
-			Tags:     []Tag{{NodeID: "a", HLC: applyHLC(10, 0, "a")}},
+			Tags:     []Tag{{NodeID: "a", HLC: applyHLC(10, "a")}},
 		},
 	}
 	out := mustApply(t, nil, addA)
@@ -142,15 +142,15 @@ func TestApplyChange_SetRemove_LegacyNoTags(t *testing.T) {
 	// Legacy removes (no tags, as crdt-js 0.0.1 emits) remove every local
 	// tag older than the remove's HLC — observed-remove approximation.
 	add := &ChangeRecord{
-		CRDTType: TypeSet, HLC: applyHLC(10, 0, "a"), NodeID: "a",
+		CRDTType: TypeSet, HLC: applyHLC(10, "a"), NodeID: "a",
 		SetOp: &SetOperation{Op: SetOpAdd, Elements: json.RawMessage(`["x"]`)},
 	}
 	newer := &ChangeRecord{
-		CRDTType: TypeSet, HLC: applyHLC(30, 0, "b"), NodeID: "b",
+		CRDTType: TypeSet, HLC: applyHLC(30, "b"), NodeID: "b",
 		SetOp: &SetOperation{Op: SetOpAdd, Elements: json.RawMessage(`["x"]`)},
 	}
 	rm := &ChangeRecord{
-		CRDTType: TypeSet, HLC: applyHLC(20, 0, "c"), NodeID: "c",
+		CRDTType: TypeSet, HLC: applyHLC(20, "c"), NodeID: "c",
 		SetOp: &SetOperation{Op: SetOpRemove, Elements: json.RawMessage(`["x"]`)},
 	}
 	out := mustApply(t, nil, add)
@@ -172,8 +172,8 @@ func TestApplyChange_SetRemove_LegacyNoTags(t *testing.T) {
 }
 
 func TestApplyChange_ListInsertDeleteMove(t *testing.T) {
-	id1 := applyHLC(10, 0, "a")
-	id2 := applyHLC(11, 0, "a")
+	id1 := applyHLC(10, "a")
+	id2 := applyHLC(11, "a")
 	ins1 := &ChangeRecord{
 		CRDTType: TypeList, HLC: id1, NodeID: "a",
 		ListOp: &ListOp{Op: ListOpInsert, NodeID: id1, Value: json.RawMessage(`"first"`)},
@@ -191,7 +191,7 @@ func TestApplyChange_ListInsertDeleteMove(t *testing.T) {
 	}
 
 	del := &ChangeRecord{
-		CRDTType: TypeList, HLC: applyHLC(12, 0, "b"), NodeID: "b",
+		CRDTType: TypeList, HLC: applyHLC(12, "b"), NodeID: "b",
 		ListOp: &ListOp{Op: ListOpDelete, NodeID: id1},
 	}
 	out = mustApply(t, out, del)
@@ -202,7 +202,7 @@ func TestApplyChange_ListInsertDeleteMove(t *testing.T) {
 	}
 
 	// Move second to head: tombstone + re-insert under zero parent.
-	mvID := applyHLC(13, 0, "b")
+	mvID := applyHLC(13, "b")
 	mv := &ChangeRecord{
 		CRDTType: TypeList, HLC: mvID, NodeID: "b",
 		ListOp: &ListOp{Op: ListOpMove, NodeID: id2, ParentID: HLC{}, Value: json.RawMessage(`"second"`)},
@@ -217,9 +217,9 @@ func TestApplyChange_ListInsertDeleteMove(t *testing.T) {
 
 func TestApplyChange_ListDelete_UnseenNodeKeepsTombstone(t *testing.T) {
 	// A delete that arrives before its insert must not be lost.
-	id := applyHLC(10, 0, "a")
+	id := applyHLC(10, "a")
 	del := &ChangeRecord{
-		CRDTType: TypeList, HLC: applyHLC(12, 0, "b"), NodeID: "b",
+		CRDTType: TypeList, HLC: applyHLC(12, "b"), NodeID: "b",
 		ListOp: &ListOp{Op: ListOpDelete, NodeID: id},
 	}
 	ins := &ChangeRecord{
@@ -236,11 +236,11 @@ func TestApplyChange_ListDelete_UnseenNodeKeepsTombstone(t *testing.T) {
 
 func TestApplyChange_DocumentPathOps(t *testing.T) {
 	set := &ChangeRecord{
-		CRDTType: TypeDocument, HLC: applyHLC(10, 0, "a"), NodeID: "a",
+		CRDTType: TypeDocument, HLC: applyHLC(10, "a"), NodeID: "a",
 		Value: json.RawMessage(`{"path":"title","value":"Hello"}`),
 	}
 	nested := &ChangeRecord{
-		CRDTType: TypeDocument, HLC: applyHLC(11, 0, "a"), NodeID: "a",
+		CRDTType: TypeDocument, HLC: applyHLC(11, "a"), NodeID: "a",
 		Value: json.RawMessage(`{"path":"meta.author","value":"rex"}`),
 	}
 	out := mustApply(t, nil, set)
@@ -257,7 +257,7 @@ func TestApplyChange_DocumentPathOps(t *testing.T) {
 
 	// Path delete via tombstoned record.
 	del := &ChangeRecord{
-		CRDTType: TypeDocument, HLC: applyHLC(12, 0, "b"), NodeID: "b",
+		CRDTType: TypeDocument, HLC: applyHLC(12, "b"), NodeID: "b",
 		Tombstone: true,
 		Value:     json.RawMessage(`{"path":"title"}`),
 	}
@@ -272,18 +272,18 @@ func TestApplyChange_DocumentPathOps(t *testing.T) {
 func TestApplyChange_FullStateCarrier(t *testing.T) {
 	// A change carrying a full FieldState merges state-based.
 	remoteSet := NewORSetState()
-	if err := remoteSet.Add("x", "a", applyHLC(10, 0, "a")); err != nil {
+	if err := remoteSet.Add("x", "a", applyHLC(10, "a")); err != nil {
 		t.Fatal(err)
 	}
-	if err := remoteSet.Add("y", "a", applyHLC(11, 0, "a")); err != nil {
+	if err := remoteSet.Add("y", "a", applyHLC(11, "a")); err != nil {
 		t.Fatal(err)
 	}
 	if err := remoteSet.Remove("x"); err != nil {
 		t.Fatal(err)
 	}
 	c := &ChangeRecord{
-		CRDTType: TypeSet, HLC: applyHLC(11, 0, "a"), NodeID: "a",
-		State: remoteSet.ToFieldState(applyHLC(11, 0, "a"), "a"),
+		CRDTType: TypeSet, HLC: applyHLC(11, "a"), NodeID: "a",
+		State: remoteSet.ToFieldState(applyHLC(11, "a"), "a"),
 	}
 	out := mustApply(t, nil, c)
 	set := SetFromFieldState(out)
@@ -294,8 +294,8 @@ func TestApplyChange_FullStateCarrier(t *testing.T) {
 }
 
 func TestApplyChange_TypeMismatch(t *testing.T) {
-	local := &FieldState{Type: TypeLWW, HLC: applyHLC(10, 0, "a"), NodeID: "a", Value: json.RawMessage(`1`)}
-	c := &ChangeRecord{CRDTType: TypeCounter, HLC: applyHLC(11, 0, "b"), NodeID: "b", CounterDelta: &CounterDelta{Increment: 1}}
+	local := &FieldState{Type: TypeLWW, HLC: applyHLC(10, "a"), NodeID: "a", Value: json.RawMessage(`1`)}
+	c := &ChangeRecord{CRDTType: TypeCounter, HLC: applyHLC(11, "b"), NodeID: "b", CounterDelta: &CounterDelta{Increment: 1}}
 	if _, err := ApplyChange(NewMergeEngine(), local, c); err == nil {
 		t.Fatal("want type-mismatch error")
 	}
@@ -313,7 +313,7 @@ func TestApplyChange_NilChange(t *testing.T) {
 func TestSyncer_InboundSetOp_Persisted(t *testing.T) {
 	var written []string
 	exec := &mockExecutor{
-		execFn: func(_ context.Context, query string, args ...any) (ExecResult, error) {
+		execFn: func(_ context.Context, _ string, args ...any) (ExecResult, error) {
 			for _, a := range args {
 				switch v := a.(type) {
 				case []byte:
@@ -332,12 +332,12 @@ func TestSyncer_InboundSetOp_Persisted(t *testing.T) {
 	rm := ChangeRecord{
 		Table: "notes", PK: "1", Field: "tags",
 		CRDTType: TypeSet,
-		HLC:      applyHLC(20, 0, "client"),
+		HLC:      applyHLC(20, "client"),
 		NodeID:   "client",
 		SetOp: &SetOperation{
 			Op:       SetOpRemove,
 			Elements: json.RawMessage(`["x"]`),
-			Tags:     []Tag{{NodeID: "a", HLC: applyHLC(10, 0, "a")}},
+			Tags:     []Tag{{NodeID: "a", HLC: applyHLC(10, "a")}},
 		},
 	}
 	if err := s.mergeRemoteChange(context.Background(), rm); err != nil {

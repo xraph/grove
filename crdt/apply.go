@@ -248,7 +248,7 @@ func applyDocumentChange(engine *MergeEngine, local *FieldState, c *ChangeRecord
 
 // pickNewer returns the HLC/node pair of whichever of local state or the
 // incoming change is newer — the merged field's authorship stamp.
-func pickNewer(local *FieldState, c *ChangeRecord) (HLC, string) {
+func pickNewer(local *FieldState, c *ChangeRecord) (hlc HLC, nodeID string) {
 	if local != nil && local.HLC.After(c.HLC) {
 		return local.HLC, local.NodeID
 	}

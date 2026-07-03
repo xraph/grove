@@ -335,4 +335,3 @@ func extractCounterDelta(cs *PNCounterState, nodeID string) *CounterDelta {
 		Decrement: cs.Decrements[nodeID],
 	}
 }
-

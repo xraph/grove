@@ -10,7 +10,7 @@ import (
 func typeText(t *testing.T, node string, startTS int64, chunks ...string) (*TextState, []*TextOp) {
 	t.Helper()
 	st := NewTextState()
-	var ops []*TextOp
+	ops := make([]*TextOp, 0, len(chunks))
 	ts := startTS
 	for _, chunk := range chunks {
 		ref := TextRef{}
@@ -48,10 +48,12 @@ type opMeta struct {
 	hlc  HLC
 }
 
-func metasFor(node string, startTS int64, n int) []opMeta {
+// metasFor reconstructs the per-op metadata typeText stamped (base
+// timestamp 1, one per chunk) so ops can be replayed onto a fresh state.
+func metasFor(node string, n int) []opMeta {
 	out := make([]opMeta, n)
 	for i := range out {
-		out[i] = opMeta{node: node, hlc: HLC{Timestamp: startTS + int64(i), NodeID: node}}
+		out[i] = opMeta{node: node, hlc: HLC{Timestamp: 1 + int64(i), NodeID: node}}
 	}
 	return out
 }
@@ -76,7 +78,7 @@ func TestText_TypingCoalesces(t *testing.T) {
 
 func TestText_ReplayMatchesLocal(t *testing.T) {
 	st, ops := typeText(t, "a", 1, "he", "llo", " world")
-	remote := replay(t, ops, metasFor("a", 1, len(ops)))
+	remote := replay(t, ops, metasFor("a", len(ops)))
 	if remote.Value() != st.Value() {
 		t.Fatalf("replay %q != local %q", remote.Value(), st.Value())
 	}
@@ -229,8 +231,8 @@ func TestText_IndexOfTombstonedCollapses(t *testing.T) {
 func TestText_ConcurrentInsertSamePoint_Convergent(t *testing.T) {
 	base, baseOps := typeText(t, "a", 1, "ab")
 	// Two replicas insert at the same point (after 'a') concurrently.
-	r1 := replay(t, baseOps, metasFor("a", 1, len(baseOps)))
-	r2 := replay(t, baseOps, metasFor("a", 1, len(baseOps)))
+	r1 := replay(t, baseOps, metasFor("a", len(baseOps)))
+	r2 := replay(t, baseOps, metasFor("a", len(baseOps)))
 	ref, _ := base.RefAt(0)
 
 	op1, err := r1.Insert(ref, "X", "n1", HLC{Timestamp: 100, NodeID: "n1"})
