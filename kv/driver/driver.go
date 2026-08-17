@@ -157,3 +157,52 @@ type HashDriver interface {
 	// HLen returns the number of fields.
 	HLen(ctx context.Context, key string) (int64, error)
 }
+
+// ScriptDriver is an optional interface for drivers that run server-side
+// scripts.
+//
+// It exists for the compare-and-set a lease handoff needs: checking a
+// field and conditionally writing it has to be one round trip, or two
+// workers can both conclude they hold the same lease. CASDriver covers
+// whole-value conditions; this covers conditions on the contents.
+type ScriptDriver interface {
+	// Eval runs a script against the given keys and arguments.
+	//
+	// The result is whatever the script returned, in the driver's native
+	// representation: callers are expected to know the shape of the
+	// script they wrote.
+	Eval(ctx context.Context, script string, keys []string, args ...any) (any, error)
+	// EvalSHA runs a previously loaded script by digest, returning
+	// ErrScriptNotLoaded when the server has forgotten it.
+	EvalSHA(ctx context.Context, sha string, keys []string, args ...any) (any, error)
+	// ScriptLoad caches a script and returns its digest.
+	ScriptLoad(ctx context.Context, script string) (string, error)
+}
+
+// StreamMessage is one entry in a stream.
+type StreamMessage struct {
+	// ID orders the entry within its stream. Drivers assign it when the
+	// caller does not.
+	ID string
+	// Values are the entry's fields.
+	Values map[string][]byte
+}
+
+// StreamDriver is an optional interface for drivers with append-only
+// streams.
+//
+// A stream differs from Pub/Sub in the way that matters to a consumer: an
+// entry persists until it is deleted, so a subscriber that was not
+// connected when it was written can still read it. That is what makes a
+// stream usable for delivery and Pub/Sub only usable for notification.
+type StreamDriver interface {
+	// XAdd appends an entry and returns its assigned ID.
+	XAdd(ctx context.Context, stream string, values map[string][]byte) (string, error)
+	// XRange returns entries between start and stop inclusive, oldest
+	// first. Empty bounds mean unbounded; a count of zero means no limit.
+	XRange(ctx context.Context, stream, start, stop string, count int64) ([]StreamMessage, error)
+	// XDel removes entries by ID, returning how many were present.
+	XDel(ctx context.Context, stream string, ids ...string) (int64, error)
+	// XLen returns the number of entries in a stream.
+	XLen(ctx context.Context, stream string) (int64, error)
+}

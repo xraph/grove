@@ -50,6 +50,8 @@ func RunCollectionSuite(t *testing.T, drv driver.Driver) {
 	if store.SupportsHashes() {
 		t.Run("Hash", func(t *testing.T) { testHash(t, store) })
 	}
+
+	runScriptAndStreamSuite(t, store)
 }
 
 func testSortedSet(t *testing.T, store *kv.Store) {
@@ -210,4 +212,97 @@ func testHash(t *testing.T, store *kv.Store) {
 	removed, err := store.HDel(ctx, key, "one")
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), removed)
+}
+
+// runScriptAndStreamSuite is invoked by RunCollectionSuite for drivers
+// that support server-side scripts or streams.
+func runScriptAndStreamSuite(t *testing.T, store *kv.Store) {
+	t.Helper()
+
+	if store.SupportsScripts() {
+		t.Run("Script", func(t *testing.T) { testScript(t, store) })
+	}
+
+	if store.SupportsStreams() {
+		t.Run("Stream", func(t *testing.T) { testStream(t, store) })
+	}
+}
+
+// testScript covers the compare-and-set a lease handoff depends on: read
+// a value and conditionally write it, in one round trip.
+func testScript(t *testing.T, store *kv.Store) {
+	ctx := context.Background()
+	key := "kvtest:script:cas"
+
+	require.NoError(t, store.Delete(ctx, key))
+	require.NoError(t, store.SetRaw(ctx, key, []byte("owner-a")))
+
+	const casScript = `
+		if redis.call('GET', KEYS[1]) == ARGV[1] then
+			redis.call('SET', KEYS[1], ARGV[2])
+			return 1
+		end
+		return 0`
+
+	// The holder swaps successfully.
+	got, err := store.Eval(ctx, casScript, []string{key}, "owner-a", "owner-b")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), got)
+
+	// A stale holder does not, which is the whole point.
+	got, err = store.Eval(ctx, casScript, []string{key}, "owner-a", "owner-c")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), got)
+
+	raw, err := store.GetRaw(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("owner-b"), raw, "the losing swap must not have written")
+
+	sha, err := store.ScriptLoad(ctx, casScript)
+	require.NoError(t, err)
+	require.NotEmpty(t, sha)
+
+	got, err = store.EvalSHA(ctx, sha, []string{key}, "owner-b", "owner-d")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), got)
+}
+
+func testStream(t *testing.T, store *kv.Store) {
+	ctx := context.Background()
+	stream := "kvtest:stream:basic"
+
+	require.NoError(t, store.Delete(ctx, stream))
+
+	first, err := store.XAdd(ctx, stream, map[string][]byte{"event_id": []byte("one")})
+	require.NoError(t, err)
+	require.NotEmpty(t, first, "XAdd must return the assigned ID")
+
+	_, err = store.XAdd(ctx, stream, map[string][]byte{"event_id": []byte("two")})
+	require.NoError(t, err)
+
+	length, err := store.XLen(ctx, stream)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), length)
+
+	// Empty bounds mean the whole stream, so a caller never has to know
+	// how this driver spells its sentinels.
+	msgs, err := store.XRange(ctx, stream, "", "", 0)
+	require.NoError(t, err)
+	require.Len(t, msgs, 2)
+	assert.Equal(t, []byte("one"), msgs[0].Values["event_id"],
+		"entries come back oldest first")
+
+	limited, err := store.XRange(ctx, stream, "", "", 1)
+	require.NoError(t, err)
+	assert.Len(t, limited, 1)
+
+	removed, err := store.XDel(ctx, stream, first)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), removed)
+
+	// An entry survives until deleted, which is what separates a stream
+	// from Pub/Sub: nothing had to be listening.
+	after, err := store.XLen(ctx, stream)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), after)
 }

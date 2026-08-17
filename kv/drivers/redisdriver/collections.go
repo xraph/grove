@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/redis/go-redis/v9"
 
@@ -357,4 +358,153 @@ func (db *RedisDB) Subscribe(ctx context.Context, channel string, handler func(m
 	}()
 
 	return nil
+}
+
+// ── Scripts ───────────────────────────────────────────────────────
+
+var _ driver.ScriptDriver = (*RedisDB)(nil)
+
+// Eval runs a script against the given keys and arguments.
+func (db *RedisDB) Eval(ctx context.Context, script string, keys []string, args ...any) (any, error) {
+	out, err := db.client.Eval(ctx, script, keys, args...).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			// A script returning nothing is a result, not a failure.
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("redisdriver: eval: %w", err)
+	}
+
+	return out, nil
+}
+
+// EvalSHA runs a loaded script by digest.
+func (db *RedisDB) EvalSHA(ctx context.Context, sha string, keys []string, args ...any) (any, error) {
+	out, err := db.client.EvalSha(ctx, sha, keys, args...).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, nil
+		}
+
+		// Redis reports a forgotten script as a NOSCRIPT error string.
+		// Translating it lets callers reload and retry instead of parsing
+		// server text themselves.
+		if strings.Contains(strings.ToUpper(err.Error()), "NOSCRIPT") {
+			return nil, kv.ErrScriptNotLoaded
+		}
+
+		return nil, fmt.Errorf("redisdriver: evalsha: %w", err)
+	}
+
+	return out, nil
+}
+
+// ScriptLoad caches a script and returns its digest.
+func (db *RedisDB) ScriptLoad(ctx context.Context, script string) (string, error) {
+	sha, err := db.client.ScriptLoad(ctx, script).Result()
+	if err != nil {
+		return "", fmt.Errorf("redisdriver: script load: %w", err)
+	}
+
+	return sha, nil
+}
+
+// ── Streams ───────────────────────────────────────────────────────
+
+var _ driver.StreamDriver = (*RedisDB)(nil)
+
+// XAdd appends an entry to a stream and returns its assigned ID.
+func (db *RedisDB) XAdd(ctx context.Context, stream string, values map[string][]byte) (string, error) {
+	fields := make(map[string]any, len(values))
+	for f, v := range values {
+		fields[f] = v
+	}
+
+	id, err := db.client.XAdd(ctx, &redis.XAddArgs{
+		Stream: stream,
+		Values: fields,
+	}).Result()
+	if err != nil {
+		return "", fmt.Errorf("redisdriver: xadd %q: %w", stream, err)
+	}
+
+	return id, nil
+}
+
+// XRange returns entries between start and stop inclusive, oldest first.
+//
+// Empty bounds become the stream's own minimum and maximum sentinels, so
+// a caller wanting everything passes two empty strings rather than having
+// to know Redis spells them "-" and "+".
+func (db *RedisDB) XRange(
+	ctx context.Context, stream, start, stop string, count int64,
+) ([]driver.StreamMessage, error) {
+	if start == "" {
+		start = "-"
+	}
+
+	if stop == "" {
+		stop = "+"
+	}
+
+	var (
+		msgs []redis.XMessage
+		err  error
+	)
+
+	if count > 0 {
+		msgs, err = db.client.XRangeN(ctx, stream, start, stop, count).Result()
+	} else {
+		msgs, err = db.client.XRange(ctx, stream, start, stop).Result()
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("redisdriver: xrange %q: %w", stream, err)
+	}
+
+	out := make([]driver.StreamMessage, 0, len(msgs))
+
+	for _, m := range msgs {
+		values := make(map[string][]byte, len(m.Values))
+
+		for f, v := range m.Values {
+			switch typed := v.(type) {
+			case string:
+				values[f] = []byte(typed)
+			case []byte:
+				values[f] = typed
+			default:
+				values[f] = []byte(fmt.Sprint(typed))
+			}
+		}
+
+		out = append(out, driver.StreamMessage{ID: m.ID, Values: values})
+	}
+
+	return out, nil
+}
+
+// XDel removes entries from a stream by ID.
+func (db *RedisDB) XDel(ctx context.Context, stream string, ids ...string) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	n, err := db.client.XDel(ctx, stream, ids...).Result()
+	if err != nil {
+		return 0, fmt.Errorf("redisdriver: xdel %q: %w", stream, err)
+	}
+
+	return n, nil
+}
+
+// XLen returns the number of entries in a stream.
+func (db *RedisDB) XLen(ctx context.Context, stream string) (int64, error) {
+	n, err := db.client.XLen(ctx, stream).Result()
+	if err != nil {
+		return 0, fmt.Errorf("redisdriver: xlen %q: %w", stream, err)
+	}
+
+	return n, nil
 }

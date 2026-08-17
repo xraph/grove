@@ -13,6 +13,11 @@ var (
 	// ErrStoreClosed is returned when an operation is attempted on a closed store.
 	ErrStoreClosed = errors.New("kv: store has been closed")
 
+	// ErrScriptNotLoaded is returned when EvalSHA names a digest the
+	// server no longer has cached. Callers recover by loading the script
+	// again and retrying; a script cache is not durable across restarts.
+	ErrScriptNotLoaded = errors.New("kv: script not loaded")
+
 	// ErrNotSupported is returned when a driver does not support the requested operation.
 	ErrNotSupported = errors.New("kv: operation not supported by driver")
 

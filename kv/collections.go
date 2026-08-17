@@ -313,3 +313,125 @@ func (s *Store) Subscribe(ctx context.Context, channel string, handler func(msg 
 
 	return drv.Subscribe(ctx, channel, handler)
 }
+
+// ── Scripts ───────────────────────────────────────────────────────
+
+// SupportsScripts reports whether the driver runs server-side scripts.
+func (s *Store) SupportsScripts() bool {
+	_, ok := s.drv.(driver.ScriptDriver)
+
+	return ok
+}
+
+// Eval runs a script against the given keys and arguments.
+func (s *Store) Eval(ctx context.Context, script string, keys []string, args ...any) (any, error) {
+	if err := s.checkClosed(); err != nil {
+		return nil, err
+	}
+
+	drv, ok := s.drv.(driver.ScriptDriver)
+	if !ok {
+		return nil, ErrNotSupported
+	}
+
+	return drv.Eval(ctx, script, keys, args...)
+}
+
+// EvalSHA runs a loaded script by digest.
+//
+// It returns ErrScriptNotLoaded when the server has dropped the script,
+// which happens across restarts: callers reload and retry rather than
+// treating it as a failure.
+func (s *Store) EvalSHA(ctx context.Context, sha string, keys []string, args ...any) (any, error) {
+	if err := s.checkClosed(); err != nil {
+		return nil, err
+	}
+
+	drv, ok := s.drv.(driver.ScriptDriver)
+	if !ok {
+		return nil, ErrNotSupported
+	}
+
+	return drv.EvalSHA(ctx, sha, keys, args...)
+}
+
+// ScriptLoad caches a script and returns its digest.
+func (s *Store) ScriptLoad(ctx context.Context, script string) (string, error) {
+	if err := s.checkClosed(); err != nil {
+		return "", err
+	}
+
+	drv, ok := s.drv.(driver.ScriptDriver)
+	if !ok {
+		return "", ErrNotSupported
+	}
+
+	return drv.ScriptLoad(ctx, script)
+}
+
+// ── Streams ───────────────────────────────────────────────────────
+
+// SupportsStreams reports whether the driver has append-only streams.
+func (s *Store) SupportsStreams() bool {
+	_, ok := s.drv.(driver.StreamDriver)
+
+	return ok
+}
+
+// XAdd appends an entry to a stream and returns its assigned ID.
+func (s *Store) XAdd(ctx context.Context, stream string, values map[string][]byte) (string, error) {
+	if err := s.checkClosed(); err != nil {
+		return "", err
+	}
+
+	drv, ok := s.drv.(driver.StreamDriver)
+	if !ok {
+		return "", ErrNotSupported
+	}
+
+	return drv.XAdd(ctx, stream, values)
+}
+
+// XRange returns entries between start and stop inclusive, oldest first.
+func (s *Store) XRange(
+	ctx context.Context, stream, start, stop string, count int64,
+) ([]driver.StreamMessage, error) {
+	if err := s.checkClosed(); err != nil {
+		return nil, err
+	}
+
+	drv, ok := s.drv.(driver.StreamDriver)
+	if !ok {
+		return nil, ErrNotSupported
+	}
+
+	return drv.XRange(ctx, stream, start, stop, count)
+}
+
+// XDel removes entries from a stream by ID.
+func (s *Store) XDel(ctx context.Context, stream string, ids ...string) (int64, error) {
+	if err := s.checkClosed(); err != nil {
+		return 0, err
+	}
+
+	drv, ok := s.drv.(driver.StreamDriver)
+	if !ok {
+		return 0, ErrNotSupported
+	}
+
+	return drv.XDel(ctx, stream, ids...)
+}
+
+// XLen returns the number of entries in a stream.
+func (s *Store) XLen(ctx context.Context, stream string) (int64, error) {
+	if err := s.checkClosed(); err != nil {
+		return 0, err
+	}
+
+	drv, ok := s.drv.(driver.StreamDriver)
+	if !ok {
+		return 0, ErrNotSupported
+	}
+
+	return drv.XLen(ctx, stream)
+}
