@@ -3,8 +3,35 @@ package kv
 import (
 	"context"
 
+	"github.com/xraph/grove/hook"
 	"github.com/xraph/grove/kv/driver"
 )
+
+// observe runs the hook engine around one collection command.
+//
+// The scalar commands in store.go have always done this; collections did
+// not, which meant metrics, tracing, and policy middleware saw the plain
+// key reads around a queue but never the queue itself. keys is what the
+// command touches, so a hook can account work by key rather than only by
+// call.
+func (s *Store) observe(ctx context.Context, op hook.Operation, keys []string, fn func() error) error {
+	qc := newCommandContext(op, keys, nil)
+
+	result, err := s.hooks.RunPreQuery(ctx, qc)
+	if err != nil {
+		return err
+	}
+
+	if result != nil && result.Decision == hook.Deny {
+		return ErrHookDenied
+	}
+
+	if err := fn(); err != nil {
+		return err
+	}
+
+	return s.hooks.RunPostQuery(ctx, qc, nil)
+}
 
 // Collection accessors.
 //
@@ -52,7 +79,16 @@ func (s *Store) ZAdd(ctx context.Context, key string, members ...driver.ScoredMe
 		return 0, ErrNotSupported
 	}
 
-	return drv.ZAdd(ctx, key, members...)
+	var out int64
+
+	err := s.observe(ctx, OpZAdd, []string{key}, func() error {
+		var cerr error
+		out, cerr = drv.ZAdd(ctx, key, members...)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // ZRange returns members within the spec, ordered by score.
@@ -66,7 +102,16 @@ func (s *Store) ZRange(ctx context.Context, key string, spec driver.RangeSpec) (
 		return nil, ErrNotSupported
 	}
 
-	return drv.ZRange(ctx, key, spec)
+	var out []string
+
+	err := s.observe(ctx, OpZRange, []string{key}, func() error {
+		var cerr error
+		out, cerr = drv.ZRange(ctx, key, spec)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // ZRangeWithScores is ZRange carrying each member's score.
@@ -82,7 +127,16 @@ func (s *Store) ZRangeWithScores(
 		return nil, ErrNotSupported
 	}
 
-	return drv.ZRangeWithScores(ctx, key, spec)
+	var out []driver.ScoredMember
+
+	err := s.observe(ctx, OpZRange, []string{key}, func() error {
+		var cerr error
+		out, cerr = drv.ZRangeWithScores(ctx, key, spec)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // ZRem removes members from a sorted set.
@@ -96,7 +150,16 @@ func (s *Store) ZRem(ctx context.Context, key string, members ...string) (int64,
 		return 0, ErrNotSupported
 	}
 
-	return drv.ZRem(ctx, key, members...)
+	var out int64
+
+	err := s.observe(ctx, OpZRem, []string{key}, func() error {
+		var cerr error
+		out, cerr = drv.ZRem(ctx, key, members...)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // ZCard returns the number of members in a sorted set.
@@ -110,7 +173,16 @@ func (s *Store) ZCard(ctx context.Context, key string) (int64, error) {
 		return 0, ErrNotSupported
 	}
 
-	return drv.ZCard(ctx, key)
+	var out int64
+
+	err := s.observe(ctx, OpZCard, []string{key}, func() error {
+		var cerr error
+		out, cerr = drv.ZCard(ctx, key)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // ZScore returns a member's score, and false when it is absent.
@@ -124,7 +196,19 @@ func (s *Store) ZScore(ctx context.Context, key, member string) (float64, bool, 
 		return 0, false, ErrNotSupported
 	}
 
-	return drv.ZScore(ctx, key, member)
+	var (
+		score float64
+		found bool
+	)
+
+	err := s.observe(ctx, OpZScore, []string{key}, func() error {
+		var cerr error
+		score, found, cerr = drv.ZScore(ctx, key, member)
+
+		return cerr
+	})
+
+	return score, found, err
 }
 
 // ── Sets ──────────────────────────────────────────────────────────
@@ -140,7 +224,16 @@ func (s *Store) SAdd(ctx context.Context, key string, members ...string) (int64,
 		return 0, ErrNotSupported
 	}
 
-	return drv.SAdd(ctx, key, members...)
+	var out int64
+
+	err := s.observe(ctx, OpSAdd, []string{key}, func() error {
+		var cerr error
+		out, cerr = drv.SAdd(ctx, key, members...)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // SRem removes members from a set.
@@ -154,7 +247,16 @@ func (s *Store) SRem(ctx context.Context, key string, members ...string) (int64,
 		return 0, ErrNotSupported
 	}
 
-	return drv.SRem(ctx, key, members...)
+	var out int64
+
+	err := s.observe(ctx, OpSRem, []string{key}, func() error {
+		var cerr error
+		out, cerr = drv.SRem(ctx, key, members...)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // SMembers returns every member of a set.
@@ -168,7 +270,16 @@ func (s *Store) SMembers(ctx context.Context, key string) ([]string, error) {
 		return nil, ErrNotSupported
 	}
 
-	return drv.SMembers(ctx, key)
+	var out []string
+
+	err := s.observe(ctx, OpSMbrs, []string{key}, func() error {
+		var cerr error
+		out, cerr = drv.SMembers(ctx, key)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // SCard returns the number of members in a set.
@@ -182,7 +293,16 @@ func (s *Store) SCard(ctx context.Context, key string) (int64, error) {
 		return 0, ErrNotSupported
 	}
 
-	return drv.SCard(ctx, key)
+	var out int64
+
+	err := s.observe(ctx, OpSCard, []string{key}, func() error {
+		var cerr error
+		out, cerr = drv.SCard(ctx, key)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // SIsMember reports whether a member is present in a set.
@@ -196,7 +316,16 @@ func (s *Store) SIsMember(ctx context.Context, key, member string) (bool, error)
 		return false, ErrNotSupported
 	}
 
-	return drv.SIsMember(ctx, key, member)
+	var out bool
+
+	err := s.observe(ctx, OpSIsMbr, []string{key}, func() error {
+		var cerr error
+		out, cerr = drv.SIsMember(ctx, key, member)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // ── Hashes ────────────────────────────────────────────────────────
@@ -212,7 +341,16 @@ func (s *Store) HSet(ctx context.Context, key string, fields map[string][]byte) 
 		return 0, ErrNotSupported
 	}
 
-	return drv.HSet(ctx, key, fields)
+	var out int64
+
+	err := s.observe(ctx, OpHSet, []string{key}, func() error {
+		var cerr error
+		out, cerr = drv.HSet(ctx, key, fields)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // HGet returns one field's value, or ErrNotFound when it is absent.
@@ -226,7 +364,16 @@ func (s *Store) HGet(ctx context.Context, key, field string) ([]byte, error) {
 		return nil, ErrNotSupported
 	}
 
-	return drv.HGet(ctx, key, field)
+	var out []byte
+
+	err := s.observe(ctx, OpHGet, []string{key}, func() error {
+		var cerr error
+		out, cerr = drv.HGet(ctx, key, field)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // HGetAll returns every field of a hash.
@@ -240,7 +387,16 @@ func (s *Store) HGetAll(ctx context.Context, key string) (map[string][]byte, err
 		return nil, ErrNotSupported
 	}
 
-	return drv.HGetAll(ctx, key)
+	var out map[string][]byte
+
+	err := s.observe(ctx, OpHGetAll, []string{key}, func() error {
+		var cerr error
+		out, cerr = drv.HGetAll(ctx, key)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // HDel removes fields from a hash.
@@ -254,7 +410,16 @@ func (s *Store) HDel(ctx context.Context, key string, fields ...string) (int64, 
 		return 0, ErrNotSupported
 	}
 
-	return drv.HDel(ctx, key, fields...)
+	var out int64
+
+	err := s.observe(ctx, OpHDel, []string{key}, func() error {
+		var cerr error
+		out, cerr = drv.HDel(ctx, key, fields...)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // HLen returns the number of fields in a hash.
@@ -268,7 +433,16 @@ func (s *Store) HLen(ctx context.Context, key string) (int64, error) {
 		return 0, ErrNotSupported
 	}
 
-	return drv.HLen(ctx, key)
+	var out int64
+
+	err := s.observe(ctx, OpHLen, []string{key}, func() error {
+		var cerr error
+		out, cerr = drv.HLen(ctx, key)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // ── Pub/Sub ───────────────────────────────────────────────────────
@@ -296,7 +470,9 @@ func (s *Store) Publish(ctx context.Context, channel string, message []byte) err
 		return ErrNotSupported
 	}
 
-	return drv.Publish(ctx, channel, message)
+	return s.observe(ctx, OpPublish, []string{channel}, func() error {
+		return drv.Publish(ctx, channel, message)
+	})
 }
 
 // Subscribe registers a handler for a channel, called for every message
@@ -311,7 +487,13 @@ func (s *Store) Subscribe(ctx context.Context, channel string, handler func(msg 
 		return ErrNotSupported
 	}
 
-	return drv.Subscribe(ctx, channel, handler)
+	// Only the subscription is observed, not each delivered message: this
+	// returns once and the handler then runs for the life of the context,
+	// so a per-message hook here would be a hook on a callback the store
+	// no longer controls.
+	return s.observe(ctx, OpSubscr, []string{channel}, func() error {
+		return drv.Subscribe(ctx, channel, handler)
+	})
 }
 
 // ── Scripts ───────────────────────────────────────────────────────
@@ -334,7 +516,16 @@ func (s *Store) Eval(ctx context.Context, script string, keys []string, args ...
 		return nil, ErrNotSupported
 	}
 
-	return drv.Eval(ctx, script, keys, args...)
+	var out any
+
+	err := s.observe(ctx, OpEval, keys, func() error {
+		var cerr error
+		out, cerr = drv.Eval(ctx, script, keys, args...)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // EvalSHA runs a loaded script by digest.
@@ -352,7 +543,16 @@ func (s *Store) EvalSHA(ctx context.Context, sha string, keys []string, args ...
 		return nil, ErrNotSupported
 	}
 
-	return drv.EvalSHA(ctx, sha, keys, args...)
+	var out any
+
+	err := s.observe(ctx, OpEval, keys, func() error {
+		var cerr error
+		out, cerr = drv.EvalSHA(ctx, sha, keys, args...)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // ScriptLoad caches a script and returns its digest.
@@ -366,7 +566,16 @@ func (s *Store) ScriptLoad(ctx context.Context, script string) (string, error) {
 		return "", ErrNotSupported
 	}
 
-	return drv.ScriptLoad(ctx, script)
+	var sha string
+
+	err := s.observe(ctx, OpEval, nil, func() error {
+		var cerr error
+		sha, cerr = drv.ScriptLoad(ctx, script)
+
+		return cerr
+	})
+
+	return sha, err
 }
 
 // ── Streams ───────────────────────────────────────────────────────
@@ -389,7 +598,16 @@ func (s *Store) XAdd(ctx context.Context, stream string, values map[string][]byt
 		return "", ErrNotSupported
 	}
 
-	return drv.XAdd(ctx, stream, values)
+	var out string
+
+	err := s.observe(ctx, OpXAdd, []string{stream}, func() error {
+		var cerr error
+		out, cerr = drv.XAdd(ctx, stream, values)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // XRange returns entries between start and stop inclusive, oldest first.
@@ -405,7 +623,16 @@ func (s *Store) XRange(
 		return nil, ErrNotSupported
 	}
 
-	return drv.XRange(ctx, stream, start, stop, count)
+	var out []driver.StreamMessage
+
+	err := s.observe(ctx, OpXRange, []string{stream}, func() error {
+		var cerr error
+		out, cerr = drv.XRange(ctx, stream, start, stop, count)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // XDel removes entries from a stream by ID.
@@ -419,7 +646,16 @@ func (s *Store) XDel(ctx context.Context, stream string, ids ...string) (int64, 
 		return 0, ErrNotSupported
 	}
 
-	return drv.XDel(ctx, stream, ids...)
+	var out int64
+
+	err := s.observe(ctx, OpXDel, []string{stream}, func() error {
+		var cerr error
+		out, cerr = drv.XDel(ctx, stream, ids...)
+
+		return cerr
+	})
+
+	return out, err
 }
 
 // XLen returns the number of entries in a stream.
@@ -433,5 +669,49 @@ func (s *Store) XLen(ctx context.Context, stream string) (int64, error) {
 		return 0, ErrNotSupported
 	}
 
-	return drv.XLen(ctx, stream)
+	var out int64
+
+	err := s.observe(ctx, OpXLen, []string{stream}, func() error {
+		var cerr error
+		out, cerr = drv.XLen(ctx, stream)
+
+		return cerr
+	})
+
+	return out, err
+}
+
+// MGetRaw reads many keys, returning a slice positionally aligned with
+// keys and holding nil where a key was absent.
+//
+// It is the raw counterpart to MGet, which decodes into a map and so
+// cannot say which key produced which value when some are missing.
+// Positional results are what a caller filtering a batch needs.
+func (s *Store) MGetRaw(ctx context.Context, keys []string) ([][]byte, error) {
+	if err := s.checkClosed(); err != nil {
+		return nil, err
+	}
+
+	if len(keys) == 0 {
+		return nil, nil
+	}
+
+	drv, ok := s.drv.(driver.BatchDriver)
+	if !ok {
+		return nil, ErrNotSupported
+	}
+
+	var out [][]byte
+
+	// Every key is reported, not just the first: a caller accounting work
+	// by key is exactly who needs to see that one call read a thousand of
+	// them.
+	err := s.observe(ctx, OpMGet, keys, func() error {
+		var cerr error
+		out, cerr = drv.MGet(ctx, keys)
+
+		return cerr
+	})
+
+	return out, err
 }
