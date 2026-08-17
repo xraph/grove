@@ -314,3 +314,47 @@ func (db *RedisDB) HLen(ctx context.Context, key string) (int64, error) {
 
 	return n, nil
 }
+
+// ── Pub/Sub ───────────────────────────────────────────────────────
+
+var _ driver.PubSubDriver = (*RedisDB)(nil)
+
+// Publish sends a message to a channel.
+func (db *RedisDB) Publish(ctx context.Context, channel string, message []byte) error {
+	if err := db.client.Publish(ctx, channel, message).Err(); err != nil {
+		return fmt.Errorf("redisdriver: publish %q: %w", channel, err)
+	}
+
+	return nil
+}
+
+// Subscribe calls handler for every message on a channel until the
+// context ends.
+//
+// The subscription is torn down when ctx is cancelled, which is also the
+// only way this returns: a subscriber that stops listening without
+// cancelling would leak the connection.
+func (db *RedisDB) Subscribe(ctx context.Context, channel string, handler func(msg []byte)) error {
+	sub := db.client.Subscribe(ctx, channel)
+
+	go func() {
+		defer func() { _ = sub.Close() }()
+
+		ch := sub.Channel()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg, ok := <-ch:
+				if !ok {
+					return
+				}
+
+				handler([]byte(msg.Payload))
+			}
+		}
+	}()
+
+	return nil
+}

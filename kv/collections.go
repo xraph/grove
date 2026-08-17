@@ -270,3 +270,46 @@ func (s *Store) HLen(ctx context.Context, key string) (int64, error) {
 
 	return drv.HLen(ctx, key)
 }
+
+// ── Pub/Sub ───────────────────────────────────────────────────────
+
+// SupportsPubSub reports whether the driver has publish/subscribe.
+func (s *Store) SupportsPubSub() bool {
+	_, ok := s.drv.(driver.PubSubDriver)
+
+	return ok
+}
+
+// Publish sends a message to a channel.
+//
+// Delivery is at-most-once and only to subscribers connected at the
+// moment of publication: this is a notification primitive, not a queue.
+// Callers that must not miss a message need a durable structure behind
+// it, with the message serving only to shorten the latency.
+func (s *Store) Publish(ctx context.Context, channel string, message []byte) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
+
+	drv, ok := s.drv.(driver.PubSubDriver)
+	if !ok {
+		return ErrNotSupported
+	}
+
+	return drv.Publish(ctx, channel, message)
+}
+
+// Subscribe registers a handler for a channel, called for every message
+// until the context ends.
+func (s *Store) Subscribe(ctx context.Context, channel string, handler func(msg []byte)) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
+
+	drv, ok := s.drv.(driver.PubSubDriver)
+	if !ok {
+		return ErrNotSupported
+	}
+
+	return drv.Subscribe(ctx, channel, handler)
+}
