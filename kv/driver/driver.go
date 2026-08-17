@@ -86,3 +86,74 @@ type Transaction interface {
 	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
 	Delete(ctx context.Context, keys ...string) (int64, error)
 }
+
+// ScoredMember is one member of a sorted set with its score.
+type ScoredMember struct {
+	Member string
+	Score  float64
+}
+
+// RangeSpec bounds a sorted-set range query.
+//
+// Min and Max are inclusive. Because a driver has to express unbounded
+// ends somehow, and every numeric sentinel is a value some caller might
+// legitimately use, the two Has flags say whether each end is set rather
+// than reserving a magic number.
+type RangeSpec struct {
+	Min, Max       float64
+	HasMin, HasMax bool
+	// Reverse returns members highest score first.
+	Reverse bool
+	// Offset skips members after ordering. Zero starts at the first.
+	Offset int64
+	// Count caps how many members are returned. Zero means no limit.
+	Count int64
+}
+
+// SortedSetDriver is an optional interface for drivers with sorted sets.
+//
+// It exists because ordering by score is the one structure a job queue
+// cannot emulate over plain keys: claiming the next due item has to be an
+// ordered read, and a keyspace scan is neither ordered nor atomic.
+type SortedSetDriver interface {
+	// ZAdd inserts or updates members, returning how many were new.
+	ZAdd(ctx context.Context, key string, members ...ScoredMember) (int64, error)
+	// ZRange returns members within the spec, ordered by score.
+	ZRange(ctx context.Context, key string, spec RangeSpec) ([]string, error)
+	// ZRangeWithScores is ZRange carrying each member's score.
+	ZRangeWithScores(ctx context.Context, key string, spec RangeSpec) ([]ScoredMember, error)
+	// ZRem removes members, returning how many were present.
+	ZRem(ctx context.Context, key string, members ...string) (int64, error)
+	// ZCard returns the number of members.
+	ZCard(ctx context.Context, key string) (int64, error)
+	// ZScore returns a member's score, and false when it is absent.
+	ZScore(ctx context.Context, key, member string) (float64, bool, error)
+}
+
+// SetDriver is an optional interface for drivers with unordered sets.
+type SetDriver interface {
+	// SAdd adds members, returning how many were new.
+	SAdd(ctx context.Context, key string, members ...string) (int64, error)
+	// SRem removes members, returning how many were present.
+	SRem(ctx context.Context, key string, members ...string) (int64, error)
+	// SMembers returns every member.
+	SMembers(ctx context.Context, key string) ([]string, error)
+	// SCard returns the number of members.
+	SCard(ctx context.Context, key string) (int64, error)
+	// SIsMember reports whether a member is present.
+	SIsMember(ctx context.Context, key, member string) (bool, error)
+}
+
+// HashDriver is an optional interface for drivers with hash maps.
+type HashDriver interface {
+	// HSet sets fields, returning how many were new.
+	HSet(ctx context.Context, key string, fields map[string][]byte) (int64, error)
+	// HGet returns one field's value. Returns kv.ErrNotFound if absent.
+	HGet(ctx context.Context, key, field string) ([]byte, error)
+	// HGetAll returns every field.
+	HGetAll(ctx context.Context, key string) (map[string][]byte, error)
+	// HDel removes fields, returning how many were present.
+	HDel(ctx context.Context, key string, fields ...string) (int64, error)
+	// HLen returns the number of fields.
+	HLen(ctx context.Context, key string) (int64, error)
+}
