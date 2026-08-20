@@ -35,6 +35,7 @@ import {
 } from "./merge.js";
 import {
   newTextState,
+  cloneTextState,
   textInsert,
   textDeleteOp,
   textFormat,
@@ -43,6 +44,7 @@ import {
   textRefAt,
   textIndexOf,
 } from "./text.js";
+import { withEntry, withoutKeys } from "./immutable.js";
 import { MemoryStorage } from "./storage.js";
 import { UndoManager } from "./undo.js";
 import { PluginManager } from "./plugin.js";
@@ -105,11 +107,15 @@ export class CRDTStore {
   /** Global listeners notified on any state change. */
   private globalListeners = new Set<Listener>();
 
-  /** Per-document listeners: "table:pk" → listeners */
-  private docListeners = new Map<string, Set<Listener>>();
+  /** Per-document listeners: table → pk → listeners. Nested, never a
+   *  delimited string key — a pk may legally contain ":". */
+  private docListeners = new Map<string, Map<string, Set<Listener>>>();
 
   /** Per-table listeners: table → listeners */
   private tableListeners = new Map<string, Set<Listener>>();
+
+  /** Bumped on every document replacement. Keys the collection cache. */
+  private tableVersions = new Map<string, number>();
 
   /**
    * Resolves when persisted state has been hydrated.
@@ -171,7 +177,7 @@ export class CRDTStore {
     table: string,
     pk: string
   ): T | null {
-    const doc = this.state.get(table)?.get(pk);
+    const doc = this.getDoc(table, pk);
     if (!doc || doc.tombstone) return null;
     const resolved = this.resolveDocument(doc) as T;
     return this.plugins.dispatchTransformDocument(table, pk, resolved);
@@ -361,7 +367,7 @@ export class CRDTStore {
     const hlc = this.clock.now();
     // Name the observed tags so the remove is exact everywhere (true
     // observed-remove semantics; receivers don't guess by HLC).
-    const setState = this.state.get(table)?.get(pk)?.fields[field]?.set_state;
+    const setState = this.getDoc(table, pk)?.fields[field]?.set_state;
     const tags = elements.flatMap(
       (elem) => setState?.entries[JSON.stringify(elem)] ?? []
     );
@@ -466,28 +472,17 @@ export class CRDTStore {
    * resolved array) — needed for insert-after and delete addressing.
    */
   getListNodeIds(table: string, pk: string, field: string): HLC[] {
-    const fs = this.state.get(table)?.get(pk)?.fields[field];
+    const fs = this.getDoc(table, pk)?.fields[field];
     if (!fs?.list_state) return [];
     return listNodeIds(fs.list_state);
   }
 
   // --- Text (collaborative rich text) ---
 
-  /** Current text field state (creating the accessor state lazily). */
+  /** Current text state for a field, without creating anything. */
   private textStateOf(table: string, pk: string, field: string): TextState {
-    const doc = this.ensureDocument(table, pk);
-    let fs = doc.fields[field];
-    if (!fs || fs.type !== "text") {
-      fs = {
-        type: "text",
-        hlc: { ts: 0, c: 0, node: "" },
-        node_id: this.nodeID,
-        text_state: newTextState(),
-      };
-      doc.fields[field] = fs;
-    }
-    fs.text_state ??= newTextState();
-    return fs.text_state;
+    const fs = this.getDoc(table, pk)?.fields[field];
+    return fs?.type === "text" && fs.text_state ? fs.text_state : newTextState();
   }
 
   private emitTextChange(
@@ -496,7 +491,8 @@ export class CRDTStore {
     field: string,
     hlc: HLC,
     op: TextOperation,
-    previousState: FieldState | null
+    previousState: FieldState | null,
+    nextState: TextState
   ): ChangeRecord {
     const change: ChangeRecord = {
       table,
@@ -507,12 +503,13 @@ export class CRDTStore {
       node_id: this.nodeID,
       text_op: op,
     };
-    const doc = this.ensureDocument(table, pk);
-    const fs = doc.fields[field];
-    if (fs) {
-      fs.hlc = hlc;
-      fs.node_id = this.nodeID;
-    }
+    const doc = this.docOrEmpty(table, pk);
+    this.setDocument(table, pk, this.withField(doc, field, {
+      type: "text",
+      hlc,
+      node_id: this.nodeID,
+      text_state: nextState,
+    }));
     this.undoManager.record(change, previousState);
     this.pending.push(change);
     this.persistDocument(table, pk);
@@ -533,14 +530,17 @@ export class CRDTStore {
     content: string
   ): ChangeRecord {
     const hlc = this.clock.now();
-    const state = this.textStateOf(table, pk, field);
+    const current = this.textStateOf(table, pk, field);
     const previousState = this.captureFieldState(table, pk, field);
-    const ref = index > 0 ? textRefAt(state, index - 1) : null;
+    const ref = index > 0 ? textRefAt(current, index - 1) : null;
     if (index > 0 && !ref) {
       throw new Error(`crdt: no text character at index ${index - 1}`);
     }
-    const op = textInsert(state, ref, content, this.nodeID, hlc);
-    return this.emitTextChange(table, pk, field, hlc, op, previousState);
+    // The builders apply the op as they build it, so build against a clone
+    // and keep the clone as the new state.
+    const next = cloneTextState(current);
+    const op = textInsert(next, ref, content, this.nodeID, hlc);
+    return this.emitTextChange(table, pk, field, hlc, op, previousState, next);
   }
 
   /** Delete `length` visible characters starting at index. */
@@ -552,12 +552,13 @@ export class CRDTStore {
     length: number
   ): ChangeRecord {
     const hlc = this.clock.now();
-    const state = this.textStateOf(table, pk, field);
+    const current = this.textStateOf(table, pk, field);
     const previousState = this.captureFieldState(table, pk, field);
-    const ref = textRefAt(state, index);
+    const ref = textRefAt(current, index);
     if (!ref) throw new Error(`crdt: no text character at index ${index}`);
-    const op = textDeleteOp(state, ref, length);
-    return this.emitTextChange(table, pk, field, hlc, op, previousState);
+    const next = cloneTextState(current);
+    const op = textDeleteOp(next, ref, length);
+    return this.emitTextChange(table, pk, field, hlc, op, previousState, next);
   }
 
   /**
@@ -573,24 +574,25 @@ export class CRDTStore {
     attrs: Record<string, unknown>
   ): ChangeRecord {
     const hlc = this.clock.now();
-    const state = this.textStateOf(table, pk, field);
+    const current = this.textStateOf(table, pk, field);
     const previousState = this.captureFieldState(table, pk, field);
-    const ref = textRefAt(state, index);
+    const ref = textRefAt(current, index);
     if (!ref) throw new Error(`crdt: no text character at index ${index}`);
-    const op = textFormat(state, ref, length, attrs, this.nodeID, hlc);
-    return this.emitTextChange(table, pk, field, hlc, op, previousState);
+    const next = cloneTextState(current);
+    const op = textFormat(next, ref, length, attrs, this.nodeID, hlc);
+    return this.emitTextChange(table, pk, field, hlc, op, previousState, next);
   }
 
   /** Visible text of a text field ("" when absent). */
   getText(table: string, pk: string, field: string): string {
-    const fs = this.state.get(table)?.get(pk)?.fields[field];
+    const fs = this.getDoc(table, pk)?.fields[field];
     if (!fs?.text_state) return "";
     return textValue(fs.text_state);
   }
 
   /** Quill-style attribute-run segments of a text field. */
   getTextDelta(table: string, pk: string, field: string): TextDeltaSegment[] {
-    const fs = this.state.get(table)?.get(pk)?.fields[field];
+    const fs = this.getDoc(table, pk)?.fields[field];
     if (!fs?.text_state) return [];
     return textDelta(fs.text_state);
   }
@@ -600,14 +602,14 @@ export class CRDTStore {
    * position that survives concurrent edits (cursor anchoring).
    */
   getTextRefAt(table: string, pk: string, field: string, index: number): TextRef | null {
-    const fs = this.state.get(table)?.get(pk)?.fields[field];
+    const fs = this.getDoc(table, pk)?.fields[field];
     if (!fs?.text_state) return null;
     return textRefAt(fs.text_state, index);
   }
 
   /** Current visible index of a stable text address. */
   getTextIndexOf(table: string, pk: string, field: string, ref: TextRef): number | null {
-    const fs = this.state.get(table)?.get(pk)?.fields[field];
+    const fs = this.getDoc(table, pk)?.fields[field];
     if (!fs?.text_state) return null;
     return textIndexOf(fs.text_state, ref);
   }
@@ -696,13 +698,16 @@ export class CRDTStore {
     // For tombstone, capture a synthetic "previous state" that records whether
     // the document was already tombstoned. We store the tombstone flag in the
     // value field so undo can restore it.
-    const doc = this.ensureDocument(table, pk);
+    const doc = this.docOrEmpty(table, pk);
     const previousState: FieldState | null = doc.tombstone
       ? { type: "lww", hlc: doc.tombstone_hlc!, node_id: this.nodeID, value: true }
       : null;
 
-    doc.tombstone = true;
-    doc.tombstone_hlc = hlc;
+    this.setDocument(table, pk, {
+      ...doc,
+      tombstone: true,
+      tombstone_hlc: hlc,
+    });
 
     this.undoManager.record(change, previousState);
     this.pending.push(change);
@@ -734,20 +739,26 @@ export class CRDTStore {
 
     const { change, previousState } = entry;
 
+    const doc = this.docOrEmpty(change.table, change.pk);
     if (change.tombstone) {
-      // Undo a delete: restore the document (un-tombstone).
-      const doc = this.ensureDocument(change.table, change.pk);
-      // previousState is null means the document was NOT tombstoned before.
-      doc.tombstone = previousState !== null;
-      doc.tombstone_hlc = previousState?.hlc;
+      // previousState === null means the document was NOT tombstoned before.
+      this.setDocument(change.table, change.pk, {
+        ...doc,
+        tombstone: previousState !== null,
+        tombstone_hlc: previousState?.hlc,
+      });
+    } else if (previousState === null) {
+      // Field didn't exist before; remove it.
+      this.setDocument(change.table, change.pk, {
+        ...doc,
+        fields: withoutKeys(doc.fields, (k) => k === change.field),
+      });
     } else {
-      const doc = this.ensureDocument(change.table, change.pk);
-      if (previousState === null) {
-        // Field didn't exist before; remove it.
-        delete doc.fields[change.field];
-      } else {
-        doc.fields[change.field] = previousState;
-      }
+      this.setDocument(
+        change.table,
+        change.pk,
+        this.withField(doc, change.field, previousState)
+      );
     }
 
     this.persistDocument(change.table, change.pk);
@@ -766,9 +777,12 @@ export class CRDTStore {
     const { change } = entry;
 
     if (change.tombstone) {
-      const doc = this.ensureDocument(change.table, change.pk);
-      doc.tombstone = true;
-      doc.tombstone_hlc = change.hlc;
+      const doc = this.docOrEmpty(change.table, change.pk);
+      this.setDocument(change.table, change.pk, {
+        ...doc,
+        tombstone: true,
+        tombstone_hlc: change.hlc,
+      });
     } else {
       this.applyChangeInternal(change);
     }
@@ -785,12 +799,11 @@ export class CRDTStore {
    * Uses merge functions to resolve conflicts.
    */
   applyChanges(changes: ChangeRecord[]): void {
-    const affected = new Set<string>();
+    const affected = new Map<string, Set<string>>();
 
     for (const change of changes) {
       // Run beforeMerge plugins.
-      const doc = this.ensureDocument(change.table, change.pk);
-      const localFS = doc.fields[change.field] ?? null;
+      const localFS = this.getDoc(change.table, change.pk)?.fields[change.field] ?? null;
       const mergeEvent: MergeEvent = {
         table: change.table,
         pk: change.pk,
@@ -805,20 +818,29 @@ export class CRDTStore {
 
       const changeCopy = allowed === change ? change : { ...change, ...allowed };
       this.applyChangeInternal(changeCopy);
-      affected.add(`${change.table}:${change.pk}`);
 
-      // Run afterMerge plugins.
-      const resultFS = doc.fields[change.field] ?? null;
+      let pks = affected.get(change.table);
+      if (!pks) {
+        pks = new Set();
+        affected.set(change.table, pks);
+      }
+      pks.add(change.pk);
+
+      // Run afterMerge plugins. The merge installed a NEW document object,
+      // so re-read from the store rather than from the pre-merge document.
+      const resultFS =
+        this.getDoc(change.table, change.pk)?.fields[change.field] ?? null;
       mergeEvent.result = resultFS ?? undefined;
       mergeEvent.winnerNodeId = resultFS?.node_id;
       this.plugins.dispatchAfterMerge(mergeEvent);
     }
 
     // Batch-persist and notify all affected documents.
-    for (const key of affected) {
-      const [table, pk] = key.split(":", 2);
-      this.persistDocument(table, pk);
-      this.notifyListeners(table, pk);
+    for (const [table, pkSet] of affected) {
+      for (const pk of pkSet) {
+        this.persistDocument(table, pk);
+        this.notifyListeners(table, pk);
+      }
     }
   }
 
@@ -860,17 +882,23 @@ export class CRDTStore {
     pk: string,
     listener: Listener
   ): () => void {
-    const key = `${table}:${pk}`;
-    let listeners = this.docListeners.get(key);
+    let byPk = this.docListeners.get(table);
+    if (!byPk) {
+      byPk = new Map();
+      this.docListeners.set(table, byPk);
+    }
+    let listeners = byPk.get(pk);
     if (!listeners) {
       listeners = new Set();
-      this.docListeners.set(key, listeners);
+      byPk.set(pk, listeners);
     }
     listeners.add(listener);
+
     return () => {
       listeners!.delete(listener);
       if (listeners!.size === 0) {
-        this.docListeners.delete(key);
+        byPk!.delete(pk);
+        if (byPk!.size === 0) this.docListeners.delete(table);
       }
     };
   }
@@ -962,11 +990,9 @@ export class CRDTStore {
 
     // Load tables from snapshot.
     for (const [tableName, docs] of Object.entries(snapshot.tables)) {
-      const tableMap = new Map<string, DocumentState>();
       for (const [pk, doc] of Object.entries(docs)) {
-        tableMap.set(pk, JSON.parse(JSON.stringify(doc)));
+        this.setDocument(tableName, pk, JSON.parse(JSON.stringify(doc)));
       }
-      this.state.set(tableName, tableMap);
     }
 
     // Replace pending changes.
@@ -982,10 +1008,12 @@ export class CRDTStore {
 
     // Notify all listeners.
     for (const listener of this.globalListeners) listener();
-    for (const [, listeners] of this.docListeners) {
-      for (const listener of listeners) listener();
+    for (const byPk of this.docListeners.values()) {
+      for (const listeners of byPk.values()) {
+        for (const listener of listeners) listener();
+      }
     }
-    for (const [, listeners] of this.tableListeners) {
+    for (const listeners of this.tableListeners.values()) {
       for (const listener of listeners) listener();
     }
   }
@@ -1019,17 +1047,12 @@ export class CRDTStore {
 
     // Merge loaded state into in-memory maps.
     for (const [table, docs] of loadedState) {
-      let tableMap = this.state.get(table);
-      if (!tableMap) {
-        tableMap = new Map();
-        this.state.set(table, tableMap);
-      }
       for (const [pk, doc] of docs) {
         // Only set if no in-memory mutation happened during hydration.
-        if (!tableMap.has(pk)) {
+        if (!this.getDoc(table, pk)) {
           normalizeHLCKeys(doc);
           const hydrated = this.plugins.dispatchAfterHydrate(table, pk, doc);
-          tableMap.set(pk, hydrated);
+          this.setDocument(table, pk, hydrated);
         }
       }
     }
@@ -1045,7 +1068,7 @@ export class CRDTStore {
 
   /** Fire-and-forget: persist a document to storage. */
   private persistDocument(table: string, pk: string): void {
-    const doc = this.state.get(table)?.get(pk);
+    const doc = this.getDoc(table, pk);
     if (doc) {
       const transformed = this.plugins.dispatchBeforePersist(table, pk, doc);
       this.storage.saveDocument(table, pk, transformed).catch(() => {});
@@ -1058,20 +1081,15 @@ export class CRDTStore {
   }
 
   /**
-   * Capture a deep copy of the current field state for undo purposes.
-   * Returns null if the field doesn't exist yet.
+   * Current field state for undo. State is immutable, so a reference is a
+   * safe snapshot — no clone needed. Returns null if the field is absent.
    */
   private captureFieldState(
     table: string,
     pk: string,
     field: string
   ): FieldState | null {
-    const doc = this.state.get(table)?.get(pk);
-    if (!doc) return null;
-    const fs = doc.fields[field];
-    if (!fs) return null;
-    // Deep clone to avoid shared references.
-    return JSON.parse(JSON.stringify(fs)) as FieldState;
+    return this.getDoc(table, pk)?.fields[field] ?? null;
   }
 
   /** This node's current cumulative counter totals for a field. */
@@ -1080,7 +1098,7 @@ export class CRDTStore {
     pk: string,
     field: string
   ): { inc: number; dec: number } {
-    const cs = this.state.get(table)?.get(pk)?.fields[field]?.counter_state;
+    const cs = this.getDoc(table, pk)?.fields[field]?.counter_state;
     return {
       inc: cs?.inc[this.nodeID] ?? 0,
       dec: cs?.dec[this.nodeID] ?? 0,
@@ -1092,37 +1110,56 @@ export class CRDTStore {
     // inside the nested document, not a record delete.
     const isDocPathDelete =
       change.crdt_type === "document" && change.value !== undefined;
+    const doc = this.docOrEmpty(change.table, change.pk);
+
     if (change.tombstone && !isDocPathDelete) {
-      const doc = this.ensureDocument(change.table, change.pk);
-      doc.tombstone = true;
-      doc.tombstone_hlc = change.hlc;
+      this.setDocument(change.table, change.pk, {
+        ...doc,
+        tombstone: true,
+        tombstone_hlc: change.hlc,
+      });
       return;
     }
 
-    const doc = this.ensureDocument(change.table, change.pk);
     const existing = doc.fields[change.field] ?? null;
-    doc.fields[change.field] = mergeFieldState(existing, change);
+    this.setDocument(
+      change.table,
+      change.pk,
+      this.withField(doc, change.field, mergeFieldState(existing, change))
+    );
   }
 
-  private ensureDocument(table: string, pk: string): DocumentState {
+  private getDoc(table: string, pk: string): DocumentState | undefined {
+    return this.state.get(table)?.get(pk);
+  }
+
+  /** Current document, or a fresh empty one. Never inserts into state. */
+  private docOrEmpty(table: string, pk: string): DocumentState {
+    return this.getDoc(table, pk) ?? { table, pk, fields: {}, tombstone: false };
+  }
+
+  /**
+   * Install a new document object. The ONLY write path into `state`.
+   * Replacing rather than mutating is what makes identity-keyed snapshot
+   * caching correct (see getDocument).
+   */
+  private setDocument(table: string, pk: string, doc: DocumentState): void {
     let tableMap = this.state.get(table);
     if (!tableMap) {
       tableMap = new Map();
       this.state.set(table, tableMap);
     }
+    tableMap.set(pk, doc);
+    this.tableVersions.set(table, (this.tableVersions.get(table) ?? 0) + 1);
+  }
 
-    let doc = tableMap.get(pk);
-    if (!doc) {
-      doc = {
-        table,
-        pk,
-        fields: {},
-        tombstone: false,
-      };
-      tableMap.set(pk, doc);
-    }
-
-    return doc;
+  /** Document with one field replaced; every other field is shared. */
+  private withField(
+    doc: DocumentState,
+    field: string,
+    fs: FieldState
+  ): DocumentState {
+    return { ...doc, fields: withEntry(doc.fields, field, fs) };
   }
 
   /**
@@ -1179,27 +1216,26 @@ export class CRDTStore {
     value: unknown,
     hlc: HLC
   ): void {
-    const doc = this.ensureDocument(table, pk);
-    let fieldState = doc.fields[field];
-    if (!fieldState || fieldState.type !== "document") {
-      fieldState = {
-        type: "document",
-        hlc,
-        node_id: this.nodeID,
-        doc_state: { fields: {} },
-      };
-      doc.fields[field] = fieldState;
-    }
-    if (!fieldState.doc_state) {
-      fieldState.doc_state = { fields: {} };
-    }
-    fieldState.hlc = hlc;
-    fieldState.doc_state.fields[path] = {
-      type: "lww",
+    const doc = this.docOrEmpty(table, pk);
+    const existing = doc.fields[field];
+    const docState =
+      existing?.type === "document" && existing.doc_state
+        ? existing.doc_state
+        : { fields: {} };
+
+    this.setDocument(table, pk, this.withField(doc, field, {
+      type: "document",
       hlc,
       node_id: this.nodeID,
-      value,
-    };
+      doc_state: {
+        fields: withEntry(docState.fields, path, {
+          type: "lww",
+          hlc,
+          node_id: this.nodeID,
+          value,
+        }),
+      },
+    }));
   }
 
   /**
@@ -1212,18 +1248,22 @@ export class CRDTStore {
     path: string,
     hlc: HLC
   ): void {
-    const doc = this.ensureDocument(table, pk);
-    const fieldState = doc.fields[field];
-    if (fieldState?.type === "document" && fieldState.doc_state) {
-      delete fieldState.doc_state.fields[path];
-      fieldState.hlc = hlc;
-    }
+    const doc = this.docOrEmpty(table, pk);
+    const existing = doc.fields[field];
+    if (existing?.type !== "document" || !existing.doc_state) return;
+
+    this.setDocument(table, pk, this.withField(doc, field, {
+      ...existing,
+      hlc,
+      doc_state: {
+        fields: withoutKeys(existing.doc_state.fields, (k) => k === path),
+      },
+    }));
   }
 
   private notifyListeners(table: string, pk: string): void {
     // Document-level listeners.
-    const docKey = `${table}:${pk}`;
-    const docListeners = this.docListeners.get(docKey);
+    const docListeners = this.docListeners.get(table)?.get(pk);
     if (docListeners) {
       for (const listener of docListeners) listener();
     }

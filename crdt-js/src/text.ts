@@ -398,6 +398,13 @@ export function applyTextOpTo(
   nodeID: string,
   clock: HLC
 ): TextState {
+  const next = cloneTextState(state);
+  applyTextOp(next, op, nodeID, clock);
+  return next;
+}
+
+/** Shallow-clone a text state so mutating appliers cannot touch the input. */
+export function cloneTextState(state: TextState): TextState {
   const frags: Record<string, TextFragment[]> = {};
   for (const key of Object.keys(state.frags)) {
     frags[key] = state.frags[key].map((f) => ({
@@ -405,9 +412,7 @@ export function applyTextOpTo(
       ...(f.attrs ? { attrs: { ...f.attrs } } : {}),
     }));
   }
-  const next: TextState = { frags };
-  applyTextOp(next, op, nodeID, clock);
-  return next;
+  return { frags };
 }
 
 // --- Local edit API (mutates state AND returns the wire op) ---
