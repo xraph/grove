@@ -43,6 +43,27 @@ function mkTransport() {
   return { transport, socket: () => socket };
 }
 
+/**
+ * Like mkTransport(), but records every socket ever created by
+ * WebSocketImpl (plural, for tests that force a reconnect) and exposes a
+ * config override for requestTimeout/backoff.
+ */
+function mkTransportMulti(
+  overrides: {
+    requestTimeout?: number;
+    backoff?: { initialDelay?: number; maxDelay?: number; jitter?: boolean };
+  } = {}
+) {
+  const sockets: FakeSocket[] = [];
+  const Impl = function (url: string) {
+    const s = new FakeSocket(url);
+    sockets.push(s);
+    return s;
+  } as unknown as typeof WebSocket;
+  const transport = new WebSocketTransport({ url: "ws://x", WebSocketImpl: Impl, ...overrides });
+  return { transport, sockets, latest: () => sockets[sockets.length - 1] };
+}
+
 describe("WebSocketTransport", () => {
   it("correlates a pull request with its response by request_id", async () => {
     const { transport, socket } = mkTransport();
@@ -69,16 +90,25 @@ describe("WebSocketTransport", () => {
     transport.close();
   });
 
-  it("subscribe sends a subscribe frame and emits inbound changes", async () => {
+  it("subscribe sends exactly one subscribe frame on first connect and emits inbound changes", async () => {
+    // No tick-wait before subscribe()/connect(): the transport connects
+    // eagerly at construction, so calling connect() immediately races
+    // against that in-flight connect. That race is exactly what used to
+    // cause a duplicate `subscribe` frame (one from onopen, since
+    // connect() already set subscribedTables before onopen fired; one
+    // from connect()'s own send). Asserting a count, not `.some()`, is
+    // what pins this down against a regression.
     const { transport, socket } = mkTransport();
-    await new Promise((r) => queueMicrotask(r as () => void));
     const sub = transport.subscribe({ tables: ["docs"] });
     const events: string[] = [];
     sub.on((e) => { events.push(e.type); });
     sub.connect();
     await new Promise((r) => setTimeout(r, 5));
 
-    expect(socket().sent.some((m) => m.type === "subscribe")).toBe(true);
+    const subscribeFrames = socket().sent.filter((m) => m.type === "subscribe");
+    expect(subscribeFrames.length).toBe(1);
+    expect(subscribeFrames[0].payload).toEqual({ tables: ["docs"] });
+
     socket().onmessage?.({ data: JSON.stringify({
       type: "change",
       payload: { table: "docs", pk: "1", field: "f", crdt_type: "lww",
@@ -86,6 +116,109 @@ describe("WebSocketTransport", () => {
     }) });
     expect(events).toContain("change");
     sub.disconnect();
+    transport.close();
+  });
+
+  it("still sends exactly one subscribe frame when connect() is called after the socket is already open", async () => {
+    // The other half of the dedupe fix: here onopen has already fired
+    // (with no tables) by the time connect() runs, so onopen will never
+    // fire again for this socket — connect() itself must be the one that
+    // sends, and only once.
+    const { transport, socket } = mkTransport();
+    await new Promise((r) => queueMicrotask(r as () => void));
+    expect(socket().readyState).toBe(FakeSocket.OPEN);
+
+    const sub = transport.subscribe({ tables: ["docs"] });
+    sub.connect();
+    await new Promise((r) => setTimeout(r, 5));
+
+    const subscribeFrames = socket().sent.filter((m) => m.type === "subscribe");
+    expect(subscribeFrames.length).toBe(1);
+    sub.disconnect();
+    transport.close();
+  });
+
+  it("reconnects after the socket drops and resubscribes exactly once", async () => {
+    const { transport, sockets, latest } = mkTransportMulti({
+      backoff: { initialDelay: 1, maxDelay: 1, jitter: false },
+    });
+    const sub = transport.subscribe({ tables: ["docs"] });
+    sub.connect();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const framesSoFar = () => sockets.flatMap((s) => s.sent).filter((m) => m.type === "subscribe");
+    expect(framesSoFar().length).toBe(1);
+    expect(sockets.length).toBe(1);
+
+    // Simulate the server dropping the connection (not a client close()).
+    latest().onclose?.();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(sockets.length).toBe(2);
+    expect(framesSoFar().length).toBe(2);
+    expect(framesSoFar()[1].payload).toEqual({ tables: ["docs"] });
+
+    sub.disconnect();
+    transport.close();
+  });
+
+  it("close() during an in-flight connect rejects the caller instead of hanging", async () => {
+    // FakeSocket only flips OPEN and fires onopen on a queued microtask, so
+    // calling close() synchronously right after pull() catches the
+    // transport mid-handshake — exactly the race that used to leave the
+    // caller unsettled forever (pending timeout doesn't start until after
+    // ensureOpen() resolves).
+    const { transport } = mkTransport();
+    const pullPromise = transport.pull({ tables: ["a"], node_id: "n1" });
+    transport.close();
+
+    const settledInTime = await Promise.race([
+      pullPromise.then(
+        () => "resolved",
+        () => "rejected"
+      ),
+      new Promise((resolve) => setTimeout(() => resolve("timed-out"), 200)),
+    ]);
+    expect(settledInTime).toBe("rejected");
+    await expect(pullPromise).rejects.toThrow(/closed/i);
+  });
+
+  it("times out a request that never gets a reply and cleans up its pending entry", async () => {
+    let socket!: FakeSocket;
+    const Impl = function (url: string) {
+      socket = new FakeSocket(url);
+      return socket;
+    } as unknown as typeof WebSocket;
+    const transport = new WebSocketTransport({ url: "ws://x", WebSocketImpl: Impl, requestTimeout: 10 });
+    await new Promise((r) => queueMicrotask(r as () => void));
+    socket.respond = () => null; // server never answers
+
+    await expect(
+      transport.pull({ tables: ["a"], node_id: "n1" })
+    ).rejects.toThrow(/timed out/i);
+
+    // A late reply after the timeout must find nothing pending — no crash,
+    // no double-settle.
+    expect(() => {
+      socket.onmessage?.({ data: JSON.stringify({
+        type: "pull_response", request_id: "r1",
+        payload: { changes: [], latest_hlc: HLC0 },
+      }) });
+    }).not.toThrow();
+
+    transport.close();
+  });
+
+  it("updatePresence sends a presence_update frame (fire-and-forget)", async () => {
+    const { transport, socket } = mkTransport();
+    await new Promise((r) => queueMicrotask(r as () => void));
+
+    await transport.updatePresence({ node_id: "n1", topic: "room", data: { x: 1 } });
+
+    expect(socket().sent).toContainEqual({
+      type: "presence_update",
+      payload: { node_id: "n1", topic: "room", data: { x: 1 } },
+    });
     transport.close();
   });
 });

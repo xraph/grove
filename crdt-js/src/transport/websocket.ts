@@ -66,6 +66,7 @@ export class WebSocketTransport implements StreamTransport {
   private nextId = 0;
   private closed = false;
   private opening: Promise<WebSocket> | null = null;
+  private openingReject: ((err: Error) => void) | null = null;
   private backoff: Backoff;
   private subscribedTables: string[] = [];
   private _lastHLC: HLC | null = null;
@@ -131,11 +132,23 @@ export class WebSocketTransport implements StreamTransport {
         if (connected) return;
         connected = true;
         transport.subscribedTables = config.tables ?? [];
+        // onopen is the single owner of sending the `subscribe` frame — it
+        // fires (and sends) whenever a *new* connection completes, whether
+        // that's this call's own first connect or a later reconnect. But
+        // onopen only fires once per socket: if the socket is already open
+        // (e.g. from the transport's eager connect at construction, before
+        // any tables were set) it won't fire again for us, so we have to
+        // send the frame ourselves in that case. Recording this before
+        // ensureOpen() resolves is what keeps the two paths from racing
+        // into a duplicate send for a socket that opens after this call.
+        const alreadyOpen = transport.socket?.readyState === 1;
         void transport.ensureOpen().then((socket) => {
-          socket.send(JSON.stringify({
-            type: "subscribe",
-            payload: { tables: transport.subscribedTables },
-          }));
+          if (alreadyOpen) {
+            socket.send(JSON.stringify({
+              type: "subscribe",
+              payload: { tables: transport.subscribedTables },
+            }));
+          }
           transport.emit({ type: "connected" });
         }).catch((err: unknown) => {
           transport.emit({
@@ -157,7 +170,16 @@ export class WebSocketTransport implements StreamTransport {
     };
   }
 
-  /** Close the socket and reject every in-flight request. */
+  /**
+   * Close the socket and reject every in-flight request — including a
+   * caller still stuck inside ensureOpen() (not yet registered in
+   * `pending`, since rpc() only adds its entry after the connect settles).
+   * Without this, "construct then close before the handshake finishes" —
+   * an ordinary lifecycle, and the common case once the transport connects
+   * eagerly — would hang that caller forever: open()'s promise only ever
+   * settles from onopen/onerror, and requestTimeout doesn't start until
+   * after ensureOpen() resolves.
+   */
   close(): void {
     this.closed = true;
     for (const [, p] of this.pending) {
@@ -165,6 +187,11 @@ export class WebSocketTransport implements StreamTransport {
       p.reject(new TransportError("WebSocket transport closed"));
     }
     this.pending.clear();
+    if (this.openingReject) {
+      const reject = this.openingReject;
+      this.openingReject = null;
+      reject(new TransportError("WebSocket transport closed"));
+    }
     this.socket?.close();
     this.socket = null;
   }
@@ -199,47 +226,91 @@ export class WebSocketTransport implements StreamTransport {
   private async ensureOpen(): Promise<WebSocket> {
     if (this.closed) throw new TransportError("WebSocket transport closed");
     if (this.socket?.readyState === 1) return this.socket;
-    if (this.opening) return this.opening;
+    if (!this.opening) {
+      this.opening = new Promise<WebSocket>((resolve, reject) => {
+        this.openingReject = reject;
+        void this.attemptConnect(resolve, reject);
+      }).finally(() => {
+        this.opening = null;
+        this.openingReject = null;
+      });
+    }
 
-    this.opening = this.open().finally(() => { this.opening = null; });
-    return this.opening;
+    const socket = await this.opening;
+    // close() may have landed between resolve() firing and this
+    // continuation running (e.g. it ran synchronously right after onopen,
+    // before the `.finally()` above got a chance to clear openingReject —
+    // at that point rejecting an already-settled promise is a no-op, so
+    // this recheck is what actually stops a stale socket from reaching a
+    // caller on a transport that's already shut down).
+    if (this.closed) throw new TransportError("WebSocket transport closed");
+    return socket;
   }
 
-  private async open(): Promise<WebSocket> {
-    const url = await this.buildURL();
-    return new Promise<WebSocket>((resolve, reject) => {
-      const socket = new this.impl(url, this.config.protocols);
-      this.socket = socket;
+  private async attemptConnect(
+    resolve: (ws: WebSocket) => void,
+    reject: (err: Error) => void
+  ): Promise<void> {
+    let url: string;
+    try {
+      url = await this.buildURL();
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
+    // close() may have fired while buildURL() (e.g. an async auth lookup)
+    // was in flight — don't open a socket for a transport that's already
+    // shut down.
+    if (this.closed) {
+      reject(new TransportError("WebSocket transport closed"));
+      return;
+    }
 
-      socket.onopen = () => {
-        this.backoff.reset();
-        // Re-subscribe after a reconnect: the server does not remember us.
-        if (this.subscribedTables.length > 0) {
-          socket.send(JSON.stringify({
-            type: "subscribe",
-            payload: { tables: this.subscribedTables },
-          }));
-        }
-        resolve(socket);
-      };
+    let socket: WebSocket;
+    try {
+      socket = new this.impl(url, this.config.protocols);
+    } catch (err) {
+      reject(
+        err instanceof Error
+          ? err
+          : new TransportError(`CRDT ws connection failed: ${url}`)
+      );
+      return;
+    }
+    this.socket = socket;
 
-      socket.onmessage = (ev: MessageEvent) => {
-        this.handleMessage(String(ev.data));
-      };
+    socket.onopen = () => {
+      this.backoff.reset();
+      // Re-subscribe after a reconnect: the server does not remember us.
+      // (subscribe().connect() owns sending the frame for an already-open
+      // socket; this branch is what sends it for a fresh connection —
+      // first connect or reconnect alike — so the two paths never both
+      // fire for the same connection.)
+      if (this.subscribedTables.length > 0) {
+        socket.send(JSON.stringify({
+          type: "subscribe",
+          payload: { tables: this.subscribedTables },
+        }));
+      }
+      resolve(socket);
+    };
 
-      socket.onerror = () => {
-        reject(new TransportError(`CRDT ws connection failed: ${url}`));
-      };
+    socket.onmessage = (ev: MessageEvent) => {
+      this.handleMessage(String(ev.data));
+    };
 
-      socket.onclose = () => {
-        this.socket = null;
-        this.emit({ type: "disconnected" });
-        if (!this.closed && this.subscribedTables.length > 0) {
-          setTimeout(() => { void this.ensureOpen().catch(() => {}); },
-            this.backoff.next());
-        }
-      };
-    });
+    socket.onerror = () => {
+      reject(new TransportError(`CRDT ws connection failed: ${url}`));
+    };
+
+    socket.onclose = () => {
+      this.socket = null;
+      this.emit({ type: "disconnected" });
+      if (!this.closed && this.subscribedTables.length > 0) {
+        setTimeout(() => { void this.ensureOpen().catch(() => {}); },
+          this.backoff.next());
+      }
+    };
   }
 
   private handleMessage(raw: string): void {
