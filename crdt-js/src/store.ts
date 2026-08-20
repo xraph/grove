@@ -1256,6 +1256,9 @@ export class CRDTStore {
             ? documentResolve(state.doc_state)
             : {};
           break;
+        case "text":
+          result[field] = state.text_state ? textValue(state.text_state) : "";
+          break;
         default:
           result[field] = state.value;
       }

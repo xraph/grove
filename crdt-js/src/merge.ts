@@ -17,9 +17,8 @@ import type {
   DocumentCRDTState,
 } from "./types.js";
 import { hlcAfter, hlcCompare, hlcString } from "./hlc.js";
-import { mergeText, newTextState } from "./text.js";
+import { mergeText, newTextState, applyTextOpTo, textValue } from "./text.js";
 import { withEntry, withoutKeys, withAppended, withFlags } from "./immutable.js";
-import { applyTextOpTo } from "./text.js";
 
 // --- LWW Register ---
 
@@ -438,6 +437,9 @@ export function documentResolve(state: DocumentCRDTState): Record<string, unknow
         break;
       case "document":
         result[key] = field.doc_state ? documentResolve(field.doc_state) : {};
+        break;
+      case "text":
+        result[key] = field.text_state ? textValue(field.text_state) : "";
         break;
       default:
         result[key] = field.value;

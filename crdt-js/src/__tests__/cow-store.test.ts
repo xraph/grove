@@ -162,4 +162,22 @@ describe("copy-on-write store", () => {
     const ms = performance.now() - t0;
     expect(ms).toBeLessThan(2000);
   }, 30000);
+
+  describe("text resolution", () => {
+    it("getDocument exposes text fields (D3)", () => {
+      const { store } = mk();
+      store.insertText("notes", "n1", "body", 0, "hello");
+      const doc = store.getDocument<{ body: string }>("notes", "n1");
+      expect(doc?.body).toBe("hello");
+    });
+
+    it("nested documents expose text fields", () => {
+      const { store } = mk();
+      store.insertText("notes", "n1", "body", 0, "hi");
+      store.setDocumentField("notes", "n1", "meta", "author", "alice");
+      const doc = store.getDocument<Record<string, unknown>>("notes", "n1");
+      expect(doc?.body).toBe("hi");
+      expect(doc?.meta).toEqual({ author: "alice" });
+    });
+  });
 });
