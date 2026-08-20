@@ -207,6 +207,14 @@ export { HttpTransport, HttpStreamTransport, isStreamTransport } from "./transpo
 // Retry decorator (composes over any transport)
 export { withRetry } from "./transport/retry.js";
 export type { RetryOptions } from "./transport/retry.js";
+
+// WebSocket transport
+export { WebSocketTransport } from "./transport/websocket.js";
+export type {
+  WSMessageType,
+  WebSocketMessage,
+  WebSocketTransportConfig,
+} from "./transport/websocket.js";
 export { MemoryStorage, IndexedDBStorage } from "./storage.js";
 export type { IndexedDBStorageOptions } from "./storage.js";
 export { StaticAuthProvider } from "./auth.js";
