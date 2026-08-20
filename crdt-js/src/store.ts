@@ -156,12 +156,25 @@ export class CRDTStore {
   private persistDebounceMs: number;
 
   /** Shared timer for the debounced document + pending-change flush. Null
-   *  when no flush is currently scheduled. */
+   *  when no flush is currently scheduled. Tests that construct a store with
+   *  the default (non-zero) debounce and never call flushPersistence() may
+   *  leave this armed past the end of the test — that's safe, not a leak:
+   *  each such test builds its own fresh storage/mock, so a late fire only
+   *  ever touches an object private to that already-finished test, and the
+   *  write itself is .catch()-wrapped. Do NOT "fix" this with an afterEach
+   *  that clears it globally — that would change drain semantics for tests
+   *  that deliberately assert on the debounce's timing. */
   private pendingPersistTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Documents touched since the last debounced flush: table → pks. Drained
    *  (and read at fire time, not schedule time) by the debounce timer. */
   private docPersistQueue = new Map<string, Set<string>>();
+
+  /** True when `this.pending` was written since the last debounced drain.
+   *  Gates the shared drain's `savePendingChanges` call so document-only
+   *  operations (undo, redo, applyChanges — none of which touch `pending`)
+   *  don't re-write an unchanged pending array on every debounce window. */
+  private pendingDebounceDirty = false;
 
   /**
    * Resolves when persisted state has been hydrated.
@@ -1194,15 +1207,16 @@ export class CRDTStore {
   /**
    * Fire-and-forget: persist pending changes to storage, debounced.
    * `persistDebounceMs <= 0` writes immediately and synchronously. Otherwise
-   * it just arms the shared timer — the timer's own callback re-reads
-   * `this.pending` when it fires, so it always captures the latest array
-   * regardless of how many writes landed after scheduling.
+   * it marks `pending` dirty and arms the shared timer — the timer's own
+   * callback re-reads `this.pending` when it fires, so it always captures
+   * the latest array regardless of how many writes landed after scheduling.
    */
   private persistPendingNow(): void {
     if (this.persistDebounceMs <= 0) {
       this.storage.savePendingChanges([...this.pending]).catch(() => {});
       return;
     }
+    this.pendingDebounceDirty = true;
     this.scheduleDebouncedPersist();
   }
 
@@ -1222,8 +1236,12 @@ export class CRDTStore {
   }
 
   /** Fire-and-forget: write everything queued by the debounce — every
-   *  touched document plus the current pending-changes array — read fresh
-   *  at fire time so the final write in a burst is never lost. */
+   *  touched document, plus the pending-changes array but ONLY if it was
+   *  actually written since the last drain (see pendingDebounceDirty) —
+   *  read fresh at fire time so the final write in a burst is never lost.
+   *  The dirty flag is captured, then cleared, then acted on — never
+   *  cleared before it's read — so a write that lands mid-drain still
+   *  marks the *next* drain dirty rather than being silently absorbed. */
   private drainDebouncedPersist(): void {
     const queued = this.docPersistQueue;
     this.docPersistQueue = new Map();
@@ -1236,7 +1254,11 @@ export class CRDTStore {
         }
       }
     }
-    this.storage.savePendingChanges([...this.pending]).catch(() => {});
+    const pendingDirty = this.pendingDebounceDirty;
+    this.pendingDebounceDirty = false;
+    if (pendingDirty) {
+      this.storage.savePendingChanges([...this.pending]).catch(() => {});
+    }
   }
 
   /**
@@ -1244,6 +1266,13 @@ export class CRDTStore {
    * pending timer first (rather than letting it race this call) so the
    * write happens exactly once. Call before unload, or in tests that need
    * to assert on the adapter synchronously.
+   *
+   * Mirrors drainDebouncedPersist's gating: `savePendingChanges` is only
+   * written if `pending` actually changed since the last drain/flush. A
+   * document-only session (undo/redo/applyChanges, no local writes) that
+   * flushes before unload has nothing new to say about `pending`, so
+   * flushing does not manufacture a write for it — same reasoning as the
+   * debounce fix this method exists to support, not a special case of it.
    */
   async flushPersistence(): Promise<void> {
     if (this.pendingPersistTimer) {
@@ -1262,7 +1291,11 @@ export class CRDTStore {
         }
       }
     }
-    writes.push(this.storage.savePendingChanges([...this.pending]));
+    const pendingDirty = this.pendingDebounceDirty;
+    this.pendingDebounceDirty = false;
+    if (pendingDirty) {
+      writes.push(this.storage.savePendingChanges([...this.pending]));
+    }
     await Promise.allSettled(writes);
   }
 
