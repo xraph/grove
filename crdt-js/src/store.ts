@@ -985,6 +985,13 @@ export class CRDTStore {
    * Import a state snapshot, replacing current state. Fires all listeners.
    */
   importState(snapshot: StateSnapshot): void {
+    // Every table about to be dropped must invalidate: a table the snapshot
+    // omits is wiped here and would otherwise keep a version that still
+    // matches a cached resolution.
+    for (const t of this.state.keys()) {
+      this.tableVersions.set(t, (this.tableVersions.get(t) ?? 0) + 1);
+    }
+
     // Clear current state.
     this.state.clear();
 

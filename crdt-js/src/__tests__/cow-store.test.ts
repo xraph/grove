@@ -33,7 +33,10 @@ describe("copy-on-write store", () => {
     expect(b).toBe(0);
   });
 
-  it("replaces the document object on every write (identity changes)", () => {
+  // Not a COW identity check: exportTable deep-clones, so this holds even
+  // against a store that mutates in place. The beforePersist test below is the
+  // one that observes real document identity.
+  it("exportTable hands back an independent snapshot per call", () => {
     const { store } = mk();
     store.setField("t", "p", "f", 1);
     const first = store.exportTable("t")["p"];
@@ -64,6 +67,36 @@ describe("copy-on-write store", () => {
     expect(seen[0].fields).not.toBe(seen[1].fields);
     expect(seen[0].fields["f"].value).toBe(1);
     expect(seen[1].fields["f"].value).toBe(2);
+  });
+
+  it("invalidates the version of every table an imported snapshot omits", () => {
+    const { store } = mk();
+    store.setField("users", "u1", "name", "Alice");
+    store.setField("posts", "p1", "title", "Hello");
+
+    // importState clears `state` directly rather than going through
+    // setDocument, so a table the snapshot omits is wiped without its version
+    // moving. Task 4 keys its collection cache on that version, and would go
+    // on serving the resolution it cached for the now-deleted documents.
+    // There is no public reader for the version yet, so this reaches for the
+    // private map; Task 4 makes the same defect observable through getCollection.
+    const versions = (store as unknown as { tableVersions: Map<string, number> })
+      .tableVersions;
+    const usersVersionBefore = versions.get("users");
+    expect(usersVersionBefore).toBeDefined();
+
+    store.importState({
+      version: 1,
+      nodeId: "n1",
+      timestamp: Date.now(),
+      tables: { posts: { p1: { table: "posts", pk: "p1", fields: {}, tombstone: false } } },
+      pending: [],
+    });
+
+    expect(versions.get("users")).not.toBe(usersVersionBefore);
+    expect(store.getCollection("users")).toEqual([]);
+    expect(store.getDocument("users", "u1")).toBeNull();
+    expect(store.getCollection("posts")).toHaveLength(1);
   });
 
   it("undo restores a text field that did not exist before", () => {
