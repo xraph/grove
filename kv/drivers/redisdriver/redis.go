@@ -7,6 +7,7 @@ package redisdriver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -124,24 +125,45 @@ func (db *RedisDB) Exists(ctx context.Context, keys ...string) (int64, error) {
 
 // --- BatchDriver ---
 
+// MGet reads many keys, returning a slice positionally aligned with keys
+// and holding nil where a key was absent.
+//
+// This pipelines GETs rather than issuing one MGET. MGET requires every
+// key to live in the same hash slot, so against a cluster it fails with
+// CROSSSLOT for exactly the workloads that most want a batch read. A
+// pipeline costs the same round trip and stays correct when the keys are
+// spread.
 func (db *RedisDB) MGet(ctx context.Context, keys []string) ([][]byte, error) {
-	vals, err := db.client.MGet(ctx, keys...).Result()
-	if err != nil {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+
+	pipe := db.client.Pipeline()
+
+	cmds := make([]*redis.StringCmd, len(keys))
+	for i, k := range keys {
+		cmds[i] = pipe.Get(ctx, k)
+	}
+
+	// A missing key makes Exec report redis.Nil for the batch as a whole.
+	// The per-command results below distinguish the misses, so only some
+	// other failure is worth reporting.
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
 		return nil, fmt.Errorf("redisdriver: mget: %w", err)
 	}
 
-	result := make([][]byte, len(vals))
-	for i, v := range vals {
-		if v == nil {
+	result := make([][]byte, len(keys))
+
+	for i, cmd := range cmds {
+		raw, err := cmd.Bytes()
+		if err != nil {
+			// Absent, which the nil entry already says.
 			continue
 		}
-		switch val := v.(type) {
-		case string:
-			result[i] = []byte(val)
-		case []byte:
-			result[i] = val
-		}
+
+		result[i] = raw
 	}
+
 	return result, nil
 }
 

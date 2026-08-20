@@ -7,10 +7,10 @@ replace github.com/xraph/grove => ../../
 replace github.com/xraph/grove/kv => ../
 
 require (
-	github.com/xraph/forge v1.9.1
+	github.com/xraph/forge v1.9.8
 	github.com/xraph/grove v0.0.0
 	github.com/xraph/grove/kv v0.0.0-00010101000000-000000000000
-	github.com/xraph/vessel v1.0.2
+	github.com/xraph/vessel v1.0.4
 )
 
 require (
@@ -82,8 +82,8 @@ require (
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	github.com/xraph/confy v0.5.2 // indirect
-	github.com/xraph/go-utils v1.1.3 // indirect
+	github.com/xraph/confy v1.0.2 // indirect
+	github.com/xraph/go-utils v1.1.6 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
