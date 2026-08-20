@@ -938,15 +938,31 @@ export class CRDTStore {
     return [...this.pending];
   }
 
-  /** Clear pending changes after a successful push. */
-  clearPendingChanges(): void {
-    this.pending = [];
+  /**
+   * Clear pending changes after a successful push.
+   *
+   * Pass the exact records that were pushed to clear only those. Clearing
+   * everything would also discard writes made WHILE the push was in
+   * flight, silently losing them.
+   */
+  clearPendingChanges(pushed?: readonly ChangeRecord[]): void {
+    if (!pushed) {
+      this.pending = [];
+    } else {
+      const sent = new Set(pushed);
+      this.pending = this.pending.filter((c) => !sent.has(c));
+    }
     this.persistPending();
   }
 
   /** Get the number of pending changes. */
   get pendingCount(): number {
     return this.pending.length;
+  }
+
+  /** @internal Sync orchestration needs the hook chain. */
+  get pluginManager(): PluginManager {
+    return this.plugins;
   }
 
   // --- Subscriptions ---

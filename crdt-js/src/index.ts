@@ -161,6 +161,9 @@ export { CRDTStream } from "./stream.js";
 export { CRDTStore, BatchWriter } from "./store.js";
 export type { StateSnapshot } from "./store.js";
 
+// Sync orchestration
+export { SyncEngine } from "./sync.js";
+
 // Undo/Redo
 export type { UndoEntry } from "./undo.js";
 export { UndoManager } from "./undo.js";
