@@ -213,6 +213,11 @@ export interface StreamConfig {
   reconnectDelay?: number;
   /** Starting HLC for the stream. */
   since?: HLC;
+  /**
+   * Abort and reconnect if no bytes arrive for this many ms (default:
+   * 45000). Set 0 to disable. Server keep-alive comments reset it.
+   */
+  idleTimeout?: number;
 }
 
 /** Per-node counter state for PN-Counter. Mirrors Go crdt.PNCounterState. */

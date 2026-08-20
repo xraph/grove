@@ -42,6 +42,8 @@ export class CRDTStream {
   private shouldReconnect = false;
   private fetchImpl: typeof fetch;
   private auth?: AuthProvider;
+  private idleTimeout: number;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     baseURL: string,
@@ -57,6 +59,7 @@ export class CRDTStream {
     this.headers = headers ?? {};
     this.fetchImpl = fetchImpl ?? globalThis.fetch.bind(globalThis);
     this.auth = auth;
+    this.idleTimeout = config?.idleTimeout ?? 45_000;
   }
 
   /** Whether the stream is currently connected. */
@@ -77,21 +80,47 @@ export class CRDTStream {
     };
   }
 
-  /** Start the SSE connection. */
+  /** Start the SSE connection. Idempotent while a loop is running. */
   connect(): void {
-    if (this._connected) return;
+    // Guard on shouldReconnect, not _connected: _connected stays false
+    // until response headers arrive, so two quick calls would otherwise
+    // start two loops and leak the first AbortController.
+    if (this.shouldReconnect) return;
     this.shouldReconnect = true;
-    this.connectLoop();
+    void this.connectLoop();
   }
 
   /** Disconnect and stop reconnecting. */
   disconnect(): void {
+    this.clearIdleTimer();
     this.shouldReconnect = false;
     this.abortController?.abort();
     this.abortController = null;
     if (this._connected) {
       this._connected = false;
       this.emit({ type: "disconnected" });
+    }
+  }
+
+  /**
+   * Abort the connection if nothing arrives for idleTimeout ms.
+   *
+   * A TCP connection can die without the read ever completing, which leaves
+   * the reader parked forever and no reconnect is ever attempted. The
+   * server's SSE keep-alive comments are enough to keep this armed.
+   */
+  private armIdleTimer(): void {
+    if (this.idleTimeout <= 0) return;
+    this.clearIdleTimer();
+    this.idleTimer = setTimeout(() => {
+      this.abortController?.abort();
+    }, this.idleTimeout);
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
     }
   }
 
@@ -158,12 +187,10 @@ export class CRDTStream {
     }
 
     this._connected = true;
+    this.armIdleTimer();
     this.emit({ type: "connected" });
 
     const reader = response.body?.getReader();
-    if (!reader) {
-      throw new Error("CRDT stream: response has no body");
-    }
 
     const decoder = new TextDecoder();
     let buffer = "";
@@ -171,9 +198,14 @@ export class CRDTStream {
     let dataLines: string[] = [];
 
     try {
+      if (!reader) {
+        throw new Error("CRDT stream: response has no body");
+      }
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        this.armIdleTimer();
 
         buffer += decoder.decode(value, { stream: true });
 
@@ -208,7 +240,8 @@ export class CRDTStream {
         }
       }
     } finally {
-      reader.releaseLock();
+      this.clearIdleTimer();
+      reader?.releaseLock();
     }
   }
 

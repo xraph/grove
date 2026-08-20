@@ -617,4 +617,42 @@ describe("CRDTStream", () => {
       expect(opts.headers["Authorization"]).toBe("Bearer token");
     });
   });
+
+  describe("connect re-entrancy", () => {
+    it("a second connect() does not start a second loop", async () => {
+      let opens = 0;
+      const fetchImpl = (async () => {
+        opens++;
+        return new Response(new ReadableStream({ start() {} }), {
+          status: 200, headers: { "Content-Type": "text/event-stream" },
+        });
+      }) as unknown as typeof fetch;
+
+      const stream = new CRDTStream("http://x", {}, {}, fetchImpl);
+      stream.connect();
+      stream.connect();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(opens).toBe(1);
+      stream.disconnect();
+    });
+
+    it("disconnect then connect starts a fresh loop", async () => {
+      let opens = 0;
+      const fetchImpl = (async () => {
+        opens++;
+        return new Response(new ReadableStream({ start() {} }), {
+          status: 200, headers: { "Content-Type": "text/event-stream" },
+        });
+      }) as unknown as typeof fetch;
+
+      const stream = new CRDTStream("http://x", {}, {}, fetchImpl);
+      stream.connect();
+      await new Promise((r) => setTimeout(r, 20));
+      stream.disconnect();
+      stream.connect();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(opens).toBe(2);
+      stream.disconnect();
+    });
+  });
 });
