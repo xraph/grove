@@ -513,6 +513,7 @@ describe("HttpTransport presence", () => {
       const transport = new HttpTransport({
         baseURL: "https://api.example.com/sync",
         fetch: fetchFn,
+        retries: 0,
       });
 
       await expect(

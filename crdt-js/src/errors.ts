@@ -48,22 +48,40 @@ export class CRDTError extends Error {
 }
 
 /**
+ * Whether an HTTP status code represents a transient failure worth
+ * retrying.
+ *
+ * 5xx, 429, and 408 are transient; other 4xx responses are the caller's
+ * fault. No status at all means the request never reached the server (a
+ * network-level failure, e.g. DNS or a dropped connection), which is
+ * typically transient too.
+ *
+ * This is the single source of truth for HTTP retryability — both
+ * `TransportError`'s constructor (below) and `HttpTransport`'s own retry
+ * loop (`src/transport.ts`) call this instead of encoding the rule twice.
+ */
+export function isRetryableStatus(status?: number): boolean {
+  return (
+    status === undefined ||
+    status >= 500 ||
+    status === 429 ||
+    status === 408
+  );
+}
+
+/**
  * Error thrown by transport operations.
  * Extends CRDTError for backward compatibility — existing
  * `catch (e) { if (e instanceof CRDTError) }` patterns still work.
  */
 export class TransportError extends CRDTError {
   constructor(message: string, statusCode?: number) {
-    // 5xx, 429, and 408 are transient failures worth retrying; other 4xx
-    // responses are the caller's fault. No statusCode at all means the
-    // request never reached the server (network failure), which is
-    // typically transient too.
-    const retryable =
-      statusCode === undefined ||
-      statusCode >= 500 ||
-      statusCode === 429 ||
-      statusCode === 408;
-    super(message, statusCode, CRDTErrorCode.NetworkUnreachable, retryable);
+    super(
+      message,
+      statusCode,
+      CRDTErrorCode.NetworkUnreachable,
+      isRetryableStatus(statusCode)
+    );
     this.name = "TransportError";
   }
 }

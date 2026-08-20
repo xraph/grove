@@ -20,7 +20,7 @@ import type {
   PresenceState,
   PresenceSnapshot,
 } from "./types.js";
-import { TransportError } from "./errors.js";
+import { TransportError, isRetryableStatus } from "./errors.js";
 import { CRDTStream } from "./stream.js";
 import { Backoff } from "./backoff.js";
 import type { BackoffOptions } from "./backoff.js";
@@ -158,7 +158,7 @@ export class HttpTransport implements Transport {
         return (await parseJsonOrEmpty<T>(response));
       } catch (err) {
         // A non-retryable TransportError was thrown deliberately above.
-        if (err instanceof TransportError && !isRetryableStatus(err.statusCode ?? 0)) {
+        if (err instanceof TransportError && !isRetryableStatus(err.statusCode)) {
           throw err;
         }
         lastError = err;
@@ -169,11 +169,6 @@ export class HttpTransport implements Transport {
       ? lastError
       : new TransportError(`CRDT ${path} failed after ${this.retries + 1} attempts`);
   }
-}
-
-/** 5xx, 429, and 408 are worth retrying; other 4xx are the caller's fault. */
-function isRetryableStatus(status: number): boolean {
-  return status >= 500 || status === 429 || status === 408;
 }
 
 /** Fetch with an AbortSignal-backed timeout. */

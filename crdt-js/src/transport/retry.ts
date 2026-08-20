@@ -24,7 +24,11 @@ export interface RetryOptions {
   isRetryable?: (err: unknown) => boolean;
 }
 
-/** Default policy: honor CRDTError.retryable; retry unknown errors once. */
+/**
+ * Default policy: honor CRDTError.retryable; retry any other Error up to
+ * the configured `retries` count (same schedule as everything else — not
+ * a special one-shot case).
+ */
 function defaultIsRetryable(err: unknown): boolean {
   if (err instanceof CRDTError) return err.retryable;
   return err instanceof Error;

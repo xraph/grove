@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { CRDTClient, CRDTError } from "../client.js";
 import { CRDTStream } from "../stream.js";
+import { HttpTransport } from "../transport.js";
 import type { HLC, PullResponse, PushResponse, ChangeRecord } from "../types.js";
 
 function mockFetch(body: unknown, status = 200) {
@@ -222,7 +223,13 @@ describe("CRDTClient", () => {
 
     it("throws CRDTError on non-ok response", async () => {
       const fetchFn = mockFetch("server error", 500);
-      const client = createClient(fetchFn);
+      const client = createClient(fetchFn, {
+        transport: new HttpTransport({
+          baseURL: "https://api.example.com/sync",
+          fetch: fetchFn,
+          retries: 0,
+        }),
+      });
       await expect(client.pull()).rejects.toThrow(CRDTError);
     });
 
@@ -328,7 +335,13 @@ describe("CRDTClient", () => {
 
     it("throws CRDTError on non-ok response", async () => {
       const fetchFn = mockFetch("error", 500);
-      const client = createClient(fetchFn);
+      const client = createClient(fetchFn, {
+        transport: new HttpTransport({
+          baseURL: "https://api.example.com/sync",
+          fetch: fetchFn,
+          retries: 0,
+        }),
+      });
       await expect(
         client.push([
           {

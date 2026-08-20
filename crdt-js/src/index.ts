@@ -148,6 +148,7 @@ export {
   ValidationError,
   SyncError,
   PluginError,
+  isRetryableStatus,
 } from "./errors.js";
 
 // Client
