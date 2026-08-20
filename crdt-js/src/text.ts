@@ -385,6 +385,31 @@ export function applyTextOp(
   }
 }
 
+/**
+ * Copy-on-write wrapper around applyTextOp.
+ *
+ * Fragments are shallow-cloned before the mutating applier runs, so the
+ * input state is never touched. Text coalesces sequential typing into one
+ * span, so the fragment count stays small and this copy stays cheap.
+ */
+export function applyTextOpTo(
+  state: TextState,
+  op: TextOperation,
+  nodeID: string,
+  clock: HLC
+): TextState {
+  const frags: Record<string, TextFragment[]> = {};
+  for (const key of Object.keys(state.frags)) {
+    frags[key] = state.frags[key].map((f) => ({
+      ...f,
+      ...(f.attrs ? { attrs: { ...f.attrs } } : {}),
+    }));
+  }
+  const next: TextState = { frags };
+  applyTextOp(next, op, nodeID, clock);
+  return next;
+}
+
 // --- Local edit API (mutates state AND returns the wire op) ---
 
 /** Resolve `length` visible chars starting at ref's char into spans. */

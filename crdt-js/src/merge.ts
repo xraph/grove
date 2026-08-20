@@ -17,7 +17,9 @@ import type {
   DocumentCRDTState,
 } from "./types.js";
 import { hlcAfter, hlcCompare, hlcString } from "./hlc.js";
-import { applyTextOp, mergeText, newTextState } from "./text.js";
+import { mergeText, newTextState } from "./text.js";
+import { withEntry, withoutKeys, withAppended, withFlags } from "./immutable.js";
+import { applyTextOpTo } from "./text.js";
 
 // --- LWW Register ---
 
@@ -557,110 +559,100 @@ export function mergeFieldState(
     }
 
     case "set": {
-      let localSet = local?.set_state ?? newORSetState();
-      // Apply set operation from the change.
+      const localSet = local?.set_state ?? newORSetState();
+      let entries = localSet.entries;
+      let removed = localSet.removed;
+
       if (change.set_op) {
         const op = change.set_op;
         if (op.op === "add") {
+          const newTag: ORSetTag = { node: change.node_id, hlc: change.hlc };
           for (const elem of op.elements) {
             const key = JSON.stringify(elem);
-            const newTag: ORSetTag = { node: change.node_id, hlc: change.hlc };
-            localSet.entries[key] = [
-              ...(localSet.entries[key] ?? []),
-              newTag,
-            ];
+            entries = withEntry(entries, key, withAppended(entries[key], newTag));
           }
         } else if (op.op === "remove") {
+          const keys: string[] = [];
           if (op.tags && op.tags.length > 0) {
             // Exact observed-remove: the op names the tags it saw, scoped
             // to the elements it removes.
             for (const elem of op.elements) {
               const key = JSON.stringify(elem);
-              for (const t of op.tags) {
-                localSet.removed[removedKey(key, t)] = true;
-              }
+              for (const t of op.tags) keys.push(removedKey(key, t));
             }
           } else {
             // Legacy remove: only tags older than the remove's HLC —
             // concurrent-or-newer adds survive (add-wins). Matches Go.
             for (const elem of op.elements) {
               const key = JSON.stringify(elem);
-              const tags = localSet.entries[key] ?? [];
-              for (const t of tags) {
-                if (hlcAfter(change.hlc, t.hlc)) {
-                  localSet.removed[removedKey(key, t)] = true;
-                }
+              for (const t of entries[key] ?? []) {
+                if (hlcAfter(change.hlc, t.hlc)) keys.push(removedKey(key, t));
               }
             }
           }
+          removed = withFlags(removed, keys);
         }
       }
+
       return {
         type: "set",
         hlc: change.hlc,
         node_id: change.node_id,
-        set_state: localSet,
+        set_state: entries === localSet.entries && removed === localSet.removed
+          ? localSet
+          : { entries, removed },
       };
     }
 
     case "list": {
-      let localList = local?.list_state ?? newRGAListState();
-      // Apply list operation from the change.
+      const localList = local?.list_state ?? newRGAListState();
+      let nodes = localList.nodes;
+
+      const tombstoneAt = (id: HLC): void => {
+        const key = hlcKey(id);
+        const existing = nodes[key];
+        nodes = withEntry(nodes, key, existing
+          ? { ...existing, tombstone: true }
+          // Keep the tombstone even when the insert hasn't arrived:
+          // a late insert must stay deleted (matches Go).
+          : {
+              id,
+              node_id: change.node_id,
+              parent_id: { ts: 0, c: 0, node: "" },
+              value: undefined,
+              tombstone: true,
+            });
+      };
+
       if (change.list_op) {
         const op = change.list_op;
         if (op.op === "insert" && op.node_id) {
-          const key = hlcKey(op.node_id);
-          localList.nodes[key] = {
+          nodes = withEntry(nodes, hlcKey(op.node_id), {
             id: op.node_id,
             node_id: change.node_id,
             parent_id: op.parent_id ?? { ts: 0, c: 0, node: "" },
             value: op.value,
-          };
+          });
         } else if (op.op === "delete" && op.node_id) {
-          const key = hlcKey(op.node_id);
-          const existing = localList.nodes[key];
-          if (existing) {
-            localList.nodes[key] = { ...existing, tombstone: true };
-          } else {
-            // Keep the tombstone even when the insert hasn't arrived:
-            // a late insert must stay deleted (matches Go).
-            localList.nodes[key] = {
-              id: op.node_id,
-              node_id: change.node_id,
-              parent_id: { ts: 0, c: 0, node: "" },
-              value: undefined,
-              tombstone: true,
-            };
-          }
+          tombstoneAt(op.node_id);
         } else if (op.op === "move" && op.node_id) {
           // Move = tombstone the old id + re-insert under the new parent
           // with the op's HLC as the new id (matches Go).
-          const oldKey = hlcKey(op.node_id);
-          const existing = localList.nodes[oldKey];
-          if (existing) {
-            localList.nodes[oldKey] = { ...existing, tombstone: true };
-          } else {
-            localList.nodes[oldKey] = {
-              id: op.node_id,
-              node_id: change.node_id,
-              parent_id: { ts: 0, c: 0, node: "" },
-              value: undefined,
-              tombstone: true,
-            };
-          }
-          localList.nodes[hlcKey(change.hlc)] = {
+          tombstoneAt(op.node_id);
+          nodes = withEntry(nodes, hlcKey(change.hlc), {
             id: change.hlc,
             node_id: change.node_id,
             parent_id: op.parent_id ?? { ts: 0, c: 0, node: "" },
             value: op.value,
-          };
+          });
         }
       }
+
       return {
         type: "list",
         hlc: change.hlc,
         node_id: change.node_id,
-        list_state: localList,
+        list_state: nodes === localList.nodes ? localList : { nodes },
       };
     }
 
@@ -676,11 +668,17 @@ export function mergeFieldState(
           const existing = localDoc.fields[path];
           if (existing && hlcAfter(change.hlc, existing.hlc)) {
             const prefix = path + ".";
-            for (const key of Object.keys(localDoc.fields)) {
-              if (key === path || key.startsWith(prefix)) {
-                delete localDoc.fields[key];
-              }
-            }
+            return {
+              type: "document",
+              hlc: change.hlc,
+              node_id: change.node_id,
+              doc_state: {
+                fields: withoutKeys(
+                  localDoc.fields,
+                  (k) => k === path || k.startsWith(prefix)
+                ),
+              },
+            };
           }
         } else {
           const remoteDoc = newDocumentCRDTState();
@@ -708,9 +706,9 @@ export function mergeFieldState(
 
     case "text": {
       const localText = local?.text_state ?? newTextState();
-      if (change.text_op) {
-        applyTextOp(localText, change.text_op, change.node_id, change.hlc);
-      }
+      const nextText = change.text_op
+        ? applyTextOpTo(localText, change.text_op, change.node_id, change.hlc)
+        : localText;
       // Stamp with whichever of local/change is newer (Go pickNewer
       // parity) — a redelivered older op must not regress the field clock.
       const keepLocal = local && hlcAfter(local.hlc, change.hlc);
@@ -718,7 +716,7 @@ export function mergeFieldState(
         type: "text",
         hlc: keepLocal ? local.hlc : change.hlc,
         node_id: keepLocal ? local.node_id : change.node_id,
-        text_state: localText,
+        text_state: nextText,
       };
     }
 
