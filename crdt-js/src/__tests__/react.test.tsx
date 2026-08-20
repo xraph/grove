@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, act } from "@testing-library/react";
-import { CRDTProvider, useDocument, useCollection } from "../react.js";
+import {
+  CRDTProvider,
+  useDocument,
+  useCollection,
+  useList,
+  useSet,
+  useNestedDocument,
+} from "../react.js";
 import type { Transport, PullResponse, PushResponse } from "../types.js";
 
 const HLC0 = { ts: "0", c: 0, node: "" };
@@ -73,5 +80,57 @@ describe("React hooks render without snapshot thrash", () => {
       String(c[0]).includes("getSnapshot should be cached")
     );
     expect(warned).toBe(false);
+  });
+});
+
+function TodoListView() {
+  const { items, insert } = useList<string>("docs", "doc-1", "todos");
+  return (
+    <div>
+      <span data-testid="items">{items.join(",")}</span>
+      <button onClick={() => insert("x")}>add</button>
+    </div>
+  );
+}
+
+function SetView() {
+  const { elements } = useSet<string>("docs", "doc-1", "tags");
+  return <span data-testid="tags">{elements.join(",")}</span>;
+}
+
+function NestedView() {
+  const { data } = useNestedDocument<{ author?: string }>("docs", "doc-1", "meta");
+  return <span data-testid="author">{data.author ?? "none"}</span>;
+}
+
+describe("all hooks render and update without thrash", () => {
+  it("useList renders and updates on insert", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      <CRDTProvider config={config}>
+        <TodoListView />
+      </CRDTProvider>
+    );
+    expect(screen.getByTestId("items").textContent).toBe("");
+    await act(async () => {
+      screen.getByText("add").click();
+    });
+    expect(screen.getByTestId("items").textContent).toBe("x");
+    expect(err.mock.calls.some((c) =>
+      String(c[0]).includes("getSnapshot should be cached"))).toBe(false);
+  });
+
+  it("useSet and useNestedDocument render without warnings", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      <CRDTProvider config={config}>
+        <SetView />
+        <NestedView />
+      </CRDTProvider>
+    );
+    expect(screen.getByTestId("tags").textContent).toBe("");
+    expect(screen.getByTestId("author").textContent).toBe("none");
+    expect(err.mock.calls.some((c) =>
+      String(c[0]).includes("getSnapshot should be cached"))).toBe(false);
   });
 });

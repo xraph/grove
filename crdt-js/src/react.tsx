@@ -58,6 +58,12 @@ import type {
   TextDeltaSegment,
 } from "./types.js";
 
+/** Shared empties — an inline [] or {} in getSnapshot is a fresh reference
+ *  every call, which is exactly the loop useSyncExternalStore warns about. */
+const EMPTY_ARRAY: never[] = [];
+const EMPTY_HLC_ARRAY: HLC[] = [];
+const EMPTY_OBJECT: Record<string, never> = {};
+
 // --- Context ---
 
 /** Values provided by CRDTProvider. */
@@ -340,7 +346,7 @@ export function useCollection<T = Record<string, unknown>>(
   const items = useSyncExternalStore(
     (cb) => store.subscribeCollection(table, cb),
     () => store.getCollection<T>(table),
-    () => [] as T[] // Server snapshot (SSR).
+    () => EMPTY_ARRAY as T[] // Server snapshot (SSR).
   );
 
   const create = useCallback(
@@ -514,9 +520,9 @@ export function useSet<T = unknown>(
     (cb) => store.subscribeDocument(table, pk, cb),
     () => {
       const doc = store.getDocument<Record<string, unknown>>(table, pk);
-      return Array.isArray(doc?.[field]) ? (doc![field] as T[]) : [];
+      return Array.isArray(doc?.[field]) ? (doc![field] as T[]) : (EMPTY_ARRAY as T[]);
     },
-    () => [] as T[]
+    () => EMPTY_ARRAY as T[]
   );
 
   const add = useCallback(
@@ -586,30 +592,21 @@ export function useList<T = unknown>(
 ): UseListReturn<T> {
   const { store } = useCRDTContext();
 
-  // Resolved documents are rebuilt per call, so their arrays cannot serve
-  // as useSyncExternalStore snapshots (fresh reference every render =
-  // infinite re-render). Subscription-driven state keeps identity stable.
-  const readItems = useCallback((): T[] => {
-    const doc = store.getDocument<Record<string, unknown>>(table, pk);
-    return Array.isArray(doc?.[field]) ? (doc![field] as T[]) : [];
-  }, [store, table, pk, field]);
-  const [items, setItems] = useState<T[]>(readItems);
-  useEffect(() => {
-    setItems(readItems());
-    return store.subscribeDocument(table, pk, () => setItems(readItems()));
-  }, [store, table, pk, readItems]);
+  const items = useSyncExternalStore(
+    (cb) => store.subscribeDocument(table, pk, cb),
+    () => {
+      const doc = store.getDocument<Record<string, unknown>>(table, pk);
+      const value = doc?.[field];
+      return Array.isArray(value) ? (value as T[]) : EMPTY_ARRAY;
+    },
+    () => EMPTY_ARRAY as T[]
+  );
 
-  // getListNodeIds builds a fresh array per call, so it cannot serve as a
-  // useSyncExternalStore snapshot (Object.is on a new reference every
-  // render = infinite re-render). Subscription-driven state keeps the
-  // reference stable between store changes.
-  const [nodeIds, setNodeIds] = useState<HLC[]>(() => store.getListNodeIds(table, pk, field));
-  useEffect(() => {
-    setNodeIds(store.getListNodeIds(table, pk, field));
-    return store.subscribeDocument(table, pk, () => {
-      setNodeIds(store.getListNodeIds(table, pk, field));
-    });
-  }, [store, table, pk, field]);
+  const nodeIds = useSyncExternalStore(
+    (cb) => store.subscribeDocument(table, pk, cb),
+    () => store.getListNodeIds(table, pk, field),
+    () => EMPTY_HLC_ARRAY
+  );
 
   const insert = useCallback(
     (value: T, afterId?: HLC) => {
@@ -747,9 +744,9 @@ export function useNestedDocument<T = Record<string, unknown>>(
     (cb) => store.subscribeDocument(table, pk, cb),
     () => {
       const doc = store.getDocument<Record<string, unknown>>(table, pk);
-      return (doc?.[field] ?? {}) as T;
+      return (doc?.[field] ?? EMPTY_OBJECT) as T;
     },
-    () => ({}) as T
+    () => EMPTY_OBJECT as T
   );
 
   const set = useCallback(
@@ -970,13 +967,14 @@ export function useUndo(store: CRDTStore): UseUndoReturn {
 export function usePlugin(store: CRDTStore, plugin: import("./plugin.js").StorePlugin): void {
   const pluginRef = useRef(plugin);
   pluginRef.current = plugin;
+  const name = plugin.name;
 
   useEffect(() => {
     store.use(pluginRef.current);
     return () => {
-      store.removePlugin(pluginRef.current.name);
+      store.removePlugin(name);
     };
-  }, [store, pluginRef.current.name]);
+  }, [store, name]);
 }
 
 // --- usePresence ---
@@ -1030,7 +1028,7 @@ export function usePresence<T = Record<string, unknown>>(
   const others = useSyncExternalStore(
     (cb) => client.presence.subscribe(topic, cb),
     () => client.presence.getPresence<T>(topic),
-    () => [] as PresenceState<T>[]
+    () => EMPTY_ARRAY as PresenceState<T>[]
   );
 
   const updateMyPresence = useCallback(
@@ -1212,7 +1210,7 @@ export function useRoom<T extends ParticipantData = ParticipantData>(
   const others = useSyncExternalStore(
     (cb) => client.presence.subscribe(roomId, cb),
     () => client.presence.getPresence<T>(roomId),
-    () => [] as PresenceState<T>[]
+    () => EMPTY_ARRAY as PresenceState<T>[]
   );
 
   const updateCursor = useCallback(
