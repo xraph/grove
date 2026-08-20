@@ -3,7 +3,7 @@ import { SyncEngine } from "../sync.js";
 import { CRDTClient } from "../client.js";
 import { CRDTStore } from "../store.js";
 import type { Transport, PushRequest, ChangeRecord } from "../types.js";
-import type { StorePlugin, SyncHook } from "../plugin.js";
+import type { StorePlugin, SyncHook, PresenceHook } from "../plugin.js";
 
 const HLC0 = { ts: "0", c: 0, node: "" };
 
@@ -90,5 +90,64 @@ describe("SyncEngine", () => {
     await engine.sync();
     expect(pushes).toBe(0);
     expect(store.pendingCount).toBe(1);
+  });
+});
+
+describe("presence hooks", () => {
+  it("beforePresenceUpdate can rewrite outgoing data (D5)", async () => {
+    const sent: unknown[] = [];
+    const transport: Transport = {
+      async pull() { return { changes: [], latest_hlc: HLC0 }; },
+      async push() { return { merged: 0, latest_hlc: HLC0 }; },
+      async updatePresence(u) { sent.push(u.data); },
+      async getPresence() { return []; },
+    };
+    const client = new CRDTClient({ nodeID: "n1", transport });
+    const store = new CRDTStore("n1", client.clock, undefined, { persistDebounceMs: 0 });
+    client.attachStore(store);
+    const redact: StorePlugin & PresenceHook = {
+      name: "redact",
+      beforePresenceUpdate(_topic, data) {
+        return { ...(data as object), redacted: true };
+      },
+    };
+    store.use(redact);
+    await client.updatePresence("t", { name: "Alice" });
+    expect(sent[0]).toEqual({ name: "Alice", redacted: true });
+    await client.leaveAllPresence();
+  });
+
+  it("beforePresenceUpdate returning null cancels the update", async () => {
+    let calls = 0;
+    const transport: Transport = {
+      async pull() { return { changes: [], latest_hlc: HLC0 }; },
+      async push() { return { merged: 0, latest_hlc: HLC0 }; },
+      async updatePresence() { calls++; },
+      async getPresence() { return []; },
+    };
+    const client = new CRDTClient({ nodeID: "n1", transport });
+    const store = new CRDTStore("n1", client.clock, undefined, { persistDebounceMs: 0 });
+    client.attachStore(store);
+    const veto: StorePlugin & PresenceHook = { name: "veto", beforePresenceUpdate() { return null; } };
+    store.use(veto);
+    await client.updatePresence("t", { name: "Alice" });
+    expect(calls).toBe(0);
+  });
+
+  it("onPresenceEvent fires for inbound events", () => {
+    const client = new CRDTClient({
+      nodeID: "n1",
+      transport: {
+        async pull() { return { changes: [], latest_hlc: HLC0 }; },
+        async push() { return { merged: 0, latest_hlc: HLC0 }; },
+      },
+    });
+    const store = new CRDTStore("n1", client.clock, undefined, { persistDebounceMs: 0 });
+    client.attachStore(store);
+    const seen: string[] = [];
+    const spy: StorePlugin & PresenceHook = { name: "spy", onPresenceEvent(ev) { seen.push(ev.type); } };
+    store.use(spy);
+    client.applyPresenceEvent({ type: "join", node_id: "peer", topic: "t", data: {} });
+    expect(seen).toEqual(["join"]);
   });
 });

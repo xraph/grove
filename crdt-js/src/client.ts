@@ -17,8 +17,10 @@ import type {
   ChangeRecord,
   PresenceState,
   PresenceConfig,
+  PresenceEvent,
   HLC,
 } from "./types.js";
+import type { CRDTStore } from "./store.js";
 import { HybridClock } from "./hlc.js";
 import { HttpStreamTransport, isStreamTransport } from "./transport.js";
 import { PresenceManager } from "./presence.js";
@@ -44,6 +46,7 @@ export class CRDTClient {
   private presenceConfig: PresenceConfig | undefined;
   private heartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
   private lastPresenceData = new Map<string, unknown>();
+  private store: CRDTStore | null = null;
 
   constructor(config: CRDTClientConfig) {
     this.nodeID = config.nodeID;
@@ -148,6 +151,28 @@ export class CRDTClient {
   // --- Presence ---
 
   /**
+   * Link a store so presence operations run through its plugin chain.
+   * Optional — presence works without it, just without hooks.
+   */
+  attachStore(store: CRDTStore): void {
+    this.store = store;
+  }
+
+  /**
+   * Apply an inbound presence event, running PresenceHook first.
+   * Prefer this over calling client.presence.applyEvent() directly.
+   */
+  applyPresenceEvent(event: PresenceEvent): void {
+    this.store?.pluginManager.dispatchOnPresenceEvent({
+      type: event.type,
+      nodeId: event.node_id,
+      topic: event.topic,
+      data: event.data,
+    });
+    this.presence.applyEvent(event);
+  }
+
+  /**
    * Update your presence for a topic (e.g., "documents:doc-1").
    * Automatically starts a heartbeat to keep presence alive on the server.
    *
@@ -164,12 +189,17 @@ export class CRDTClient {
       );
     }
 
-    this.lastPresenceData.set(topic, data);
+    const hooked = this.store
+      ? this.store.pluginManager.dispatchBeforePresenceUpdate(topic, data)
+      : data;
+    if (hooked === null) return;
+
+    this.lastPresenceData.set(topic, hooked);
 
     await this.transport.updatePresence({
       node_id: this.nodeID,
       topic,
-      data: data as Record<string, unknown>,
+      data: hooked as Record<string, unknown>,
     });
 
     // Start or reset heartbeat for this topic.
