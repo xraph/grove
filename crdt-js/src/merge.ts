@@ -272,16 +272,17 @@ export function mergeListState(
 }
 
 /**
- * Resolve an RGA list to an ordered array of live (non-tombstoned) values.
+ * Ordered live nodes of an RGA list, tombstones skipped.
  *
- * Walks the linked list from root (parent_id is zero HLC) and
- * uses HLC ordering for sibling resolution.
+ * Uses an explicit stack rather than recursion: sequential appends build a
+ * LINEAR parent chain, so recursion depth equals list length and overflows
+ * the stack in the low thousands.
  */
-export function listElements(state: RGAListState): unknown[] {
+function walkList(state: RGAListState): RGANode[] {
   const nodes = Object.values(state.nodes);
   if (nodes.length === 0) return [];
 
-  // Build children map: parent key → sorted children.
+  // Build children map: parent key → children.
   const childrenMap = new Map<string, RGANode[]>();
   for (const node of nodes) {
     const pk = hlcKey(node.parent_id);
@@ -293,28 +294,32 @@ export function listElements(state: RGAListState): unknown[] {
     children.push(node);
   }
 
-  // Sort each group by HLC descending (newest first, matching RGA insert-right semantics).
+  // Sort each sibling group by HLC descending (RGA insert-right semantics).
   for (const children of childrenMap.values()) {
     children.sort((a, b) => -hlcCompare(a.id, b.id));
   }
 
-  // DFS traversal from root.
-  const rootKey = hlcKey({ ts: 0, c: 0, node: "" });
-  const result: unknown[] = [];
+  const out: RGANode[] = [];
+  const stack: RGANode[] = [];
+  const roots = childrenMap.get(hlcKey({ ts: 0, c: 0, node: "" }));
+  // Push reversed so the first sibling pops first.
+  if (roots) for (let i = roots.length - 1; i >= 0; i--) stack.push(roots[i]);
 
-  function walk(parentKey: string): void {
-    const children = childrenMap.get(parentKey);
-    if (!children) return;
-    for (const child of children) {
-      if (!child.tombstone) {
-        result.push(child.value);
-      }
-      walk(hlcKey(child.id));
-    }
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (!node.tombstone) out.push(node);
+    const children = childrenMap.get(hlcKey(node.id));
+    if (children) for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
   }
 
-  walk(rootKey);
-  return result;
+  return out;
+}
+
+/**
+ * Resolve an RGA list to an ordered array of live (non-tombstoned) values.
+ */
+export function listElements(state: RGAListState): unknown[] {
+  return walkList(state).map((n) => n.value);
 }
 
 /**
@@ -322,40 +327,7 @@ export function listElements(state: RGAListState): unknown[] {
  * Order matches listElements().
  */
 export function listNodeIds(state: RGAListState): HLC[] {
-  const nodes = Object.values(state.nodes);
-  if (nodes.length === 0) return [];
-
-  const childrenMap = new Map<string, RGANode[]>();
-  for (const node of nodes) {
-    const pk = hlcKey(node.parent_id);
-    let children = childrenMap.get(pk);
-    if (!children) {
-      children = [];
-      childrenMap.set(pk, children);
-    }
-    children.push(node);
-  }
-
-  for (const children of childrenMap.values()) {
-    children.sort((a, b) => -hlcCompare(a.id, b.id));
-  }
-
-  const rootKey = hlcKey({ ts: 0, c: 0, node: "" });
-  const result: HLC[] = [];
-
-  function walk(parentKey: string): void {
-    const children = childrenMap.get(parentKey);
-    if (!children) return;
-    for (const child of children) {
-      if (!child.tombstone) {
-        result.push(child.id);
-      }
-      walk(hlcKey(child.id));
-    }
-  }
-
-  walk(rootKey);
-  return result;
+  return walkList(state).map((n) => n.id);
 }
 
 // --- Nested Document CRDT ---
