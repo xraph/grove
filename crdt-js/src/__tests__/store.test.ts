@@ -785,7 +785,8 @@ describe("CRDTStore", () => {
         .setField("email", "alice@example.com")
         .commit();
 
-      // commitBatch calls notifyListeners once for the whole batch.
+      // BatchWriter.commit() runs the whole batch inside one transact(),
+      // so notifyListeners fires once for the batch, not once per field.
       expect(listener).toHaveBeenCalledTimes(1);
     });
   });

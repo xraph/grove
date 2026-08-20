@@ -142,6 +142,15 @@ export class CRDTStore {
   /** Resolved collections, keyed on the table's write version. */
   private collectionCache = new Map<string, { version: number; items: unknown[] }>();
 
+  /** Depth of nested transact() calls. Zero means notify immediately. */
+  private txDepth = 0;
+
+  /** Documents touched while suspended: table → pks. */
+  private txTouched = new Map<string, Set<string>>();
+
+  /** True when pending changes were written while suspended. */
+  private txPendingDirty = false;
+
   /**
    * Resolves when persisted state has been hydrated.
    * The store is usable immediately (starts empty), but consumers
@@ -971,6 +980,38 @@ export class CRDTStore {
     };
   }
 
+  /**
+   * Run `fn` as one transaction: persistence and listener notification are
+   * suspended until the outermost call returns, so a multi-write batch
+   * produces exactly one render instead of one per field.
+   *
+   * Re-entrant — nested calls join the outer transaction.
+   */
+  transact<T>(fn: () => T): T {
+    this.txDepth++;
+    try {
+      return fn();
+    } finally {
+      this.txDepth--;
+      if (this.txDepth === 0) this.flushTransaction();
+    }
+  }
+
+  private flushTransaction(): void {
+    const touched = this.txTouched;
+    const pendingDirty = this.txPendingDirty;
+    this.txTouched = new Map();
+    this.txPendingDirty = false;
+
+    for (const [table, pks] of touched) {
+      for (const pk of pks) {
+        this.persistDocumentNow(table, pk);
+        this.notifyListenersNow(table, pk);
+      }
+    }
+    if (pendingDirty) this.persistPendingNow();
+  }
+
   // --- Batch Write API ---
 
   /**
@@ -988,22 +1029,6 @@ export class CRDTStore {
    */
   batch(table: string, pk: string): BatchWriter {
     return new BatchWriter(this, table, pk);
-  }
-
-  /**
-   * Apply a batch of changes atomically.
-   * All changes are applied in order, then persisted and notified once.
-   * @internal Used by BatchWriter.
-   */
-  commitBatch(table: string, pk: string, changes: ChangeRecord[]): ChangeRecord[] {
-    for (const change of changes) {
-      this.applyChangeInternal(change);
-      this.pending.push(change);
-    }
-    this.persistDocument(table, pk);
-    this.persistPending();
-    this.notifyListeners(table, pk);
-    return changes;
   }
 
   // --- State Export/Import ---
@@ -1123,7 +1148,7 @@ export class CRDTStore {
   }
 
   /** Fire-and-forget: persist a document to storage. */
-  private persistDocument(table: string, pk: string): void {
+  private persistDocumentNow(table: string, pk: string): void {
     const doc = this.getDoc(table, pk);
     if (doc) {
       const transformed = this.plugins.dispatchBeforePersist(table, pk, doc);
@@ -1132,8 +1157,31 @@ export class CRDTStore {
   }
 
   /** Fire-and-forget: persist pending changes to storage. */
-  private persistPending(): void {
+  private persistPendingNow(): void {
     this.storage.savePendingChanges([...this.pending]).catch(() => {});
+  }
+
+  /**
+   * Persist a document to storage, or defer until the outermost transact()
+   * flushes if a transaction is in progress.
+   */
+  private persistDocument(table: string, pk: string): void {
+    if (this.txDepth > 0) {
+      let pks = this.txTouched.get(table);
+      if (!pks) { pks = new Set(); this.txTouched.set(table, pks); }
+      pks.add(pk);
+      return;
+    }
+    this.persistDocumentNow(table, pk);
+  }
+
+  /**
+   * Persist pending changes to storage, or defer until the outermost
+   * transact() flushes if a transaction is in progress.
+   */
+  private persistPending(): void {
+    if (this.txDepth > 0) { this.txPendingDirty = true; return; }
+    this.persistPendingNow();
   }
 
   /**
@@ -1328,7 +1376,7 @@ export class CRDTStore {
     }));
   }
 
-  private notifyListeners(table: string, pk: string): void {
+  private notifyListenersNow(table: string, pk: string): void {
     // Document-level listeners.
     const docListeners = this.docListeners.get(table)?.get(pk);
     if (docListeners) {
@@ -1344,99 +1392,111 @@ export class CRDTStore {
     // Global listeners.
     for (const listener of this.globalListeners) listener();
   }
+
+  /**
+   * Notify listeners for a document, or defer until the outermost
+   * transact() flushes if a transaction is in progress.
+   */
+  private notifyListeners(table: string, pk: string): void {
+    if (this.txDepth > 0) {
+      let pks = this.txTouched.get(table);
+      if (!pks) { pks = new Set(); this.txTouched.set(table, pks); }
+      pks.add(pk);
+      return;
+    }
+    this.notifyListenersNow(table, pk);
+  }
 }
 
 /**
  * Batch writer for atomic multi-field updates on a single document.
  *
- * Collects changes without applying them. On `commit()`, all changes
- * are applied in order with a single persist and notification cycle.
+ * Queues calls to the store's own mutators and replays them inside a
+ * single transact(), so batched writes get identical semantics to direct
+ * ones — plugin hooks, undo recording, and cumulative counter totals —
+ * with one persist and one notification.
  *
  * @example
  * ```ts
  * const changes = store.batch("users", "user-1")
  *   .setField("name", "Alice")
- *   .setField("email", "alice@example.com")
  *   .incrementCounter("login_count")
- *   .addToSet("tags", ["admin", "active"])
+ *   .addToSet("tags", ["admin"])
  *   .commit();
  * ```
  */
 export class BatchWriter {
-  private store: CRDTStore;
-  private table: string;
-  private pk: string;
-  private changes: ChangeRecord[] = [];
+  private ops: Array<() => ChangeRecord | null> = [];
 
-  constructor(store: CRDTStore, table: string, pk: string) {
-    this.store = store;
-    this.table = table;
-    this.pk = pk;
-  }
+  constructor(
+    private store: CRDTStore,
+    private table: string,
+    private pk: string
+  ) {}
 
-  /** Set an LWW field. */
   setField(field: string, value: unknown): this {
-    this.changes.push({
-      table: this.table,
-      pk: this.pk,
-      field,
-      crdt_type: "lww",
-      hlc: { ts: 0, c: 0, node: "" }, // placeholder, assigned at commit
-      node_id: "",
-      value,
-    });
+    this.ops.push(() => this.store.setField(this.table, this.pk, field, value));
     return this;
   }
 
-  /** Increment a counter field. */
   incrementCounter(field: string, delta = 1): this {
-    this.changes.push({
-      table: this.table,
-      pk: this.pk,
-      field,
-      crdt_type: "counter",
-      hlc: { ts: 0, c: 0, node: "" },
-      node_id: "",
-      counter_delta: { inc: delta, dec: 0 },
-    });
+    this.ops.push(() =>
+      this.store.incrementCounter(this.table, this.pk, field, delta));
     return this;
   }
 
-  /** Add elements to a set field. */
+  decrementCounter(field: string, delta = 1): this {
+    this.ops.push(() =>
+      this.store.decrementCounter(this.table, this.pk, field, delta));
+    return this;
+  }
+
   addToSet(field: string, elements: unknown[]): this {
-    this.changes.push({
-      table: this.table,
-      pk: this.pk,
-      field,
-      crdt_type: "set",
-      hlc: { ts: 0, c: 0, node: "" },
-      node_id: "",
-      set_op: { op: "add", elements },
-    });
+    this.ops.push(() => this.store.addToSet(this.table, this.pk, field, elements));
+    return this;
+  }
+
+  removeFromSet(field: string, elements: unknown[]): this {
+    this.ops.push(() =>
+      this.store.removeFromSet(this.table, this.pk, field, elements));
+    return this;
+  }
+
+  insertIntoList(field: string, value: unknown, afterId?: HLC): this {
+    this.ops.push(() =>
+      this.store.insertIntoList(this.table, this.pk, field, value, afterId));
+    return this;
+  }
+
+  setDocumentField(field: string, path: string, value: unknown): this {
+    this.ops.push(() =>
+      this.store.setDocumentField(this.table, this.pk, field, path, value));
+    return this;
+  }
+
+  insertText(field: string, index: number, content: string): this {
+    this.ops.push(() =>
+      this.store.insertText(this.table, this.pk, field, index, content));
     return this;
   }
 
   /**
-   * Commit all queued changes atomically.
-   * All changes get a fresh HLC timestamp for causal consistency.
-   * Returns the list of committed changes.
+   * Commit all queued writes as one transaction.
+   * Returns the changes that were actually applied — a write a plugin
+   * rejected is omitted, and does not abort the rest of the batch.
    */
   commit(): ChangeRecord[] {
-    if (this.changes.length === 0) return [];
+    const ops = this.ops;
+    this.ops = [];
+    if (ops.length === 0) return [];
 
-    // Access the store's clock to assign real HLCs.
-    // We use the store's internal clock via the commitBatch path,
-    // but first assign proper HLC and node_id to each change.
-    const clock: HybridClock = (this.store as unknown as { clock: HybridClock }).clock;
-    const nodeID: string = (this.store as unknown as { nodeID: string }).nodeID;
-
-    for (const change of this.changes) {
-      change.hlc = clock.now();
-      change.node_id = nodeID;
-    }
-
-    const committed = this.store.commitBatch(this.table, this.pk, this.changes);
-    this.changes = [];
-    return committed;
+    return this.store.transact(() => {
+      const applied: ChangeRecord[] = [];
+      for (const op of ops) {
+        const change = op();
+        if (change) applied.push(change);
+      }
+      return applied;
+    });
   }
 }
