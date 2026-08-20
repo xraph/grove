@@ -13,7 +13,7 @@ import type {
   DocumentState, FieldState, HLC,
 } from "./types.js";
 import { hlcAfter, hlcIsZero, hlcString } from "./hlc.js";
-import { removedKey, tagKey } from "./merge.js";
+import { removedKey, tagRemoved } from "./merge.js";
 
 /**
  * Drop tombstoned LEAF nodes older than the horizon, cascading until no
@@ -54,15 +54,6 @@ export function compactListState(
   }
 
   return dropped === 0 ? { state, dropped: 0 } : { state: { nodes }, dropped };
-}
-
-/** True when this tag has been observed-removed for this element. */
-function tagRemoved(
-  removed: Record<string, boolean>,
-  elem: string,
-  tag: ORSetTag
-): boolean {
-  return Boolean(removed[removedKey(elem, tag)] || removed[tagKey(tag)]);
 }
 
 /**

@@ -122,7 +122,7 @@ export function removedKey(elem: string, tag: ORSetTag): string {
 }
 
 /** Removal check honoring both element-scoped and legacy tag-only keys. */
-function tagRemoved(
+export function tagRemoved(
   removed: Record<string, boolean>,
   elem: string,
   tag: ORSetTag
