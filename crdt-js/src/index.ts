@@ -202,6 +202,10 @@ export type {
 
 // Default implementations
 export { HttpTransport, HttpStreamTransport, isStreamTransport } from "./transport.js";
+
+// Retry decorator (composes over any transport)
+export { withRetry } from "./transport/retry.js";
+export type { RetryOptions } from "./transport/retry.js";
 export { MemoryStorage, IndexedDBStorage } from "./storage.js";
 export type { IndexedDBStorageOptions } from "./storage.js";
 export { StaticAuthProvider } from "./auth.js";

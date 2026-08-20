@@ -54,7 +54,16 @@ export class CRDTError extends Error {
  */
 export class TransportError extends CRDTError {
   constructor(message: string, statusCode?: number) {
-    super(message, statusCode, CRDTErrorCode.NetworkUnreachable, true);
+    // 5xx, 429, and 408 are transient failures worth retrying; other 4xx
+    // responses are the caller's fault. No statusCode at all means the
+    // request never reached the server (network failure), which is
+    // typically transient too.
+    const retryable =
+      statusCode === undefined ||
+      statusCode >= 500 ||
+      statusCode === 429 ||
+      statusCode === 408;
+    super(message, statusCode, CRDTErrorCode.NetworkUnreachable, retryable);
     this.name = "TransportError";
   }
 }

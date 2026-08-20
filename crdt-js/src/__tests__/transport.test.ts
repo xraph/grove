@@ -236,11 +236,15 @@ describe("HttpTransport", () => {
       .fn()
       .mockResolvedValueOnce({
         ok: true,
+        status: 200,
         json: () => Promise.resolve(pullResponse),
+        text: () => Promise.resolve(JSON.stringify(pullResponse)),
       })
       .mockResolvedValueOnce({
         ok: true,
+        status: 200,
         json: () => Promise.resolve(pushResponse),
+        text: () => Promise.resolve(JSON.stringify(pushResponse)),
       }) as unknown as typeof fetch;
 
     const auth: AuthProvider = {
@@ -289,5 +293,62 @@ describe("HttpStreamTransport", () => {
 
     const resp = await transport.pull({ tables: [], node_id: "n1" });
     expect(resp.changes).toEqual([]);
+  });
+});
+
+describe("timeout, retry, empty body", () => {
+  it("retries a 503 and then succeeds", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      if (calls < 3) return new Response("busy", { status: 503 });
+      return new Response(JSON.stringify({ changes: [], latest_hlc: { ts: "0", c: 0, node: "" } }),
+        { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const t = new HttpTransport({
+      baseURL: "http://x", fetch: fetchImpl, retries: 3,
+      backoff: { initialDelay: 1, jitter: false },
+    });
+    const resp = await t.pull({ tables: ["a"], node_id: "n1" });
+    expect(calls).toBe(3);
+    expect(resp.changes).toEqual([]);
+  });
+
+  it("does not retry a 400", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      return new Response("bad", { status: 400 });
+    }) as unknown as typeof fetch;
+
+    const t = new HttpTransport({
+      baseURL: "http://x", fetch: fetchImpl, retries: 3,
+      backoff: { initialDelay: 1, jitter: false },
+    });
+    await expect(t.pull({ tables: ["a"], node_id: "n1" })).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+
+  it("tolerates a 204 with no body on presence update", async () => {
+    const fetchImpl = (async () =>
+      new Response(null, { status: 204 })) as unknown as typeof fetch;
+    const t = new HttpTransport({ baseURL: "http://x", fetch: fetchImpl });
+    await expect(
+      t.updatePresence({ node_id: "n1", topic: "t", data: {} })
+    ).resolves.toBeUndefined();
+  });
+
+  it("aborts after the timeout", async () => {
+    const fetchImpl = ((_u: string, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(new DOMException("aborted", "AbortError")));
+      })) as unknown as typeof fetch;
+
+    const t = new HttpTransport({
+      baseURL: "http://x", fetch: fetchImpl, timeout: 20, retries: 0,
+    });
+    await expect(t.pull({ tables: ["a"], node_id: "n1" })).rejects.toThrow();
   });
 });

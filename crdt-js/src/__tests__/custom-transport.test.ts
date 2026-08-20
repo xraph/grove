@@ -270,7 +270,9 @@ describe("CRDTClient constructor", () => {
     const origFetch = globalThis.fetch;
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
+      status: 200,
       json: () => Promise.resolve(pullResponse),
+      text: () => Promise.resolve(JSON.stringify(pullResponse)),
     }) as unknown as typeof fetch;
 
     try {
