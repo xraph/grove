@@ -23,7 +23,8 @@ import type {
   TextRef,
   TextDeltaSegment,
 } from "./types.js";
-import { HybridClock, hlcString } from "./hlc.js";
+import { HybridClock, hlcString, hlcIsZero } from "./hlc.js";
+import { compactDocument } from "./compact.js";
 import {
   mergeFieldState,
   counterValue,
@@ -1076,6 +1077,33 @@ export class CRDTStore {
    */
   batch(table: string, pk: string): BatchWriter {
     return new BatchWriter(this, table, pk);
+  }
+
+  /**
+   * Compact tombstones across every document, dropping state older than
+   * the horizon. Returns the total units dropped.
+   *
+   * The horizon is a stability floor YOU guarantee: every replica has seen
+   * everything older than it, and nothing in flight references an older
+   * address. A horizon that does not hold will diverge replicas. When in
+   * doubt use the server's last acknowledged HLC minus a safety margin.
+   */
+  compact(before: HLC): number {
+    if (hlcIsZero(before)) return 0;
+
+    let dropped = 0;
+    this.transact(() => {
+      for (const [table, tableMap] of this.state) {
+        for (const [pk, doc] of tableMap) {
+          const result = compactDocument(doc, before);
+          if (result.dropped > 0) {
+            dropped += result.dropped;
+            this.setDocument(table, pk, result.doc);
+          }
+        }
+      }
+    });
+    return dropped;
   }
 
   // --- State Export/Import ---

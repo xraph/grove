@@ -218,3 +218,11 @@ export type {
 export { MemoryStorage, IndexedDBStorage } from "./storage.js";
 export type { IndexedDBStorageOptions } from "./storage.js";
 export { StaticAuthProvider } from "./auth.js";
+
+// Tombstone compaction
+export {
+  compactListState,
+  compactSetState,
+  compactTextState,
+  compactDocument,
+} from "./compact.js";
