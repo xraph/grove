@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { useEffect } from "react";
 import { render, screen, act } from "@testing-library/react";
 import {
   CRDTProvider,
+  useCRDT,
   useDocument,
   useCollection,
   useList,
@@ -9,7 +11,18 @@ import {
   useNestedDocument,
   useSyncStatus,
 } from "../react.js";
-import type { Transport, PullResponse, PushResponse } from "../types.js";
+import { SyncEngine } from "../sync.js";
+import type {
+  Transport,
+  StreamTransport,
+  StreamSubscription,
+  StreamEventHandler,
+  StreamEvent,
+  PresenceEvent,
+  PullResponse,
+  PushResponse,
+} from "../types.js";
+import type { StorePlugin, PresenceHook } from "../plugin.js";
 
 const HLC0 = { ts: "0", c: 0, node: "" };
 
@@ -168,7 +181,11 @@ function SyncView() {
 }
 
 describe("sync integration", () => {
-  it("pushes through SyncEngine and clears pending", async () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("pushes pending changes through SyncEngine and clears them", async () => {
     const pushed: number[] = [];
     const transport: Transport = {
       async pull() { return { changes: [], latest_hlc: HLC0 }; },
@@ -177,6 +194,13 @@ describe("sync integration", () => {
         return { merged: req.changes.length, latest_hlc: HLC0 };
       },
     };
+
+    // A no-op hook (one that never calls engine.sync()) would still leave
+    // `pushed` empty and pendingCount at 0 here, so the discriminating
+    // assertion is the spy: it only fires if useCRDT actually delegates to
+    // SyncEngine rather than running (or skipping) its own inline cycle.
+    const syncSpy = vi.spyOn(SyncEngine.prototype, "sync");
+
     render(
       <CRDTProvider config={{ ...config, transport }}>
         <DocView />
@@ -184,9 +208,104 @@ describe("sync integration", () => {
       </CRDTProvider>
     );
     expect(screen.getByTestId("pending").textContent).toBe("0");
+
+    // Create a real pending change before syncing, so a push actually has
+    // something to carry.
+    await act(async () => {
+      screen.getByRole("button", { name: "update" }).click();
+    });
+    expect(screen.getByTestId("pending").textContent).toBe("1");
+
     await act(async () => {
       screen.getByText("sync").click();
     });
-    expect(pushed).toEqual([]);
+
+    expect(syncSpy).toHaveBeenCalledTimes(1);
+    expect(pushed).toEqual([1]);
+    expect(screen.getByTestId("pending").textContent).toBe("0");
+  });
+});
+
+/** A StreamSubscription whose test can fire events into the handler the
+ *  hook registered, without a real SSE connection. */
+function makeControllableStream(): StreamSubscription & {
+  emit(event: StreamEvent): void;
+} {
+  let handler: StreamEventHandler | null = null;
+  return {
+    on(h) {
+      handler = h;
+      return () => {
+        handler = null;
+      };
+    },
+    connect() {},
+    disconnect() {},
+    connected: true,
+    lastHLC: null,
+    emit(event) {
+      handler?.(event);
+    },
+  };
+}
+
+describe("presence rerouting", () => {
+  it("routes inbound presence stream events through client.applyPresenceEvent and the plugin chain", () => {
+    const fakeStream = makeControllableStream();
+    const streamingTransport: StreamTransport = {
+      ...inertTransport,
+      subscribe() {
+        return fakeStream;
+      },
+    };
+
+    const onPresenceEvent = vi.fn();
+    const plugin: StorePlugin & PresenceHook = {
+      name: "presence-probe",
+      onPresenceEvent,
+    };
+
+    let client!: ReturnType<typeof useCRDT>["client"];
+    function Probe() {
+      const result = useCRDT({
+        ...config,
+        transport: streamingTransport,
+        streaming: true,
+      });
+      client = result.client;
+      useEffect(() => {
+        result.store.use(plugin);
+        return () => result.store.removePlugin(plugin.name);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [result.store]);
+      return null;
+    }
+
+    render(<Probe />);
+
+    const event: PresenceEvent = {
+      type: "join",
+      node_id: "peer-1",
+      topic: "room-a",
+      data: { name: "Ada" },
+    };
+    act(() => {
+      fakeStream.emit({ type: "presence", data: event });
+    });
+
+    // The hook's stream handler ran the event through the plugin chain
+    // (via client.applyPresenceEvent), not just PresenceManager directly.
+    expect(onPresenceEvent).toHaveBeenCalledTimes(1);
+    expect(onPresenceEvent).toHaveBeenCalledWith({
+      type: "join",
+      nodeId: "peer-1",
+      topic: "room-a",
+      data: { name: "Ada" },
+    });
+
+    // ...and the event still reached PresenceManager, so state is visible.
+    expect(client.presence.getPresence("room-a")).toEqual([
+      { node_id: "peer-1", topic: "room-a", data: { name: "Ada" }, updated_at: expect.any(Number) },
+    ]);
   });
 });
