@@ -52,6 +52,10 @@ import type { StorePlugin, WriteEvent, MergeEvent } from "./plugin.js";
 
 type Listener = () => void;
 
+/** Shared empties — a fresh [] each call breaks useSyncExternalStore. */
+const EMPTY_HLCS: HLC[] = [];
+const EMPTY_DELTA: TextDeltaSegment[] = [];
+
 /** Serializable snapshot of store state. */
 export interface StateSnapshot {
   version: number;
@@ -118,6 +122,22 @@ export class CRDTStore {
   private tableVersions = new Map<string, number>();
 
   /**
+   * Resolved-document cache keyed on DocumentState IDENTITY. Safe because
+   * every write replaces the document object (see setDocument), so a hit
+   * can never be stale. WeakMap so evicted documents are collectable.
+   */
+  private docCache = new WeakMap<DocumentState, unknown>();
+
+  /** Ordered live node IDs per list field, keyed on document identity. */
+  private listIdCache = new WeakMap<DocumentState, Map<string, HLC[]>>();
+
+  /** Text delta segments per text field, keyed on document identity. */
+  private textDeltaCache = new WeakMap<DocumentState, Map<string, TextDeltaSegment[]>>();
+
+  /** Resolved collections, keyed on the table's write version. */
+  private collectionCache = new Map<string, { version: number; items: unknown[] }>();
+
+  /**
    * Resolves when persisted state has been hydrated.
    * The store is usable immediately (starts empty), but consumers
    * should await `ready` before relying on persisted data.
@@ -151,6 +171,7 @@ export class CRDTStore {
    */
   use(plugin: StorePlugin): void {
     this.plugins.use(plugin);
+    this.invalidateSnapshots();
   }
 
   /**
@@ -158,6 +179,7 @@ export class CRDTStore {
    */
   removePlugin(name: string): void {
     this.plugins.remove(name);
+    this.invalidateSnapshots();
   }
 
   /**
@@ -179,8 +201,12 @@ export class CRDTStore {
   ): T | null {
     const doc = this.getDoc(table, pk);
     if (!doc || doc.tombstone) return null;
+    if (this.docCache.has(doc)) return this.docCache.get(doc) as T | null;
+
     const resolved = this.resolveDocument(doc) as T;
-    return this.plugins.dispatchTransformDocument(table, pk, resolved);
+    const transformed = this.plugins.dispatchTransformDocument(table, pk, resolved);
+    this.docCache.set(doc, transformed);
+    return transformed;
   }
 
   /**
@@ -188,20 +214,22 @@ export class CRDTStore {
    * Excludes tombstoned documents.
    */
   getCollection<T = Record<string, unknown>>(table: string): T[] {
-    const tableMap = this.state.get(table);
-    if (!tableMap) return [];
+    const version = this.tableVersions.get(table) ?? 0;
+    const hit = this.collectionCache.get(table);
+    if (hit && hit.version === version) return hit.items as T[];
 
+    const tableMap = this.state.get(table);
     const result: T[] = [];
-    for (const doc of tableMap.values()) {
-      if (!doc.tombstone) {
-        const resolved = this.resolveDocument(doc) as T;
-        const transformed = this.plugins.dispatchTransformDocument(table, doc.pk, resolved);
-        if (transformed !== null) {
-          result.push(transformed);
-        }
+    if (tableMap) {
+      for (const doc of tableMap.values()) {
+        if (doc.tombstone) continue;
+        const transformed = this.getDocument<T>(table, doc.pk);
+        if (transformed !== null) result.push(transformed);
       }
     }
-    return this.plugins.dispatchTransformCollection(table, result);
+    const items = this.plugins.dispatchTransformCollection(table, result);
+    this.collectionCache.set(table, { version, items });
+    return items;
   }
 
   // --- Write (Local Mutations) ---
@@ -472,9 +500,17 @@ export class CRDTStore {
    * resolved array) — needed for insert-after and delete addressing.
    */
   getListNodeIds(table: string, pk: string, field: string): HLC[] {
-    const fs = this.getDoc(table, pk)?.fields[field];
-    if (!fs?.list_state) return [];
-    return listNodeIds(fs.list_state);
+    const doc = this.getDoc(table, pk);
+    if (!doc) return EMPTY_HLCS;
+    let byField = this.listIdCache.get(doc);
+    if (!byField) { byField = new Map(); this.listIdCache.set(doc, byField); }
+    const hit = byField.get(field);
+    if (hit) return hit;
+
+    const fs = doc.fields[field];
+    const ids = fs?.list_state ? listNodeIds(fs.list_state) : EMPTY_HLCS;
+    byField.set(field, ids);
+    return ids;
   }
 
   // --- Text (collaborative rich text) ---
@@ -592,9 +628,17 @@ export class CRDTStore {
 
   /** Quill-style attribute-run segments of a text field. */
   getTextDelta(table: string, pk: string, field: string): TextDeltaSegment[] {
-    const fs = this.getDoc(table, pk)?.fields[field];
-    if (!fs?.text_state) return [];
-    return textDelta(fs.text_state);
+    const doc = this.getDoc(table, pk);
+    if (!doc) return EMPTY_DELTA;
+    let byField = this.textDeltaCache.get(doc);
+    if (!byField) { byField = new Map(); this.textDeltaCache.set(doc, byField); }
+    const hit = byField.get(field);
+    if (hit) return hit;
+
+    const fs = doc.fields[field];
+    const delta = fs?.text_state ? textDelta(fs.text_state) : EMPTY_DELTA;
+    byField.set(field, delta);
+    return delta;
   }
 
   /**
@@ -1158,6 +1202,14 @@ export class CRDTStore {
     }
     tableMap.set(pk, doc);
     this.tableVersions.set(table, (this.tableVersions.get(table) ?? 0) + 1);
+  }
+
+  /** Drop every cached snapshot. Called when plugin output may change. */
+  private invalidateSnapshots(): void {
+    this.docCache = new WeakMap();
+    this.listIdCache = new WeakMap();
+    this.textDeltaCache = new WeakMap();
+    this.collectionCache.clear();
   }
 
   /** Document with one field replaced; every other field is shared. */
