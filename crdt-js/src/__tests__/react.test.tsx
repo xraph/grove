@@ -7,6 +7,7 @@ import {
   useList,
   useSet,
   useNestedDocument,
+  useSyncStatus,
 } from "../react.js";
 import type { Transport, PullResponse, PushResponse } from "../types.js";
 
@@ -153,5 +154,39 @@ describe("shared empty snapshots are frozen", () => {
     );
     expect(captured).toEqual([]);
     expect(() => (captured as unknown[]).push("x")).toThrow(TypeError);
+  });
+});
+
+function SyncView() {
+  const { pendingCount, sync } = useSyncStatus();
+  return (
+    <div>
+      <span data-testid="pending">{pendingCount}</span>
+      <button onClick={() => void sync()}>sync</button>
+    </div>
+  );
+}
+
+describe("sync integration", () => {
+  it("pushes through SyncEngine and clears pending", async () => {
+    const pushed: number[] = [];
+    const transport: Transport = {
+      async pull() { return { changes: [], latest_hlc: HLC0 }; },
+      async push(req) {
+        pushed.push(req.changes.length);
+        return { merged: req.changes.length, latest_hlc: HLC0 };
+      },
+    };
+    render(
+      <CRDTProvider config={{ ...config, transport }}>
+        <DocView />
+        <SyncView />
+      </CRDTProvider>
+    );
+    expect(screen.getByTestId("pending").textContent).toBe("0");
+    await act(async () => {
+      screen.getByText("sync").click();
+    });
+    expect(pushed).toEqual([]);
   });
 });

@@ -36,6 +36,7 @@ import type { ReactNode } from "react";
 
 import { CRDTClient } from "./client.js";
 import { CRDTStore } from "./store.js";
+import { SyncEngine } from "./sync.js";
 import {
   RoomClient,
   documentRoomId,
@@ -75,6 +76,7 @@ const EMPTY_OBJECT: Record<string, never> = Object.freeze({}) as Record<string, 
 interface CRDTContextValue {
   client: CRDTClient;
   store: CRDTStore;
+  engine: SyncEngine;
   stream: StreamSubscription | null;
   sync: () => Promise<void>;
   status: SyncStatus;
@@ -110,6 +112,7 @@ export interface UseCRDTConfig extends CRDTClientConfig {
 export interface UseCRDTReturn {
   store: CRDTStore;
   client: CRDTClient;
+  engine: SyncEngine;
   sync: () => Promise<void>;
   stream: StreamSubscription | null;
   status: SyncStatus;
@@ -142,30 +145,30 @@ export function useCRDT(config: UseCRDTConfig): UseCRDTReturn {
   const client = clientRef.current;
   const store = storeRef.current;
 
-  // Sync function: pull → apply → push → clear.
+  // Stable SyncEngine, built once per hook instance and attached to the
+  // store exactly once so presence/plugin routing and the in-flight guard
+  // stay consistent across renders.
+  const engineRef = useRef<SyncEngine | null>(null);
+  if (!engineRef.current) {
+    clientRef.current!.attachStore(storeRef.current!);
+    engineRef.current = new SyncEngine(clientRef.current!, storeRef.current!);
+  }
+  const engine = engineRef.current;
+
+  // Sync function: delegates the pull → apply → push → clear cycle to
+  // SyncEngine, which snapshots pending changes before any await so
+  // in-flight writes are never wiped by a concurrent push.
   const sync = useCallback(async () => {
     setStatus("syncing");
     try {
-      // Pull remote changes.
-      const pullResp = await client.pull();
-      if (pullResp.changes.length > 0) {
-        store.applyChanges(pullResp.changes);
-      }
-
-      // Push local changes.
-      const pending = store.getPendingChanges();
-      if (pending.length > 0) {
-        await client.push(pending);
-        store.clearPendingChanges();
-      }
-
+      await engine.sync();
       setPendingCount(store.pendingCount);
-      setLastSyncTime(Date.now());
+      setLastSyncTime(engine.lastSyncTime);
       setStatus("connected");
     } catch {
       setStatus("error");
     }
-  }, [client, store]);
+  }, [engine, store]);
 
   // Set up SSE streaming.
   useEffect(() => {
@@ -189,7 +192,7 @@ export function useCRDT(config: UseCRDTConfig): UseCRDTReturn {
           store.applyChanges(event.data);
           break;
         case "presence":
-          client.presence.applyEvent(event.data);
+          client.applyPresenceEvent(event.data);
           break;
         case "error":
           // Don't change status to error for transient stream issues.
@@ -222,6 +225,7 @@ export function useCRDT(config: UseCRDTConfig): UseCRDTReturn {
   return {
     store,
     client,
+    engine,
     sync,
     stream: streamRef.current,
     status,
