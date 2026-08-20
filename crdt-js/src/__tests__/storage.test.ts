@@ -118,7 +118,7 @@ describe("CRDTStore with StorageAdapter", () => {
   });
 
   it("saveDocument called after setField", async () => {
-    const store = new CRDTStore("test-node", clock, storage);
+    const store = new CRDTStore("test-node", clock, storage, { persistDebounceMs: 0 });
     await store.ready;
     store.setField("users", "1", "name", "Alice");
 
@@ -131,7 +131,7 @@ describe("CRDTStore with StorageAdapter", () => {
   });
 
   it("savePendingChanges called after setField", async () => {
-    const store = new CRDTStore("test-node", clock, storage);
+    const store = new CRDTStore("test-node", clock, storage, { persistDebounceMs: 0 });
     await store.ready;
     store.setField("users", "1", "name", "Alice");
 
@@ -142,7 +142,7 @@ describe("CRDTStore with StorageAdapter", () => {
   });
 
   it("savePendingChanges called after incrementCounter", async () => {
-    const store = new CRDTStore("test-node", clock, storage);
+    const store = new CRDTStore("test-node", clock, storage, { persistDebounceMs: 0 });
     await store.ready;
     store.incrementCounter("items", "1", "views", 1);
 
@@ -151,7 +151,7 @@ describe("CRDTStore with StorageAdapter", () => {
   });
 
   it("savePendingChanges called after decrementCounter", async () => {
-    const store = new CRDTStore("test-node", clock, storage);
+    const store = new CRDTStore("test-node", clock, storage, { persistDebounceMs: 0 });
     await store.ready;
     store.decrementCounter("items", "1", "stock", 1);
 
@@ -160,7 +160,7 @@ describe("CRDTStore with StorageAdapter", () => {
   });
 
   it("saveDocument called after addToSet", async () => {
-    const store = new CRDTStore("test-node", clock, storage);
+    const store = new CRDTStore("test-node", clock, storage, { persistDebounceMs: 0 });
     await store.ready;
     store.addToSet("items", "1", "tags", ["cool"]);
 
@@ -169,7 +169,7 @@ describe("CRDTStore with StorageAdapter", () => {
   });
 
   it("saveDocument called after removeFromSet", async () => {
-    const store = new CRDTStore("test-node", clock, storage);
+    const store = new CRDTStore("test-node", clock, storage, { persistDebounceMs: 0 });
     await store.ready;
     store.addToSet("items", "1", "tags", ["cool"]);
     store.removeFromSet("items", "1", "tags", ["cool"]);
@@ -179,7 +179,7 @@ describe("CRDTStore with StorageAdapter", () => {
   });
 
   it("saveDocument called after deleteDocument", async () => {
-    const store = new CRDTStore("test-node", clock, storage);
+    const store = new CRDTStore("test-node", clock, storage, { persistDebounceMs: 0 });
     await store.ready;
     store.setField("users", "1", "name", "Alice");
     store.deleteDocument("users", "1");
@@ -190,7 +190,7 @@ describe("CRDTStore with StorageAdapter", () => {
   });
 
   it("saveDocument called after applyChanges", async () => {
-    const store = new CRDTStore("test-node", clock, storage);
+    const store = new CRDTStore("test-node", clock, storage, { persistDebounceMs: 0 });
     await store.ready;
 
     store.applyChanges([
@@ -210,7 +210,7 @@ describe("CRDTStore with StorageAdapter", () => {
   });
 
   it("clearPendingChanges persists empty array", async () => {
-    const store = new CRDTStore("test-node", clock, storage);
+    const store = new CRDTStore("test-node", clock, storage, { persistDebounceMs: 0 });
     await store.ready;
     store.setField("users", "1", "name", "Alice");
     store.clearPendingChanges();

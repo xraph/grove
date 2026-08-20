@@ -151,6 +151,18 @@ export class CRDTStore {
   /** True when pending changes were written while suspended. */
   private txPendingDirty = false;
 
+  /** Milliseconds a burst of writes is coalesced over before hitting the
+   *  storage adapter. `0` disables debouncing and writes synchronously. */
+  private persistDebounceMs: number;
+
+  /** Shared timer for the debounced document + pending-change flush. Null
+   *  when no flush is currently scheduled. */
+  private pendingPersistTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Documents touched since the last debounced flush: table → pks. Drained
+   *  (and read at fire time, not schedule time) by the debounce timer. */
+  private docPersistQueue = new Map<string, Set<string>>();
+
   /**
    * Resolves when persisted state has been hydrated.
    * The store is usable immediately (starts empty), but consumers
@@ -158,12 +170,18 @@ export class CRDTStore {
    */
   readonly ready: Promise<void>;
 
-  constructor(nodeID: string, clock: HybridClock, storage?: StorageAdapter) {
+  constructor(
+    nodeID: string,
+    clock: HybridClock,
+    storage?: StorageAdapter,
+    options?: { persistDebounceMs?: number }
+  ) {
     this.nodeID = nodeID;
     this.clock = clock;
     this.storage = storage ?? new MemoryStorage();
     this.undoManager = new UndoManager();
     this.plugins = new PluginManager();
+    this.persistDebounceMs = options?.persistDebounceMs ?? 50;
     this.ready = this.hydrate();
   }
 
@@ -1147,18 +1165,105 @@ export class CRDTStore {
     for (const listener of this.globalListeners) listener();
   }
 
-  /** Fire-and-forget: persist a document to storage. */
+  /**
+   * Fire-and-forget: persist a document to storage, debounced.
+   * `persistDebounceMs <= 0` writes immediately and synchronously (relative
+   * to the caller); several tests depend on that for assertions right after
+   * a mutation. Otherwise the (table, pk) is queued and a shared timer is
+   * (re)armed if one isn't already pending — the queue is a Set, so a burst
+   * of edits to the same document still produces a single saveDocument.
+   */
   private persistDocumentNow(table: string, pk: string): void {
-    const doc = this.getDoc(table, pk);
-    if (doc) {
-      const transformed = this.plugins.dispatchBeforePersist(table, pk, doc);
-      this.storage.saveDocument(table, pk, transformed).catch(() => {});
+    if (this.persistDebounceMs <= 0) {
+      const doc = this.getDoc(table, pk);
+      if (doc) {
+        const transformed = this.plugins.dispatchBeforePersist(table, pk, doc);
+        this.storage.saveDocument(table, pk, transformed).catch(() => {});
+      }
+      return;
     }
+    let pks = this.docPersistQueue.get(table);
+    if (!pks) {
+      pks = new Set();
+      this.docPersistQueue.set(table, pks);
+    }
+    pks.add(pk);
+    this.scheduleDebouncedPersist();
   }
 
-  /** Fire-and-forget: persist pending changes to storage. */
+  /**
+   * Fire-and-forget: persist pending changes to storage, debounced.
+   * `persistDebounceMs <= 0` writes immediately and synchronously. Otherwise
+   * it just arms the shared timer — the timer's own callback re-reads
+   * `this.pending` when it fires, so it always captures the latest array
+   * regardless of how many writes landed after scheduling.
+   */
   private persistPendingNow(): void {
+    if (this.persistDebounceMs <= 0) {
+      this.storage.savePendingChanges([...this.pending]).catch(() => {});
+      return;
+    }
+    this.scheduleDebouncedPersist();
+  }
+
+  /**
+   * Arm the shared debounce timer if one isn't already running. Both
+   * persistDocumentNow and persistPendingNow funnel through here so a
+   * document write and a pending-change write in the same burst share one
+   * timer and drain together — whichever call arms it first, the other
+   * just adds to the queue the eventual drain will read.
+   */
+  private scheduleDebouncedPersist(): void {
+    if (this.pendingPersistTimer) return;
+    this.pendingPersistTimer = setTimeout(() => {
+      this.pendingPersistTimer = null;
+      this.drainDebouncedPersist();
+    }, this.persistDebounceMs);
+  }
+
+  /** Fire-and-forget: write everything queued by the debounce — every
+   *  touched document plus the current pending-changes array — read fresh
+   *  at fire time so the final write in a burst is never lost. */
+  private drainDebouncedPersist(): void {
+    const queued = this.docPersistQueue;
+    this.docPersistQueue = new Map();
+    for (const [table, pks] of queued) {
+      for (const pk of pks) {
+        const doc = this.getDoc(table, pk);
+        if (doc) {
+          const transformed = this.plugins.dispatchBeforePersist(table, pk, doc);
+          this.storage.saveDocument(table, pk, transformed).catch(() => {});
+        }
+      }
+    }
     this.storage.savePendingChanges([...this.pending]).catch(() => {});
+  }
+
+  /**
+   * Force any debounced writes to storage and wait for them. Cancels the
+   * pending timer first (rather than letting it race this call) so the
+   * write happens exactly once. Call before unload, or in tests that need
+   * to assert on the adapter synchronously.
+   */
+  async flushPersistence(): Promise<void> {
+    if (this.pendingPersistTimer) {
+      clearTimeout(this.pendingPersistTimer);
+      this.pendingPersistTimer = null;
+    }
+    const queued = this.docPersistQueue;
+    this.docPersistQueue = new Map();
+    const writes: Promise<void>[] = [];
+    for (const [table, pks] of queued) {
+      for (const pk of pks) {
+        const doc = this.getDoc(table, pk);
+        if (doc) {
+          const transformed = this.plugins.dispatchBeforePersist(table, pk, doc);
+          writes.push(this.storage.saveDocument(table, pk, transformed));
+        }
+      }
+    }
+    writes.push(this.storage.savePendingChanges([...this.pending]));
+    await Promise.allSettled(writes);
   }
 
   /**

@@ -47,7 +47,13 @@ describe("copy-on-write store", () => {
   });
 
   it("installs a new DocumentState object rather than mutating in place", () => {
-    const { store } = mk();
+    // persistDebounceMs: 0 — this test asserts one beforePersist call per
+    // setField; the default debounce coalesces same-document writes into a
+    // single call, which is what the debounce is for but not what this
+    // identity check is testing.
+    const store = new CRDTStore("n1", new HybridClock("n1"), undefined, {
+      persistDebounceMs: 0,
+    });
     const seen: DocumentState[] = [];
     const watcher: StorePlugin & StorageHook = {
       name: "identity-watcher",
