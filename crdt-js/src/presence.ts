@@ -9,8 +9,12 @@ import type { PresenceState, PresenceEvent } from "./types.js";
 
 type Listener = () => void;
 
-/** Shared empty — a fresh [] per call breaks useSyncExternalStore. */
-const EMPTY_PRESENCE: PresenceState[] = [];
+/** Shared empty — a fresh [] per call breaks useSyncExternalStore. Frozen
+ *  because getPresence hands this out through a non-readonly public return
+ *  type; without the freeze a consumer mutating an empty result would
+ *  silently corrupt every other empty snapshot for the module's lifetime.
+ *  Freezing turns that silent corruption into an immediate TypeError. */
+const EMPTY_PRESENCE: PresenceState[] = Object.freeze([]) as unknown as PresenceState[];
 
 /**
  * In-memory store for remote peers' presence state.

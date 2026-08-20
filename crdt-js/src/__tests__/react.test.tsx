@@ -134,3 +134,24 @@ describe("all hooks render and update without thrash", () => {
       String(c[0]).includes("getSnapshot should be cached"))).toBe(false);
   });
 });
+
+describe("shared empty snapshots are frozen", () => {
+  it("mutating an empty useSet result throws instead of corrupting the shared singleton", () => {
+    // useSet's getSnapshot returns the shared EMPTY_ARRAY singleton
+    // directly (not a copy) whenever the field is absent, so this
+    // exercises the actual runtime path, not just the SSR fallback.
+    let captured: unknown[] | null = null;
+    function CaptureView() {
+      const { elements } = useSet<string>("docs", "doc-1", "tags");
+      captured = elements;
+      return null;
+    }
+    render(
+      <CRDTProvider config={config}>
+        <CaptureView />
+      </CRDTProvider>
+    );
+    expect(captured).toEqual([]);
+    expect(() => (captured as unknown[]).push("x")).toThrow(TypeError);
+  });
+});

@@ -52,9 +52,14 @@ import type { StorePlugin, WriteEvent, MergeEvent } from "./plugin.js";
 
 type Listener = () => void;
 
-/** Shared empties — a fresh [] each call breaks useSyncExternalStore. */
-const EMPTY_HLCS: HLC[] = [];
-const EMPTY_DELTA: TextDeltaSegment[] = [];
+/** Shared empties — a fresh [] each call breaks useSyncExternalStore. Frozen
+ *  because getListNodeIds/getTextDelta hand these out through non-readonly
+ *  public return types; without the freeze a consumer mutating an empty
+ *  result would silently corrupt every other empty snapshot for the
+ *  module's lifetime. Freezing turns that silent corruption into an
+ *  immediate TypeError. */
+const EMPTY_HLCS: HLC[] = Object.freeze([]) as unknown as HLC[];
+const EMPTY_DELTA: TextDeltaSegment[] = Object.freeze([]) as unknown as TextDeltaSegment[];
 
 /** Serializable snapshot of store state. */
 export interface StateSnapshot {

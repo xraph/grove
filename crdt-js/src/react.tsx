@@ -59,10 +59,15 @@ import type {
 } from "./types.js";
 
 /** Shared empties — an inline [] or {} in getSnapshot is a fresh reference
- *  every call, which is exactly the loop useSyncExternalStore warns about. */
-const EMPTY_ARRAY: never[] = [];
-const EMPTY_HLC_ARRAY: HLC[] = [];
-const EMPTY_OBJECT: Record<string, never> = {};
+ *  every call, which is exactly the loop useSyncExternalStore warns about.
+ *  Frozen because these are handed out through non-readonly public return
+ *  types (UseListReturn.items, UseSetReturn.elements, etc.) — without the
+ *  freeze, a consumer calling .push() on an empty result would silently
+ *  mutate the shared singleton and corrupt every other empty render in the
+ *  app. Freezing turns that silent corruption into an immediate TypeError. */
+const EMPTY_ARRAY: never[] = Object.freeze([]) as never[];
+const EMPTY_HLC_ARRAY: HLC[] = Object.freeze([]) as unknown as HLC[];
+const EMPTY_OBJECT: Record<string, never> = Object.freeze({}) as Record<string, never>;
 
 // --- Context ---
 
