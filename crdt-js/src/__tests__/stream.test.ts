@@ -33,6 +33,59 @@ function mockSSEFetch(
   }) as unknown as typeof fetch;
 }
 
+/**
+ * A ReadableStream body that never closes on its own but, like a real
+ * fetch() response body, errors out (rejecting any pending reader.read())
+ * as soon as its AbortSignal fires. Used to exercise abort-driven
+ * teardown paths that a signal-blind mock can't reach.
+ */
+function createAbortAwareStream(
+  signal: AbortSignal
+): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      const onAbort = () => {
+        controller.error(new DOMException("aborted", "AbortError"));
+      };
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    },
+  });
+}
+
+/**
+ * A fetch mock whose response body honors the AbortSignal passed in
+ * `init.signal`, the way a real fetch() implementation does. Returns the
+ * mock along with the number of times it was called and the AbortSignal
+ * captured on each call, so tests can assert on connection count and on
+ * which generation's connection is actually still live.
+ */
+function mockAbortAwareSSEFetch(): {
+  fetchImpl: typeof fetch;
+  opens: () => number;
+  signals: AbortSignal[];
+} {
+  const signals: AbortSignal[] = [];
+  let opens = 0;
+  const fetchImpl = (async (
+    _url: string,
+    init?: { signal?: AbortSignal }
+  ) => {
+    opens++;
+    const signal = init!.signal!;
+    signals.push(signal);
+    return new Response(createAbortAwareStream(signal), {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  }) as unknown as typeof fetch;
+
+  return { fetchImpl, opens: () => opens, signals };
+}
+
 function sampleChange(ts = 100): ChangeRecord {
   return {
     table: "users",
@@ -653,6 +706,50 @@ describe("CRDTStream", () => {
       await new Promise((r) => setTimeout(r, 20));
       expect(opens).toBe(2);
       stream.disconnect();
+    });
+
+    it("disconnect() immediately followed by connect() does not orphan the stale loop's reconnect", async () => {
+      vi.useFakeTimers();
+      try {
+        const { fetchImpl, opens, signals } = mockAbortAwareSSEFetch();
+        const events: CRDTStreamEvent[] = [];
+        const stream = new CRDTStream(
+          "http://x",
+          { reconnectDelay: 5000 },
+          {},
+          fetchImpl
+        );
+        stream.on((e) => events.push(e));
+
+        // Establish the first connection.
+        stream.connect();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(opens()).toBe(1);
+        expect(events.filter((e) => e.type === "connected")).toHaveLength(1);
+
+        // disconnect() immediately followed by connect(), in the same
+        // synchronous block — loop A's aborted reader.read() hasn't
+        // rejected yet when loop B starts.
+        stream.disconnect();
+        stream.connect();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(opens()).toBe(2);
+
+        // Advance well past reconnectDelay. If loop A failed to recognize
+        // it was superseded, it would reconnect here, opening a third
+        // connection and overwriting loop B's AbortController.
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(opens()).toBe(2);
+
+        // The live connection must still be the second (newest) one: a
+        // final disconnect() aborts its signal, proving it was never
+        // overwritten by a stray reconnect from the stale first loop.
+        stream.disconnect();
+        expect(signals[1].aborted).toBe(true);
+        expect(opens()).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

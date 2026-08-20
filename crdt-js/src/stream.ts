@@ -44,6 +44,14 @@ export class CRDTStream {
   private auth?: AuthProvider;
   private idleTimeout: number;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private idleTimerGen = -1;
+  // Identifies which connectLoop()/connectOnce() invocation is current.
+  // Bumped by connect() and disconnect() so a loop that is still in
+  // flight (e.g. blocked on a reader.read() that hasn't rejected yet)
+  // can recognize itself as stale and stop touching shared state, even
+  // when disconnect() is immediately followed by connect() in the same
+  // synchronous block.
+  private generation = 0;
 
   constructor(
     baseURL: string,
@@ -87,13 +95,20 @@ export class CRDTStream {
     // start two loops and leak the first AbortController.
     if (this.shouldReconnect) return;
     this.shouldReconnect = true;
-    void this.connectLoop();
+    const gen = ++this.generation;
+    void this.connectLoop(gen);
   }
 
   /** Disconnect and stop reconnecting. */
   disconnect(): void {
     this.clearIdleTimer();
     this.shouldReconnect = false;
+    // Bump the generation so any loop still in flight recognizes itself as
+    // stale on its next check and stops touching abortController,
+    // _connected, or events — even if a connect() right after this
+    // disconnect() starts a new loop before the old one notices it was
+    // aborted (its pending reader.read() rejection hasn't landed yet).
+    this.generation++;
     this.abortController?.abort();
     this.abortController = null;
     if (this._connected) {
@@ -108,19 +123,41 @@ export class CRDTStream {
    * A TCP connection can die without the read ever completing, which leaves
    * the reader parked forever and no reconnect is ever attempted. The
    * server's SSE keep-alive comments are enough to keep this armed.
+   *
+   * Scoped to `gen`: a stale generation's timer must never abort a newer
+   * generation's connection, and a newer generation's armed timer must
+   * never be wiped out by a stale generation's cleanup.
    */
-  private armIdleTimer(): void {
+  private armIdleTimer(gen: number): void {
     if (this.idleTimeout <= 0) return;
-    this.clearIdleTimer();
+    this.clearIdleTimerFor(gen);
+    this.idleTimerGen = gen;
     this.idleTimer = setTimeout(() => {
-      this.abortController?.abort();
+      if (this.idleTimerGen === gen) {
+        this.idleTimer = null;
+        this.idleTimerGen = -1;
+      }
+      if (gen === this.generation) {
+        this.abortController?.abort();
+      }
     }, this.idleTimeout);
   }
 
+  /** Clear the idle timer unconditionally, regardless of which generation armed it. */
   private clearIdleTimer(): void {
     if (this.idleTimer) {
       clearTimeout(this.idleTimer);
       this.idleTimer = null;
+      this.idleTimerGen = -1;
+    }
+  }
+
+  /** Clear the idle timer only if `gen` is the generation that armed it. */
+  private clearIdleTimerFor(gen: number): void {
+    if (this.idleTimer && this.idleTimerGen === gen) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+      this.idleTimerGen = -1;
     }
   }
 
@@ -134,15 +171,28 @@ export class CRDTStream {
     }
   }
 
-  private async connectLoop(): Promise<void> {
-    while (this.shouldReconnect) {
+  private async connectLoop(gen: number): Promise<void> {
+    while (gen === this.generation) {
+      let threw = false;
+      let caught: unknown;
       try {
-        await this.connectOnce();
+        await this.connectOnce(gen);
       } catch (err) {
-        if (!this.shouldReconnect) break;
+        threw = true;
+        caught = err;
+      }
+
+      // A newer generation may have taken over while we were awaiting
+      // connectOnce (e.g. disconnect() immediately followed by connect()).
+      // This loop instance is stale: it must not touch abortController,
+      // _connected, or emit events — those belong to the current
+      // generation now.
+      if (gen !== this.generation) break;
+
+      if (threw) {
         this.emit({
           type: "error",
-          error: err instanceof Error ? err : new Error(String(err)),
+          error: caught instanceof Error ? caught : new Error(String(caught)),
         });
       }
 
@@ -151,7 +201,7 @@ export class CRDTStream {
         this.emit({ type: "disconnected" });
       }
 
-      if (!this.shouldReconnect) break;
+      if (gen !== this.generation) break;
 
       // Wait before reconnecting.
       await new Promise((resolve) =>
@@ -160,7 +210,12 @@ export class CRDTStream {
     }
   }
 
-  private async connectOnce(): Promise<void> {
+  private async connectOnce(gen: number): Promise<void> {
+    // Last line of defense: connectLoop already checks this before calling
+    // in, but a stale generation must never be able to assign
+    // this.abortController (or anything else downstream of it).
+    if (gen !== this.generation) return;
+
     this.abortController = new AbortController();
     const url = this.buildStreamURL();
 
@@ -179,6 +234,11 @@ export class CRDTStream {
       signal: this.abortController.signal,
     });
 
+    // A newer generation may have taken over while the request was in
+    // flight. Don't touch _connected or emit "connected"/"error" on
+    // behalf of a stale generation.
+    if (gen !== this.generation) return;
+
     if (!response.ok) {
       const text = await response.text().catch(() => "");
       throw new Error(
@@ -187,25 +247,29 @@ export class CRDTStream {
     }
 
     this._connected = true;
-    this.armIdleTimer();
+    this.armIdleTimer(gen);
     this.emit({ type: "connected" });
-
-    const reader = response.body?.getReader();
 
     const decoder = new TextDecoder();
     let buffer = "";
     let eventType = "";
     let dataLines: string[] = [];
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 
     try {
+      reader = response.body?.getReader();
       if (!reader) {
         throw new Error("CRDT stream: response has no body");
       }
 
       while (true) {
         const { done, value } = await reader.read();
+        // Same as above: a newer generation may have taken over while
+        // this read was pending. Stop processing without touching shared
+        // state; connectLoop's own gen check handles the rest.
+        if (gen !== this.generation) break;
         if (done) break;
-        this.armIdleTimer();
+        this.armIdleTimer(gen);
 
         buffer += decoder.decode(value, { stream: true });
 
@@ -240,7 +304,7 @@ export class CRDTStream {
         }
       }
     } finally {
-      this.clearIdleTimer();
+      this.clearIdleTimerFor(gen);
       reader?.releaseLock();
     }
   }
