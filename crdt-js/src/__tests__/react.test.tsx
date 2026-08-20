@@ -24,8 +24,13 @@ const config = {
 };
 
 function DocView() {
-  const { data } = useDocument<{ title?: string }>("docs", "doc-1");
-  return <span data-testid="title">{data?.title ?? "empty"}</span>;
+  const { data, update } = useDocument<{ title?: string }>("docs", "doc-1");
+  return (
+    <div>
+      <span data-testid="title">{data?.title ?? "empty"}</span>
+      <button onClick={() => update("title", "hi")}>update</button>
+    </div>
+  );
 }
 
 function ListView() {
@@ -38,7 +43,7 @@ describe("React hooks render without snapshot thrash", () => {
     vi.restoreAllMocks();
   });
 
-  it("useDocument renders without a getSnapshot loop warning", () => {
+  it("useDocument renders without a getSnapshot loop warning", async () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     render(
       <CRDTProvider config={config}>
@@ -46,6 +51,10 @@ describe("React hooks render without snapshot thrash", () => {
       </CRDTProvider>
     );
     expect(screen.getByTestId("title").textContent).toBe("empty");
+    await act(async () => {
+      screen.getByRole("button").click();
+    });
+    expect(screen.getByTestId("title").textContent).toBe("hi");
     const warned = err.mock.calls.some((c) =>
       String(c[0]).includes("getSnapshot should be cached")
     );
