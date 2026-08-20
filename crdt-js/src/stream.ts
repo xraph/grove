@@ -16,6 +16,7 @@ import type {
   PresenceEvent,
 } from "./types.js";
 import { hlcAfter, hlcIsZero } from "./hlc.js";
+import { Backoff } from "./backoff.js";
 
 /** Event types emitted by the CRDT stream (alias for StreamEvent). */
 export type CRDTStreamEvent = StreamEvent;
@@ -32,7 +33,7 @@ export type { StreamEventHandler } from "./types.js";
 export class CRDTStream {
   private baseURL: string;
   private tables: string[];
-  private reconnectDelay: number;
+  private backoff: Backoff;
   private headers: Record<string, string>;
   private handlers: Set<StreamEventHandler> = new Set();
   private abortController: AbortController | null = null;
@@ -62,7 +63,10 @@ export class CRDTStream {
   ) {
     this.baseURL = baseURL;
     this.tables = config?.tables ?? [];
-    this.reconnectDelay = config?.reconnectDelay ?? 5000;
+    this.backoff = new Backoff({
+      initialDelay: config?.reconnectDelay ?? 5000,
+      maxDelay: config?.maxReconnectDelay ?? 30_000,
+    });
     this._since = config?.since ?? null;
     this.headers = headers ?? {};
     this.fetchImpl = fetchImpl ?? globalThis.fetch.bind(globalThis);
@@ -203,10 +207,9 @@ export class CRDTStream {
 
       if (gen !== this.generation) break;
 
-      // Wait before reconnecting.
-      await new Promise((resolve) =>
-        setTimeout(resolve, this.reconnectDelay)
-      );
+      // Wait before reconnecting, with jittered exponential backoff.
+      const delay = this.backoff.next();
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 
@@ -247,6 +250,7 @@ export class CRDTStream {
     }
 
     this._connected = true;
+    this.backoff.reset();
     this.armIdleTimer(gen);
     this.emit({ type: "connected" });
 

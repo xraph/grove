@@ -157,6 +157,10 @@ export { CRDTClient } from "./client.js";
 export type { CRDTStreamEvent } from "./stream.js";
 export { CRDTStream } from "./stream.js";
 
+// Reconnect backoff
+export { Backoff } from "./backoff.js";
+export type { BackoffOptions } from "./backoff.js";
+
 // State store
 export { CRDTStore, BatchWriter } from "./store.js";
 export type { StateSnapshot } from "./store.js";

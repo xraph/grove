@@ -209,8 +209,15 @@ export interface CRDTClientConfig {
 export interface StreamConfig {
   /** Tables to subscribe to. */
   tables?: string[];
-  /** Reconnect delay in milliseconds (default: 5000). */
+  /**
+   * Initial delay in milliseconds for the jittered exponential reconnect
+   * schedule (default: 5000). This is the *first* delay, not a fixed
+   * interval. Each subsequent attempt grows geometrically and is
+   * randomized via full jitter, up to maxReconnectDelay.
+   */
   reconnectDelay?: number;
+  /** Ceiling for reconnect backoff in ms (default: 30000). */
+  maxReconnectDelay?: number;
   /** Starting HLC for the stream. */
   since?: HLC;
   /**
