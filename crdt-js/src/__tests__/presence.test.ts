@@ -87,7 +87,7 @@ describe("PresenceManager", () => {
       expect(peers[0].node_id).toBe("peer-1");
     });
 
-    it("returns new array reference on each call (useSyncExternalStore compat)", () => {
+    it("returns a stable array reference across calls (useSyncExternalStore compat)", () => {
       manager.applyEvent({
         type: "join",
         node_id: "peer-1",
@@ -97,7 +97,7 @@ describe("PresenceManager", () => {
 
       const a = manager.getPresence("docs:1");
       const b = manager.getPresence("docs:1");
-      expect(a).not.toBe(b);
+      expect(a).toBe(b);
       expect(a).toEqual(b);
     });
 

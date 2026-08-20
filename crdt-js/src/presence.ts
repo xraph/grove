@@ -9,6 +9,9 @@ import type { PresenceState, PresenceEvent } from "./types.js";
 
 type Listener = () => void;
 
+/** Shared empty — a fresh [] per call breaks useSyncExternalStore. */
+const EMPTY_PRESENCE: PresenceState[] = [];
+
 /**
  * In-memory store for remote peers' presence state.
  *
@@ -19,6 +22,9 @@ type Listener = () => void;
 export class PresenceManager {
   /** topic → nodeID → state */
   private peers = new Map<string, Map<string, PresenceState>>();
+
+  /** Cached per-topic snapshots. Cleared for a topic when it changes. */
+  private snapshots = new Map<string, PresenceState[]>();
 
   /** Per-topic listeners: topic → listeners */
   private topicListeners = new Map<string, Set<Listener>>();
@@ -34,22 +40,26 @@ export class PresenceManager {
   }
 
   /**
-   * Get all presence states for a topic, excluding the local node.
-   * Returns a new array on each call for useSyncExternalStore compatibility.
+   * All presence states for a topic, excluding the local node.
+   *
+   * The returned array is CACHED and referentially stable until the topic
+   * changes, which is what useSyncExternalStore requires — returning a
+   * fresh array per call causes an unbounded render loop.
    */
-  getPresence<T = Record<string, unknown>>(
-    topic: string
-  ): PresenceState<T>[] {
-    const topicMap = this.peers.get(topic);
-    if (!topicMap) return [];
+  getPresence<T = Record<string, unknown>>(topic: string): PresenceState<T>[] {
+    const hit = this.snapshots.get(topic);
+    if (hit) return hit as PresenceState<T>[];
 
-    const result: PresenceState<T>[] = [];
+    const topicMap = this.peers.get(topic);
+    if (!topicMap) return EMPTY_PRESENCE as PresenceState<T>[];
+
+    const result: PresenceState[] = [];
     for (const [nodeID, state] of topicMap) {
-      if (nodeID !== this.localNodeID) {
-        result.push(state as PresenceState<T>);
-      }
+      if (nodeID !== this.localNodeID) result.push(state);
     }
-    return result;
+    const frozen = result.length === 0 ? EMPTY_PRESENCE : result;
+    this.snapshots.set(topic, frozen);
+    return frozen as PresenceState<T>[];
   }
 
   /**
@@ -134,6 +144,48 @@ export class PresenceManager {
   }
 
   /**
+   * Replace a topic's peers from a server snapshot.
+   *
+   * Needed on join and after every stream reconnect: SSE only delivers
+   * CHANGES, so peers that were already idle when you subscribed are
+   * otherwise invisible until they happen to move.
+   */
+  seed(topic: string, states: PresenceState[]): void {
+    const topicMap = new Map<string, PresenceState>();
+    for (const state of states) {
+      topicMap.set(state.node_id, state);
+    }
+    if (topicMap.size === 0) {
+      this.peers.delete(topic);
+    } else {
+      this.peers.set(topic, topicMap);
+    }
+    this.notifyListeners(topic);
+  }
+
+  /**
+   * Drop peers whose last update is older than maxAgeMs.
+   *
+   * The server expires presence on its own TTL and broadcasts a leave, but
+   * that only reaches clients with a live stream. A client that was
+   * disconnected across the expiry never sees the leave.
+   */
+  prune(maxAgeMs: number): void {
+    const cutoff = Date.now() - maxAgeMs;
+    for (const [topic, topicMap] of [...this.peers]) {
+      let dropped = false;
+      for (const [nodeID, state] of [...topicMap]) {
+        if (state.updated_at < cutoff) {
+          topicMap.delete(nodeID);
+          dropped = true;
+        }
+      }
+      if (topicMap.size === 0) this.peers.delete(topic);
+      if (dropped) this.notifyListeners(topic);
+    }
+  }
+
+  /**
    * Clear all presence state and notify listeners.
    */
   clear(): void {
@@ -145,6 +197,8 @@ export class PresenceManager {
   }
 
   private notifyListeners(topic: string): void {
+    this.snapshots.delete(topic);
+
     // Topic-level listeners.
     const topicListeners = this.topicListeners.get(topic);
     if (topicListeners) {

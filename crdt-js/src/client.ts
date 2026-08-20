@@ -177,6 +177,24 @@ export class CRDTClient {
   }
 
   /**
+   * Join a topic: publish your presence, then seed the local manager from
+   * the server's snapshot so peers already present are visible immediately.
+   *
+   * Prefer this over updatePresence() when first entering a topic, and call
+   * it again after a stream reconnect to re-seed.
+   */
+  async joinPresence<T = Record<string, unknown>>(
+    topic: string,
+    data: T
+  ): Promise<void> {
+    await this.updatePresence(topic, data);
+    if (this.transport.getPresence) {
+      const states = await this.transport.getPresence(topic);
+      this.presence.seed(topic, states);
+    }
+  }
+
+  /**
    * Leave a topic — stops the heartbeat and notifies the server.
    *
    * @param topic - The topic to leave.
