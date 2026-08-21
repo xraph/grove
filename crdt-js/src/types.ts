@@ -286,6 +286,16 @@ export interface PresenceState<T = Record<string, unknown>> {
   node_id: string;
   topic: string;
   data: T;
+  /**
+   * Epoch milliseconds.
+   *
+   * The Go side declares this as `time.Time`, so the wire actually carries
+   * an RFC3339 string. The declared type stays `number` because that is
+   * what every value reaching a consumer is: `PresenceManager.seed()`
+   * normalizes server snapshots to epoch ms on ingest, and `applyEvent()`
+   * stamps `Date.now()`. Parse raw server JSON yourself and you get the
+   * string — run it through `seed()` instead.
+   */
   updated_at: number;
 }
 

@@ -1,6 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { compactListState, compactSetState, compactTextState, compactDocument } from "../compact.js";
 import { CRDTStore } from "../store.js";
+import { MemoryStorage } from "../storage.js";
 import type { StateSnapshot } from "../store.js";
 import { HybridClock } from "../hlc.js";
 import type { RGAListState, ORSetState, TextState, DocumentState, HLC } from "../types.js";
@@ -294,5 +295,62 @@ describe("compaction", () => {
     // setDocument for untouched documents, not merely that compactDocument
     // itself returns an identical reference.
     expect(store.getCollection("t")).toBe(beforeCollection);
+  });
+
+  it("compact persists the compacted document and notifies its subscribers", async () => {
+    // The integration seam: compact() used to call setDocument() and
+    // nothing else. setDocument rewrites the in-memory map but never
+    // touches persistence or listeners, so transact()'s flush saw an empty
+    // touched-set and did nothing — storage kept the UNCOMPACTED document
+    // and a reload restored every tombstone that had just been dropped.
+    // persistDebounceMs: 0 makes adapter writes synchronous.
+    const storage = new MemoryStorage();
+    const clock = new HybridClock("n1");
+    const store = new CRDTStore("n1", clock, storage, { persistDebounceMs: 0 });
+    await store.ready;
+
+    store.insertIntoList("t", "p", "items", "a");
+    const [nodeId] = store.getListNodeIds("t", "p", "items");
+    store.deleteFromList("t", "p", "items", nodeId);
+
+    // Horizon strictly after the tombstone, so the node is compactable.
+    const horizon = clock.now();
+
+    const saveSpy = vi.spyOn(storage, "saveDocument");
+    let notified = 0;
+    const unsubscribe = store.subscribeDocument("t", "p", () => { notified++; });
+
+    const dropped = store.compact(horizon);
+
+    expect(dropped).toBeGreaterThan(0);
+    expect(saveSpy).toHaveBeenCalledTimes(1);
+    expect(saveSpy.mock.calls[0][0]).toBe("t");
+    expect(saveSpy.mock.calls[0][1]).toBe("p");
+    expect(notified).toBe(1);
+
+    unsubscribe();
+  });
+
+  it("a whole-store compaction still coalesces into one flush per document", async () => {
+    const storage = new MemoryStorage();
+    const clock = new HybridClock("n1");
+    const store = new CRDTStore("n1", clock, storage, { persistDebounceMs: 0 });
+    await store.ready;
+
+    for (const pk of ["p1", "p2"]) {
+      store.insertIntoList("t", pk, "items", "a");
+      store.insertIntoList("t", pk, "items", "b");
+      for (const id of store.getListNodeIds("t", pk, "items")) {
+        store.deleteFromList("t", pk, "items", id);
+      }
+    }
+    const horizon = clock.now();
+
+    const saveSpy = vi.spyOn(storage, "saveDocument");
+    store.compact(horizon);
+
+    // Two documents, four dropped nodes, but one write each — the
+    // transact() wrapper is what collapses them.
+    expect(saveSpy).toHaveBeenCalledTimes(2);
   });
 });

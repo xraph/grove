@@ -9,6 +9,18 @@ import type { ChangeRecord, HLC, SyncReport } from "./types.js";
 import type { CRDTClient } from "./client.js";
 import type { CRDTStore } from "./store.js";
 
+/**
+ * Drives one pull -> apply -> push -> clear cycle, on a timer or on demand.
+ *
+ * A note for anyone writing a `beforePush` plugin: the pending queue is
+ * cleared using the snapshot taken BEFORE the hook ran, not the array the
+ * hook returned. So `beforePush` must return the same record objects it
+ * was handed, or cancel the push outright by returning null. Returning a
+ * SUBSET is not filtering — the withheld records are cleared from the
+ * queue along with the pushed ones and are gone for good. The pre-hook
+ * snapshot is deliberate: it is also what keeps writes that land mid-round-
+ * trip from being cleared out from under the user.
+ */
 export class SyncEngine {
   private _lastSyncTime: number | null = null;
   private _lastPulledHLC: HLC | null = null;
@@ -74,6 +86,10 @@ export class SyncEngine {
 
     // --- Push ---
     if (snapshot.length > 0) {
+      // `clearPendingChanges(snapshot)` below clears the PRE-hook array.
+      // A beforePush plugin that returns a subset therefore loses the
+      // records it withheld — see the note on this class and on the
+      // beforePush hook itself.
       const toPush = plugins.dispatchBeforePush(snapshot);
       if (toPush && toPush.length > 0) {
         const resp = await this.client.push(toPush);

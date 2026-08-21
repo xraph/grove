@@ -8,7 +8,7 @@
  */
 
 import type {
-  Transport, StreamTransport, PullRequest, PullResponse,
+  Transport, PullRequest, PullResponse,
   PushRequest, PushResponse, PresenceUpdate, PresenceState,
 } from "../types.js";
 import { CRDTError } from "../errors.js";
@@ -62,6 +62,16 @@ async function runWithRetry<T>(
  * on retryable failures. Streaming is delegated untouched — a live
  * subscription has its own reconnect loop, and retrying subscribe() would
  * fight it.
+ *
+ * Everything else on the transport is forwarded as-is, so a wrapped
+ * transport keeps the members that are not part of the `Transport`
+ * interface: `withRetry(ws).close()` reaches WebSocketTransport.close().
+ * That is why the return type can honestly stay `T`.
+ *
+ * Note that `HttpTransport` already retries internally (its own `retries`
+ * option, default 2). Wrapping one in `withRetry` stacks the two schedules
+ * and multiplies the attempt count — 2 and 2 becomes up to 9 requests per
+ * call — so set `retries: 0` on one of the layers unless you want that.
  */
 export function withRetry<T extends Transport>(
   inner: T,
@@ -72,29 +82,50 @@ export function withRetry<T extends Transport>(
   const run = <R>(op: () => Promise<R>) =>
     runWithRetry(op, retries, opts?.backoff, isRetryable);
 
-  const wrapped: Transport = {
-    pull: (req: PullRequest): Promise<PullResponse> => run(() => inner.pull(req)),
-    push: (req: PushRequest): Promise<PushResponse> => run(() => inner.push(req)),
-  };
+  // Only these members are replaced; a Map (not an object literal) so an
+  // inherited name like "toString" or "constructor" can never be mistaken
+  // for an override.
+  const overrides = new Map<PropertyKey, unknown>([
+    ["pull", (req: PullRequest): Promise<PullResponse> => run(() => inner.pull(req))],
+    ["push", (req: PushRequest): Promise<PushResponse> => run(() => inner.push(req))],
+  ]);
 
   // Optional members must stay ABSENT when the inner transport lacks them:
   // CRDTClient tests `if (!this.transport.updatePresence)` to decide whether
   // presence is supported, so an always-present stub would claim support the
-  // inner transport does not have.
+  // inner transport does not have. Proxying gives that for free — an absent
+  // member on `inner` reads as undefined through the proxy — but the retry
+  // wrappers themselves still have to be installed conditionally.
   if (inner.updatePresence) {
-    wrapped.updatePresence = (u: PresenceUpdate): Promise<void> =>
-      run(() => inner.updatePresence!(u));
+    overrides.set("updatePresence", (u: PresenceUpdate): Promise<void> =>
+      run(() => inner.updatePresence!(u)));
   }
   if (inner.getPresence) {
-    wrapped.getPresence = (topic: string): Promise<PresenceState[]> =>
-      run(() => inner.getPresence!(topic));
+    overrides.set("getPresence", (topic: string): Promise<PresenceState[]> =>
+      run(() => inner.getPresence!(topic)));
   }
 
-  const streaming = inner as unknown as StreamTransport;
-  if (typeof streaming.subscribe === "function") {
-    (wrapped as unknown as StreamTransport).subscribe = (config) =>
-      streaming.subscribe(config);
-  }
+  // Bound forwards are cached so repeated reads of the same method return
+  // the same function reference, the way a plain object would.
+  const bound = new Map<PropertyKey, unknown>();
 
-  return wrapped as T;
+  return new Proxy(inner, {
+    get(target, prop) {
+      const override = overrides.get(prop);
+      if (override !== undefined) return override;
+
+      if (bound.has(prop)) return bound.get(prop);
+      const value = Reflect.get(target, prop, target) as unknown;
+      // Bind to the real instance rather than the proxy: methods that
+      // touch private state (or `#`-private fields) must not see a proxy
+      // as `this`. Streaming rides this path — `subscribe` is forwarded
+      // untouched, so `isStreamTransport` still holds.
+      if (typeof value === "function") {
+        const fn = (value as (...args: unknown[]) => unknown).bind(target);
+        bound.set(prop, fn);
+        return fn;
+      }
+      return value;
+    },
+  });
 }

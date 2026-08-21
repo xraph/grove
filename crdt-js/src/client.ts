@@ -141,10 +141,13 @@ export class CRDTClient {
       );
     }
 
+    // Spread rather than enumerate: an explicit whitelist here silently
+    // drops every StreamConfig field added later (it already lost
+    // idleTimeout and maxReconnectDelay), leaving those knobs
+    // unreachable through the client and through every React hook.
     return this.streamTransport.subscribe({
+      ...config,
       tables: config?.tables ?? this.tables,
-      reconnectDelay: config?.reconnectDelay,
-      since: config?.since,
     });
   }
 
@@ -212,6 +215,14 @@ export class CRDTClient {
    *
    * Prefer this over updatePresence() when first entering a topic, and call
    * it again after a stream reconnect to re-seed.
+   *
+   * HALF OF THIS SILENTLY NO-OPS ON MOST TRANSPORTS. The seeding leg needs
+   * `transport.getPresence`, and only HttpTransport has it — the Go server
+   * exposes no `presence_get` handler, so WebSocketTransport cannot
+   * implement one. Over WebSocket this method is exactly
+   * `updatePresence()`: your presence is published, but peers who were
+   * already idle stay invisible until they next move. There is no error;
+   * the seeding step is skipped.
    */
   async joinPresence<T = Record<string, unknown>>(
     topic: string,

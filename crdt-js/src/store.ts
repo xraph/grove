@@ -1182,6 +1182,13 @@ export class CRDTStore {
    * everything older than it, and nothing in flight references an older
    * address. A horizon that does not hold will diverge replicas. When in
    * doubt use the server's last acknowledged HLC minus a safety margin.
+   *
+   * Compacted documents are persisted and their subscribers notified.
+   * `setDocument` alone only rewrites the in-memory map, so without the
+   * explicit persist the storage adapter would keep serving the
+   * uncompacted document and a reload would restore every tombstone this
+   * just dropped. The calls go through the transaction-aware wrappers, so
+   * a whole-store compaction still coalesces into one flush.
    */
   compact(before: HLC): number {
     if (hlcIsZero(before)) return 0;
@@ -1194,6 +1201,8 @@ export class CRDTStore {
           if (result.dropped > 0) {
             dropped += result.dropped;
             this.setDocument(table, pk, result.doc);
+            this.persistDocument(table, pk);
+            this.notifyListeners(table, pk);
           }
         }
       }

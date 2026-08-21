@@ -17,6 +17,27 @@ type Listener = () => void;
 const EMPTY_PRESENCE: PresenceState[] = Object.freeze([]) as unknown as PresenceState[];
 
 /**
+ * Coerce a server-supplied `updated_at` to epoch milliseconds.
+ *
+ * Go's `PresenceState.UpdatedAt` is a `time.Time`, so over the wire the
+ * field arrives as an RFC3339 STRING even though `PresenceState` declares
+ * it as a number. Everything the manager produces itself (applyEvent) uses
+ * `Date.now()`. Normalizing here is what keeps the two sources the same
+ * runtime type — without it, `prune()`'s `updated_at < cutoff` compares a
+ * string against a number, which is always false, and a seeded peer never
+ * expires. Anything unparseable is treated as "just seen" rather than as
+ * NaN, which would also never prune.
+ */
+function toEpochMs(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return Date.now();
+}
+
+/**
  * In-memory store for remote peers' presence state.
  *
  * This is a read-only store — it holds presence state received from
@@ -153,11 +174,18 @@ export class PresenceManager {
    * Needed on join and after every stream reconnect: SSE only delivers
    * CHANGES, so peers that were already idle when you subscribed are
    * otherwise invisible until they happen to move.
+   *
+   * States are stored with `updated_at` normalized to epoch milliseconds
+   * (see toEpochMs) so a seeded peer ages the same way an event-applied
+   * one does.
    */
   seed(topic: string, states: PresenceState[]): void {
     const topicMap = new Map<string, PresenceState>();
     for (const state of states) {
-      topicMap.set(state.node_id, state);
+      topicMap.set(state.node_id, {
+        ...state,
+        updated_at: toEpochMs(state.updated_at),
+      });
     }
     if (topicMap.size === 0) {
       this.peers.delete(topic);

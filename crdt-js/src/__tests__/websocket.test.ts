@@ -162,6 +162,67 @@ describe("WebSocketTransport", () => {
     transport.close();
   });
 
+  it("re-emits `connected` after an auto-reconnect", async () => {
+    // Only subscribe().connect() used to emit `connected`; the reconnect
+    // path resubscribed but stayed silent, so the event log read
+    // ["connected","disconnected"] forever while the socket was in fact
+    // back up and resubscribed. CRDTStream re-emits on every reconnect, so
+    // the two transports disagreed on the same StreamSubscription
+    // contract, and a React app on WebSocket showed "disconnected" for the
+    // rest of its life after the first blip.
+    const { transport, sockets, latest } = mkTransportMulti({
+      backoff: { initialDelay: 1, maxDelay: 1, jitter: false },
+    });
+    const sub = transport.subscribe({ tables: ["docs"] });
+    const events: string[] = [];
+    sub.on((e) => { events.push(e.type); });
+    sub.connect();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(events).toEqual(["connected"]);
+
+    latest().onclose?.();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(sockets.length).toBe(2);
+    expect(events).toEqual(["connected", "disconnected", "connected"]);
+    expect(sub.connected).toBe(true);
+
+    sub.disconnect();
+    transport.close();
+  });
+
+  it("does not emit `connected` for a connection no subscriber asked for", async () => {
+    // The transport connects eagerly at construction. That socket has no
+    // subscription behind it, so its onopen must stay silent — otherwise
+    // every consumer that only ever calls pull/push gets phantom
+    // connection events.
+    const { transport } = mkTransportMulti();
+    const events: string[] = [];
+    const sub = transport.subscribe({ tables: ["docs"] });
+    sub.on((e) => { events.push(e.type); });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(events).toEqual([]);
+    transport.close();
+  });
+
+  it("emits exactly one `connected` when connect() runs against an already-open socket", async () => {
+    // The already-open branch is the one onopen will never fire for, so
+    // connect() owns the emit there. Asserting a count is what stops the
+    // reconnect fix from double-emitting on first connect.
+    const { transport } = mkTransportMulti();
+    await new Promise((r) => setTimeout(r, 5));
+
+    const sub = transport.subscribe({ tables: ["docs"] });
+    const events: string[] = [];
+    sub.on((e) => { events.push(e.type); });
+    sub.connect();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(events.filter((e) => e === "connected")).toHaveLength(1);
+    sub.disconnect();
+    transport.close();
+  });
+
   it("close() during an in-flight connect rejects the caller instead of hanging", async () => {
     // FakeSocket only flips OPEN and fires onopen on a queued microtask, so
     // calling close() synchronously right after pull() catches the

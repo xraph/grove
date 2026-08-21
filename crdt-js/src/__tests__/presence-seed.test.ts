@@ -47,6 +47,40 @@ describe("presence", () => {
     expect(pm.getPresence("t").map((p) => p.node_id)).toEqual(["fresh"]);
   });
 
+  it("prune drops a seeded peer whose updated_at arrived as an RFC3339 string", () => {
+    // crdt/presence_types.go declares UpdatedAt as time.Time, so the wire
+    // carries an RFC3339 STRING while types.ts says number. seed() now
+    // stores server states, so a seeded peer used to carry a string where
+    // applyEvent puts Date.now() — and `state.updated_at < cutoff` is then
+    // a string-vs-number comparison that is always false. Seeded peers
+    // never expired.
+    const pm = new PresenceManager("me");
+    const staleISO = new Date(Date.now() - 60_000).toISOString();
+    pm.seed("t", [
+      {
+        node_id: "stale",
+        topic: "t",
+        data: {},
+        updated_at: staleISO as unknown as number,
+      },
+      { node_id: "fresh", topic: "t", data: {}, updated_at: Date.now() },
+    ]);
+
+    // Normalized on ingest, so what the manager holds is epoch ms.
+    expect(typeof pm.getPeer("t", "stale")!.updated_at).toBe("number");
+    expect(pm.getPeer("t", "stale")!.updated_at).toBe(Date.parse(staleISO));
+
+    pm.prune(30_000);
+    expect(pm.getPresence("t").map((p) => p.node_id)).toEqual(["fresh"]);
+  });
+
+  it("seed leaves a numeric updated_at untouched", () => {
+    const pm = new PresenceManager("me");
+    const at = Date.now() - 1234;
+    pm.seed("t", [{ node_id: "bob", topic: "t", data: {}, updated_at: at }]);
+    expect(pm.getPeer("t", "bob")!.updated_at).toBe(at);
+  });
+
   it("joinPresence seeds from the server snapshot", async () => {
     const snapshot: PresenceState[] = [
       { node_id: "bob", topic: "t", data: { name: "Bob" }, updated_at: Date.now() },

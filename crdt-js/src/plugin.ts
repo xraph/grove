@@ -97,7 +97,17 @@ export interface SyncHook {
   /** Called after a pull completes with the received changes. */
   afterPull?(event: PullEvent & { changes: ChangeRecord[] }): void;
 
-  /** Called before local changes are pushed. Return modified changes or null to cancel. */
+  /**
+   * Called before local changes are pushed. Return the changes to push, or
+   * null to cancel the push entirely.
+   *
+   * FILTERING IS NOT SUPPORTED. Return the same record objects you were
+   * given (reordered or individually rewritten is fine) or null. SyncEngine
+   * clears the PRE-hook snapshot from the pending queue once the push
+   * succeeds, so any record you withhold is dropped from the queue without
+   * ever having been sent — the write is lost, silently and permanently.
+   * Cancel the whole push with null and retry later instead.
+   */
   beforePush?(changes: ChangeRecord[]): ChangeRecord[] | null;
 
   /** Called after a push completes. */

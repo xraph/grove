@@ -69,6 +69,14 @@ export class WebSocketTransport implements StreamTransport {
   private openingReject: ((err: Error) => void) | null = null;
   private backoff: Backoff;
   private subscribedTables: string[] = [];
+  /**
+   * Whether a subscription has asked to be connected. Separate from
+   * `subscribedTables`, which can legitimately be empty for a
+   * subscribe-to-everything config — this flag is what tells `onopen`
+   * a `connected` event has an audience. The transport's own eager
+   * connect at construction happens with this false, so it stays silent.
+   */
+  private subscriptionActive = false;
   private _lastHLC: HLC | null = null;
 
   private impl: typeof WebSocket;
@@ -132,6 +140,7 @@ export class WebSocketTransport implements StreamTransport {
         if (connected) return;
         connected = true;
         transport.subscribedTables = config.tables ?? [];
+        transport.subscriptionActive = true;
         // onopen is the single owner of sending the `subscribe` frame — it
         // fires (and sends) whenever a *new* connection completes, whether
         // that's this call's own first connect or a later reconnect. But
@@ -141,6 +150,11 @@ export class WebSocketTransport implements StreamTransport {
         // send the frame ourselves in that case. Recording this before
         // ensureOpen() resolves is what keeps the two paths from racing
         // into a duplicate send for a socket that opens after this call.
+        //
+        // `connected` is emitted on the same split: onopen owns it for any
+        // connection it opens (first connect and every reconnect alike, so
+        // the event keeps firing after a blip), and this branch owns it for
+        // the already-open socket onopen will never fire for.
         const alreadyOpen = transport.socket?.readyState === 1;
         void transport.ensureOpen().then((socket) => {
           if (alreadyOpen) {
@@ -148,8 +162,8 @@ export class WebSocketTransport implements StreamTransport {
               type: "subscribe",
               payload: { tables: transport.subscribedTables },
             }));
+            transport.emit({ type: "connected" });
           }
-          transport.emit({ type: "connected" });
         }).catch((err: unknown) => {
           transport.emit({
             type: "error",
@@ -161,6 +175,7 @@ export class WebSocketTransport implements StreamTransport {
       disconnect(): void {
         if (!connected) return;
         connected = false;
+        transport.subscriptionActive = false;
         // No `unsubscribe` frame: the Go server does not handle that type
         // and would answer with an error frame, surfacing as a spurious
         // stream error. Dropping the subscription client-side is enough.
@@ -292,6 +307,12 @@ export class WebSocketTransport implements StreamTransport {
           payload: { tables: this.subscribedTables },
         }));
       }
+      // Every connection this path opens gets a `connected` event, so a
+      // reconnect looks the same to subscribers as the first connect —
+      // matching CRDTStream, which re-emits on every reconnect too. Gated
+      // on an active subscription so the eager connect at construction,
+      // which nobody subscribed to, stays silent.
+      if (this.subscriptionActive) this.emit({ type: "connected" });
       resolve(socket);
     };
 

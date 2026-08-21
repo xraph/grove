@@ -72,8 +72,9 @@ const EMPTY_OBJECT: Record<string, never> = Object.freeze({}) as Record<string, 
 
 // --- Context ---
 
-/** Values provided by CRDTProvider. */
-interface CRDTContextValue {
+/** Values provided by CRDTProvider. Exported alongside useCRDTContext,
+ *  which returns it — a declaration file cannot name a private type. */
+export interface CRDTContextValue {
   client: CRDTClient;
   store: CRDTStore;
   engine: SyncEngine;
@@ -86,7 +87,15 @@ interface CRDTContextValue {
 
 const CRDTContext = createContext<CRDTContextValue | null>(null);
 
-function useCRDTContext(): CRDTContextValue {
+/**
+ * Read the value provided by the nearest `<CRDTProvider>`.
+ *
+ * Exported because hooks like `usePlugin` and `useUndo` document it as the
+ * way to reach the client, store, and engine from your own components.
+ *
+ * @throws Error when called outside a `<CRDTProvider>`.
+ */
+export function useCRDTContext(): CRDTContextValue {
   const ctx = useContext(CRDTContext);
   if (!ctx) {
     throw new Error(
@@ -1014,6 +1023,15 @@ export interface UsePresenceReturn<T> {
  *
  * Provides reactive access to other peers' presence and a function to
  * update your own presence. Automatically leaves the topic on unmount.
+ *
+ * PEERS WHO WERE ALREADY IDLE WHEN YOU JOINED WILL NOT APPEAR. This hook
+ * goes through `client.updatePresence()`, which publishes but does not
+ * seed: the stream only carries CHANGES, so a peer that is sitting still
+ * stays invisible until it happens to move. Nothing re-seeds after a
+ * reconnect either. Call `client.joinPresence(topic, data)` yourself on
+ * entry (and again after a reconnect) if you need the full roster —
+ * `updateMyPresence` deliberately stays on the cheap path, since seeding
+ * on every keystroke would mean an HTTP GET per keystroke.
  *
  * @example
  * ```tsx

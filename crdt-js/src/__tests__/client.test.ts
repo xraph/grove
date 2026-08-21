@@ -2,7 +2,10 @@ import { describe, it, expect, vi } from "vitest";
 import { CRDTClient, CRDTError } from "../client.js";
 import { CRDTStream } from "../stream.js";
 import { HttpTransport } from "../transport.js";
-import type { HLC, PullResponse, PushResponse, ChangeRecord } from "../types.js";
+import type {
+  HLC, PullResponse, PushResponse, ChangeRecord,
+  StreamConfig, StreamSubscription, StreamTransport,
+} from "../types.js";
 
 function mockFetch(body: unknown, status = 200) {
   return vi.fn().mockResolvedValue({
@@ -12,6 +15,8 @@ function mockFetch(body: unknown, status = 200) {
     text: () => Promise.resolve(typeof body === "string" ? body : JSON.stringify(body)),
   }) as unknown as typeof fetch;
 }
+
+const HLC_ZERO: HLC = { ts: "0", c: 0, node: "" };
 
 function createClient(
   fetchImpl: typeof fetch,
@@ -410,6 +415,63 @@ describe("CRDTClient", () => {
         reconnectDelay: 1000,
       });
       expect(stream).toBeInstanceOf(CRDTStream);
+    });
+
+    it("forwards the whole StreamConfig, not a hand-listed subset", () => {
+      // client.stream() used to rebuild the config from a three-field
+      // whitelist (tables/reconnectDelay/since), so idleTimeout and
+      // maxReconnectDelay never reached the stream — both features worked
+      // on defaults but were unconfigurable through the client, and
+      // therefore through every React consumer.
+      let seen: StreamConfig | null = null;
+      const streamTransport: StreamTransport = {
+        async pull() { return { changes: [], latest_hlc: HLC_ZERO }; },
+        async push() { return { merged: 0, latest_hlc: HLC_ZERO }; },
+        subscribe(config: StreamConfig): StreamSubscription {
+          seen = config;
+          return {
+            on() { return () => {}; }, connect() {}, disconnect() {},
+            connected: false, lastHLC: null,
+          };
+        },
+      };
+      const client = createClient(mockFetch({}), { streamTransport });
+
+      const since: HLC = { ts: "42", c: 1, node: "n9" };
+      client.stream({
+        tables: ["docs"],
+        reconnectDelay: 111,
+        maxReconnectDelay: 2222,
+        idleTimeout: 3333,
+        since,
+      });
+
+      expect(seen).toEqual({
+        tables: ["docs"],
+        reconnectDelay: 111,
+        maxReconnectDelay: 2222,
+        idleTimeout: 3333,
+        since,
+      });
+    });
+
+    it("still defaults tables to the client's own when the config omits them", () => {
+      let seen: StreamConfig | null = null;
+      const streamTransport: StreamTransport = {
+        async pull() { return { changes: [], latest_hlc: HLC_ZERO }; },
+        async push() { return { merged: 0, latest_hlc: HLC_ZERO }; },
+        subscribe(config: StreamConfig): StreamSubscription {
+          seen = config;
+          return {
+            on() { return () => {}; }, connect() {}, disconnect() {},
+            connected: false, lastHLC: null,
+          };
+        },
+      };
+      const client = createClient(mockFetch({}), { streamTransport });
+      client.stream({ idleTimeout: 7 });
+      expect(seen!.tables).toEqual(["users", "posts"]);
+      expect(seen!.idleTimeout).toBe(7);
     });
   });
 });
