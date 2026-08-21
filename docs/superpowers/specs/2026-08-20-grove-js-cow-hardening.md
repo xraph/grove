@@ -201,3 +201,65 @@ nested maps, which fixes D2 by construction rather than by escaping.
 - A 50,000-element list resolves without throwing.
 - `SyncHook` and `PresenceHook` have live production call sites proven by test.
 - A WebSocket transport passes the same conformance suite as `HttpTransport`.
+
+---
+
+## Known follow-ups (as of 2026-08-20, post-implementation)
+
+All twelve defects are closed and the whole-branch review passed. These are
+items that were found, triaged, and deliberately not fixed. The final
+reviewer assessed each and cleared them for merge.
+
+### Parked with a decision
+
+- **`withRetry` throws on a frozen transport.** The `Proxy` that makes
+  `withRetry(ws).close()` work violates a Proxy invariant for
+  non-configurable, non-writable own data properties, so
+  `withRetry(Object.freeze(t))` raises a `TypeError` on first property read.
+  The previous object-literal implementation handled a frozen input. Nothing
+  in-package freezes a transport. Fix with a `getOwnPropertyDescriptor`
+  check, or document "do not freeze the transport you wrap".
+- **`CRDTClient.getPresence()` returns an un-normalized `updated_at`.**
+  `PresenceManager.seed()` normalizes RFC3339 strings to epoch ms, but the
+  client's direct pass-through does not, so on that path the field is a
+  string under a `number` type. No in-tree consumer is affected — the React
+  hooks read `client.presence.getPresence`.
+- **WebSocket reconnect is gated on a non-empty table list.**
+  `WebSocketTransport`'s `onclose` only reconnects when
+  `subscribedTables.length > 0`, so a subscribe-to-everything config never
+  auto-reconnects. Pre-existing.
+- **`subscriptionActive` is single-subscription.** Matches the pre-existing
+  `subscribedTables`. Two subscriptions on one transport already interfere;
+  multi-subscription support is separate unowned work.
+
+### Verified by reading, not by test
+
+Six areas were hand-traced by reviewers and found correct, but have no test
+pinning them. The final reviewer judged all six unambiguous enough to ship,
+and recommended spending any test budget on integration seams instead:
+`walkList`'s tombstone-with-children handling; purity of the
+`set`/`remove`, `list`/`delete`, `list`/`move`, `text`/`delete`,
+`text`/`format` and document-tombstone merge branches; the idle-timer
+generation-ownership race in `stream.ts`; `SyncEngine`'s failure path and
+`beforePull`-returns-null path; the cross-generation shared-`Backoff`
+interaction.
+
+### Known API and documentation gaps
+
+- `usePresence` calls `updatePresence`, not `joinPresence`, so React
+  consumers get no snapshot seeding on join and nothing re-seeds after a
+  stream reconnect. Wiring it needs a join-vs-update distinction — seeding on
+  every keystroke would mean an HTTP GET per keystroke. Documented on the
+  hook.
+- `useCRDT` does not forward `persistDebounceMs`, `maxPendingChanges` or
+  `throwOnOverflow` to the store it constructs, so those knobs are
+  unreachable from React.
+- `SyncReport.conflicts` is always `0`; no server signal exists for it in
+  `PushResponse`/`PullResponse`.
+- `WebSocketTransport` passes auth as query parameters because a browser
+  WebSocket handshake cannot carry headers. Tokens in URLs reach proxy and
+  server logs.
+- The spec's criterion "a WebSocket transport passes the same conformance
+  suite as `HttpTransport`" is met in substance, not literally: the two have
+  separate suites covering analogous ground rather than one parameterized
+  suite.
