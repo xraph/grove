@@ -307,6 +307,7 @@ export class CRDTStore {
     field: string,
     value: unknown
   ): ChangeRecord | null {
+    this.assertPendingCapacity();
     const hlc = this.clock.now();
     const change: ChangeRecord = {
       table,
@@ -347,6 +348,7 @@ export class CRDTStore {
     field: string,
     delta = 1
   ): ChangeRecord | null {
+    this.assertPendingCapacity();
     const hlc = this.clock.now();
     // The wire delta is this node's CUMULATIVE totals (merged max-per-node
     // on every replica) — idempotent under redelivery, matching Go.
@@ -385,6 +387,7 @@ export class CRDTStore {
     field: string,
     delta = 1
   ): ChangeRecord | null {
+    this.assertPendingCapacity();
     const hlc = this.clock.now();
     const totals = this.counterTotals(table, pk, field);
     const change: ChangeRecord = {
@@ -421,6 +424,7 @@ export class CRDTStore {
     field: string,
     elements: unknown[]
   ): ChangeRecord | null {
+    this.assertPendingCapacity();
     const hlc = this.clock.now();
     const change: ChangeRecord = {
       table,
@@ -456,6 +460,7 @@ export class CRDTStore {
     field: string,
     elements: unknown[]
   ): ChangeRecord | null {
+    this.assertPendingCapacity();
     const hlc = this.clock.now();
     // Name the observed tags so the remove is exact everywhere (true
     // observed-remove semantics; receivers don't guess by HLC).
@@ -499,6 +504,7 @@ export class CRDTStore {
     value: unknown,
     afterId?: HLC
   ): ChangeRecord {
+    this.assertPendingCapacity();
     const hlc = this.clock.now();
     const parentId = afterId ?? { ts: 0, c: 0, node: "" };
     const change: ChangeRecord = {
@@ -535,6 +541,7 @@ export class CRDTStore {
     field: string,
     nodeId: HLC
   ): ChangeRecord {
+    this.assertPendingCapacity();
     const hlc = this.clock.now();
     const change: ChangeRecord = {
       table,
@@ -629,6 +636,7 @@ export class CRDTStore {
     index: number,
     content: string
   ): ChangeRecord {
+    this.assertPendingCapacity();
     const hlc = this.clock.now();
     const current = this.textStateOf(table, pk, field);
     const previousState = this.captureFieldState(table, pk, field);
@@ -651,6 +659,7 @@ export class CRDTStore {
     index: number,
     length: number
   ): ChangeRecord {
+    this.assertPendingCapacity();
     const hlc = this.clock.now();
     const current = this.textStateOf(table, pk, field);
     const previousState = this.captureFieldState(table, pk, field);
@@ -673,6 +682,7 @@ export class CRDTStore {
     length: number,
     attrs: Record<string, unknown>
   ): ChangeRecord {
+    this.assertPendingCapacity();
     const hlc = this.clock.now();
     const current = this.textStateOf(table, pk, field);
     const previousState = this.captureFieldState(table, pk, field);
@@ -733,6 +743,7 @@ export class CRDTStore {
     path: string,
     value: unknown
   ): ChangeRecord {
+    this.assertPendingCapacity();
     const hlc = this.clock.now();
     // For nested document fields, we store the path as the field and
     // the value in the change. The merge function handles applying it
@@ -766,6 +777,7 @@ export class CRDTStore {
     field: string,
     path: string
   ): ChangeRecord {
+    this.assertPendingCapacity();
     const hlc = this.clock.now();
     const change: ChangeRecord = {
       table,
@@ -792,6 +804,7 @@ export class CRDTStore {
    * Delete a document (tombstone). Returns the ChangeRecord for push.
    */
   deleteDocument(table: string, pk: string): ChangeRecord {
+    this.assertPendingCapacity();
     const hlc = this.clock.now();
     const change: ChangeRecord = {
       table,
@@ -991,8 +1004,17 @@ export class CRDTStore {
     return () => { this.overflowHandlers.delete(handler); };
   }
 
-  /** Queue a change for push, enforcing the offline bound. */
-  private enqueuePending(change: ChangeRecord): void {
+  /**
+   * Throws OfflineQueueFull when throwOnOverflow is set and the bound is
+   * already at capacity. Every public mutator calls this as its very
+   * FIRST statement — before it even reads the clock — so a rejected
+   * write has no observable effect anywhere: no HLC consumed, no document
+   * mutation, no undo entry, no pending entry. Checking only inside
+   * enqueuePending() would be too late: by the time a mutator reaches its
+   * push call, applyChangeInternal() and undoManager.record() have
+   * already run against live store state.
+   */
+  private assertPendingCapacity(): void {
     if (
       this.throwOnOverflow &&
       this.maxPendingChanges > 0 &&
@@ -1005,6 +1027,20 @@ export class CRDTStore {
         false
       );
     }
+  }
+
+  /**
+   * Queue a change for push, enforcing the offline bound.
+   *
+   * Repeats the assertPendingCapacity() check as a backstop: every
+   * current call site already checks capacity before doing anything
+   * observable (see above), so this repeat should never fire in
+   * practice. It exists so a future call site that forgets the up-front
+   * check still can't grow `pending` past the bound, even though by then
+   * it's too late to undo whatever that call site already mutated.
+   */
+  private enqueuePending(change: ChangeRecord): void {
+    this.assertPendingCapacity();
 
     this.pending.push(change);
 

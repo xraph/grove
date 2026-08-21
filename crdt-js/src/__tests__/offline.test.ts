@@ -42,7 +42,7 @@ describe("offline queue", () => {
     expect(store.pendingCount).toBe(50);
   });
 
-  it("throws OfflineQueueFull when throwOnOverflow is set", () => {
+  it("throws OfflineQueueFull when throwOnOverflow is set, leaving no trace of the rejected write", () => {
     const store = mkStore({ maxPendingChanges: 2, throwOnOverflow: true });
     store.setField("t", "p", "a", 1);
     store.setField("t", "p", "b", 2);
@@ -56,6 +56,17 @@ describe("offline queue", () => {
     expect((caught as CRDTError).code).toBe(CRDTErrorCode.OfflineQueueFull);
     // The rejected change must not be left half-queued.
     expect(store.pendingCount).toBe(2);
+    // Nor observable anywhere else: the merge into readable state must
+    // never have happened for the rejected write.
+    const doc = store.getDocument<{ a?: number; b?: number; c?: number }>("t", "p");
+    expect(doc?.c).toBeUndefined();
+    expect(doc?.a).toBe(1);
+    expect(doc?.b).toBe(2);
+    // Nor in undo history: only "a" and "b" were ever recorded, so exactly
+    // two undos succeed and a third finds nothing.
+    expect(store.undo()).toBe(true); // undoes "b"
+    expect(store.undo()).toBe(true); // undoes "a"
+    expect(store.undo()).toBe(false); // "c" was never recorded
   });
 
   it("start() syncs on an interval and stop() halts it", async () => {
@@ -73,9 +84,16 @@ describe("offline queue", () => {
     await new Promise((r) => setTimeout(r, 50));
     stop();
     const settled = pushes;
+    expect(settled).toBeGreaterThan(0);
+
+    // A stopped engine must not fire again — but sync() is a no-op on an
+    // empty queue, so the first version of this test (asserting flat
+    // `pushes` with no fresh work after stop()) couldn't tell a genuinely
+    // stopped timer from one that leaked and just had nothing to push.
+    // Give it fresh work across several would-be interval periods.
+    store.setField("t", "p", "g", 2);
     await new Promise((r) => setTimeout(r, 50));
 
-    expect(settled).toBeGreaterThan(0);
-    expect(pushes).toBe(settled); // no syncs after stop()
+    expect(pushes).toBe(settled); // no syncs after stop(), even with pending work
   });
 });

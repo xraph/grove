@@ -103,7 +103,13 @@ export class SyncEngine {
       void this.sync().catch(() => {});
     }, interval);
 
-    if (typeof globalThis.addEventListener === "function") {
+    // Symmetric feature-detect: only install the listener if we can also
+    // remove it later — a host exposing one without the other must not
+    // end up with a listener stop() can never clean up.
+    if (
+      typeof globalThis.addEventListener === "function" &&
+      typeof globalThis.removeEventListener === "function"
+    ) {
       this.onlineHandler = () => { void this.sync().catch(() => {}); };
       globalThis.addEventListener("online", this.onlineHandler);
     }
