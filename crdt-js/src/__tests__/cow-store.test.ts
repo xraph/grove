@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { CRDTStore } from "../store.js";
 import { HybridClock } from "../hlc.js";
 import type { ChangeRecord, DocumentState, FieldState } from "../types.js";
-import type { MergeEvent, MergeHook, StorePlugin, StorageHook } from "../plugin.js";
+import type { MergeEvent, MergeHook, StorePlugin, StorageHook, WriteHook } from "../plugin.js";
 
 const mk = () => {
   const clock = new HybridClock("n1");
@@ -157,16 +157,51 @@ describe("copy-on-write store", () => {
   // inverse-op undo that lets the RGA node table be mutated in place.
   // The bound below is a regression guard against the old clone-per-write
   // path, with headroom for slower CI hardware.
-  it("3000 list appends stay far off the pre-COW clone-per-write cost (D8)", () => {
+  // D8 was "every local write deep-clones the whole field state for undo",
+  // which made writes quadratic. The honest signature of the fix is
+  // structural, not temporal: undo's previousState must be the SAME OBJECT
+  // that was in the document, not a copy of it. A wall-clock bound used to
+  // stand in for this and it does not survive a slow runner. Locally the
+  // loop below runs in ~900ms; on CI it measured 1894ms, 2574ms, 2611ms
+  // and 2686ms against a 2000ms ceiling, so it passed once and failed
+  // three times without anything changing. Assert the property instead.
+  it("undo captures the previous field state by reference, not by clone (D8)", () => {
+    const store = new CRDTStore("n1", new HybridClock("n1"), undefined, {
+      persistDebounceMs: 0,
+    });
+
+    let liveAfterFirstWrite: unknown;
+    let previousSeenBySecondWrite: unknown;
+    store.use({
+      name: "identity-probe",
+      beforePersist(_table, _pk, doc) {
+        liveAfterFirstWrite ??= doc.fields["f"];
+        return doc;
+      },
+      beforeWrite(ev) {
+        if (ev.previousState) previousSeenBySecondWrite = ev.previousState;
+        return ev;
+      },
+    } as StorePlugin & StorageHook & WriteHook);
+
+    store.setField("t", "p", "f", 1);
+    store.setField("t", "p", "f", 2);
+
+    // A deep clone would be toEqual but not toBe. That is the whole point.
+    expect(previousSeenBySecondWrite).toBe(liveAfterFirstWrite);
+  });
+
+  it("3000 sequential list appends resolve correctly", () => {
     const { store } = mk();
     let after: unknown = undefined;
-    const t0 = performance.now();
     for (let i = 0; i < 3000; i++) {
       const c = store.insertIntoList("t", "p", "items", i, after as never);
       after = c.list_op!.node_id;
     }
-    const ms = performance.now() - t0;
-    expect(ms).toBeLessThan(2000);
+    const items = store.getDocument<{ items: number[] }>("t", "p")?.items;
+    expect(items).toHaveLength(3000);
+    expect(items?.[0]).toBe(0);
+    expect(items?.[2999]).toBe(2999);
   }, 30000);
 
   describe("text resolution", () => {
