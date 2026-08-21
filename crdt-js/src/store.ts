@@ -50,6 +50,7 @@ import { MemoryStorage } from "./storage.js";
 import { UndoManager } from "./undo.js";
 import { PluginManager } from "./plugin.js";
 import type { StorePlugin, WriteEvent, MergeEvent } from "./plugin.js";
+import { CRDTError, CRDTErrorCode } from "./errors.js";
 
 type Listener = () => void;
 
@@ -113,6 +114,15 @@ export class CRDTStore {
 
   /** Pending local changes that need to be pushed to the server. */
   private pending: ChangeRecord[] = [];
+
+  /** Max queued unpushed changes (0 disables the bound). */
+  private maxPendingChanges: number;
+
+  /** Throw instead of dropping when the bound is hit. */
+  private throwOnOverflow: boolean;
+
+  /** Notified with the dropped records whenever the pending bound evicts. */
+  private overflowHandlers = new Set<(dropped: ChangeRecord[]) => void>();
 
   /** Global listeners notified on any state change. */
   private globalListeners = new Set<Listener>();
@@ -188,7 +198,13 @@ export class CRDTStore {
     nodeID: string,
     clock: HybridClock,
     storage?: StorageAdapter,
-    options?: { persistDebounceMs?: number }
+    options?: {
+      persistDebounceMs?: number;
+      /** Max queued unpushed changes (default: 10000). 0 disables. */
+      maxPendingChanges?: number;
+      /** Throw instead of dropping when the bound is hit (default: false). */
+      throwOnOverflow?: boolean;
+    }
   ) {
     this.nodeID = nodeID;
     this.clock = clock;
@@ -196,6 +212,8 @@ export class CRDTStore {
     this.undoManager = new UndoManager();
     this.plugins = new PluginManager();
     this.persistDebounceMs = options?.persistDebounceMs ?? 50;
+    this.maxPendingChanges = options?.maxPendingChanges ?? 10_000;
+    this.throwOnOverflow = options?.throwOnOverflow ?? false;
     this.ready = this.hydrate();
   }
 
@@ -309,7 +327,7 @@ export class CRDTStore {
 
     this.applyChangeInternal(allowed.change);
     this.undoManager.record(allowed.change, previousState);
-    this.pending.push(allowed.change);
+    this.enqueuePending(allowed.change);
     this.persistDocument(table, pk);
     this.persistPending();
     this.notifyListeners(table, pk);
@@ -350,7 +368,7 @@ export class CRDTStore {
 
     this.applyChangeInternal(allowed.change);
     this.undoManager.record(allowed.change, previousState);
-    this.pending.push(allowed.change);
+    this.enqueuePending(allowed.change);
     this.persistDocument(table, pk);
     this.persistPending();
     this.notifyListeners(table, pk);
@@ -386,7 +404,7 @@ export class CRDTStore {
 
     this.applyChangeInternal(allowed.change);
     this.undoManager.record(allowed.change, previousState);
-    this.pending.push(allowed.change);
+    this.enqueuePending(allowed.change);
     this.persistDocument(table, pk);
     this.persistPending();
     this.notifyListeners(table, pk);
@@ -421,7 +439,7 @@ export class CRDTStore {
 
     this.applyChangeInternal(allowed.change);
     this.undoManager.record(allowed.change, previousState);
-    this.pending.push(allowed.change);
+    this.enqueuePending(allowed.change);
     this.persistDocument(table, pk);
     this.persistPending();
     this.notifyListeners(table, pk);
@@ -462,7 +480,7 @@ export class CRDTStore {
 
     this.applyChangeInternal(allowed.change);
     this.undoManager.record(allowed.change, previousState);
-    this.pending.push(allowed.change);
+    this.enqueuePending(allowed.change);
     this.persistDocument(table, pk);
     this.persistPending();
     this.notifyListeners(table, pk);
@@ -501,7 +519,7 @@ export class CRDTStore {
     const previousState = this.captureFieldState(table, pk, field);
     this.applyChangeInternal(change);
     this.undoManager.record(change, previousState);
-    this.pending.push(change);
+    this.enqueuePending(change);
     this.persistDocument(table, pk);
     this.persistPending();
     this.notifyListeners(table, pk);
@@ -534,7 +552,7 @@ export class CRDTStore {
     const previousState = this.captureFieldState(table, pk, field);
     this.applyChangeInternal(change);
     this.undoManager.record(change, previousState);
-    this.pending.push(change);
+    this.enqueuePending(change);
     this.persistDocument(table, pk);
     this.persistPending();
     this.notifyListeners(table, pk);
@@ -593,7 +611,7 @@ export class CRDTStore {
       text_state: nextState,
     }));
     this.undoManager.record(change, previousState);
-    this.pending.push(change);
+    this.enqueuePending(change);
     this.persistDocument(table, pk);
     this.persistPending();
     this.notifyListeners(table, pk);
@@ -732,7 +750,7 @@ export class CRDTStore {
     const previousState = this.captureFieldState(table, pk, field);
     this.applyDocumentFieldChange(table, pk, field, path, value, hlc);
     this.undoManager.record(change, previousState);
-    this.pending.push(change);
+    this.enqueuePending(change);
     this.persistDocument(table, pk);
     this.persistPending();
     this.notifyListeners(table, pk);
@@ -763,7 +781,7 @@ export class CRDTStore {
     const previousState = this.captureFieldState(table, pk, field);
     this.applyDocumentFieldDelete(table, pk, field, path, hlc);
     this.undoManager.record(change, previousState);
-    this.pending.push(change);
+    this.enqueuePending(change);
     this.persistDocument(table, pk);
     this.persistPending();
     this.notifyListeners(table, pk);
@@ -800,7 +818,7 @@ export class CRDTStore {
     });
 
     this.undoManager.record(change, previousState);
-    this.pending.push(change);
+    this.enqueuePending(change);
     this.persistDocument(table, pk);
     this.persistPending();
     this.notifyListeners(table, pk);
@@ -959,6 +977,47 @@ export class CRDTStore {
   /** Get the number of pending changes. */
   get pendingCount(): number {
     return this.pending.length;
+  }
+
+  /**
+   * Notified when the pending queue overflows and changes are dropped.
+   * Returns an unsubscribe function.
+   *
+   * Overflow means unsynced local work was discarded — surface it to the
+   * user rather than swallowing it.
+   */
+  onPendingOverflow(handler: (dropped: ChangeRecord[]) => void): () => void {
+    this.overflowHandlers.add(handler);
+    return () => { this.overflowHandlers.delete(handler); };
+  }
+
+  /** Queue a change for push, enforcing the offline bound. */
+  private enqueuePending(change: ChangeRecord): void {
+    if (
+      this.throwOnOverflow &&
+      this.maxPendingChanges > 0 &&
+      this.pending.length >= this.maxPendingChanges
+    ) {
+      throw new CRDTError(
+        `crdt: pending queue full (${this.maxPendingChanges} changes)`,
+        undefined,
+        CRDTErrorCode.OfflineQueueFull,
+        false
+      );
+    }
+
+    this.pending.push(change);
+
+    if (this.maxPendingChanges <= 0) return;
+    if (this.pending.length <= this.maxPendingChanges) return;
+
+    // Drop the OLDEST: recent writes reflect what the user most recently
+    // intended, and older ones are likelier to have been superseded.
+    const dropped = this.pending.splice(
+      0,
+      this.pending.length - this.maxPendingChanges
+    );
+    for (const handler of this.overflowHandlers) handler(dropped);
   }
 
   /** @internal Sync orchestration needs the hook chain. */

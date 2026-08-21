@@ -13,6 +13,8 @@ export class SyncEngine {
   private _lastSyncTime: number | null = null;
   private _lastPulledHLC: HLC | null = null;
   private inFlight: Promise<SyncReport> | null = null;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private onlineHandler: (() => void) | null = null;
 
   constructor(
     private client: CRDTClient,
@@ -84,5 +86,40 @@ export class SyncEngine {
 
     this._lastSyncTime = Date.now();
     return report;
+  }
+
+  /**
+   * Sync periodically, and immediately whenever the environment reports it
+   * is back online. Returns a stop function — call it on unmount.
+   *
+   * A failed sync is swallowed: the pending queue is durable, so the next
+   * tick retries. Read lastSyncTime for status.
+   */
+  start(options?: { intervalMs?: number }): () => void {
+    this.stop();
+    const interval = options?.intervalMs ?? 30_000;
+
+    this.timer = setInterval(() => {
+      void this.sync().catch(() => {});
+    }, interval);
+
+    if (typeof globalThis.addEventListener === "function") {
+      this.onlineHandler = () => { void this.sync().catch(() => {}); };
+      globalThis.addEventListener("online", this.onlineHandler);
+    }
+
+    return () => this.stop();
+  }
+
+  /** Stop periodic syncing and remove the online listener. */
+  stop(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    if (this.onlineHandler && typeof globalThis.removeEventListener === "function") {
+      globalThis.removeEventListener("online", this.onlineHandler);
+      this.onlineHandler = null;
+    }
   }
 }

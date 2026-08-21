@@ -106,6 +106,8 @@ export interface UseCRDTConfig extends CRDTClientConfig {
   streamConfig?: StreamConfig;
   /** Auto-sync on mount (default: true). */
   autoSync?: boolean;
+  /** Periodic sync interval in ms (default: 30000). */
+  syncInterval?: number;
 }
 
 /** Return type for useCRDT hook. */
@@ -208,12 +210,21 @@ export function useCRDT(config: UseCRDTConfig): UseCRDTReturn {
     };
   }, [client, store, config.streaming, config.streamConfig]);
 
-  // Auto-sync on mount (after storage hydration completes).
+  // Periodic sync + resync on reconnect, after storage hydration completes.
   useEffect(() => {
-    if (config.autoSync !== false) {
-      store.ready.then(() => sync());
-    }
-  }, [config.autoSync, sync, store]);
+    if (config.autoSync === false) return;
+    let stop: (() => void) | undefined;
+    let cancelled = false;
+    void store.ready.then(() => {
+      if (cancelled) return;
+      void sync();
+      stop = engine.start({ intervalMs: config.syncInterval });
+    });
+    return () => {
+      cancelled = true;
+      stop?.();
+    };
+  }, [config.autoSync, config.syncInterval, sync, store, engine]);
 
   // Track pending count changes.
   useEffect(() => {
