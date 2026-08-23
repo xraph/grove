@@ -16,3 +16,6 @@ build-errors.log
 
 # OS
 .DS_Store
+
+# ─── Local agent config ─────────────────────────────────────
+.claude/
