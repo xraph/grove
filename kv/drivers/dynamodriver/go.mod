@@ -10,7 +10,7 @@ replace (
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.2
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.56.0
-	github.com/xraph/grove/kv v0.0.0
+	github.com/xraph/grove/kv v1.6.2
 )
 
 require (
@@ -22,7 +22,7 @@ require (
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/xraph/go-utils v1.1.1 // indirect
-	github.com/xraph/grove v0.0.0 // indirect
+	github.com/xraph/grove v1.6.2 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect

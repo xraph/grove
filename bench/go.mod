@@ -6,8 +6,8 @@ require (
 	github.com/uptrace/bun v1.2.17
 	github.com/uptrace/bun/dialect/sqlitedialect v1.2.17
 	github.com/uptrace/bun/driver/sqliteshim v1.2.17
-	github.com/xraph/grove v0.0.0
-	github.com/xraph/grove/drivers/sqlitedriver v0.0.0
+	github.com/xraph/grove v1.6.2
+	github.com/xraph/grove/drivers/sqlitedriver v1.6.2
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.1
 )

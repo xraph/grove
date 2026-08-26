@@ -11,7 +11,7 @@ require (
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/redis v0.44.0
-	github.com/xraph/grove/kv v0.0.0
+	github.com/xraph/grove/kv v1.6.2
 )
 
 require (
@@ -61,7 +61,7 @@ require (
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/xraph/go-utils v1.1.1 // indirect
-	github.com/xraph/grove v0.0.0 // indirect
+	github.com/xraph/grove v1.6.2 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0 // indirect

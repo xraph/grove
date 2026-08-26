@@ -7,7 +7,7 @@ replace github.com/xraph/grove => ../../
 require (
 	github.com/elastic/go-elasticsearch/v8 v8.17.0
 	github.com/stretchr/testify v1.11.1
-	github.com/xraph/grove v0.0.0
+	github.com/xraph/grove v1.6.2
 )
 
 require (

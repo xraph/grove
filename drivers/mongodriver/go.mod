@@ -6,7 +6,7 @@ replace github.com/xraph/grove => ../../
 
 require (
 	github.com/stretchr/testify v1.11.1
-	github.com/xraph/grove v0.0.0
+	github.com/xraph/grove v1.6.2
 	go.mongodb.org/mongo-driver/v2 v2.5.0
 )
 

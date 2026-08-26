@@ -9,7 +9,7 @@ replace (
 
 require (
 	github.com/dgraph-io/badger/v4 v4.7.0
-	github.com/xraph/grove/kv v0.0.0
+	github.com/xraph/grove/kv v1.6.2
 )
 
 require (
@@ -23,7 +23,7 @@ require (
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/xraph/go-utils v1.1.1 // indirect
-	github.com/xraph/grove v0.0.0 // indirect
+	github.com/xraph/grove v1.6.2 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/otel v1.35.0 // indirect
 	go.opentelemetry.io/otel/metric v1.35.0 // indirect
