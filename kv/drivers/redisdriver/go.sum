@@ -120,8 +120,8 @@ github.com/vmihailenco/msgpack/v5 v5.4.1 h1:cQriyiUvjTwOHg8QZaPihLWeRAAVoCpE00IU
 github.com/vmihailenco/msgpack/v5 v5.4.1/go.mod h1:GaZTsDaehaPpQVyxrf5mtQlH+pc21PIudVV/E3rRQok=
 github.com/vmihailenco/tagparser/v2 v2.0.0 h1:y09buUbR+b5aycVFQs/g70pqKVZNBmxwAhO7/IwNM9g=
 github.com/vmihailenco/tagparser/v2 v2.0.0/go.mod h1:Wri+At7QHww0WTrCBeu4J6bNtoV6mEfg5OIWRZA9qds=
-github.com/xraph/go-utils v1.1.1 h1:k5TOQ1qhXLdEX8W5F60mSuPcFOPc8sBsnhmjx/Kpr5g=
-github.com/xraph/go-utils v1.1.1/go.mod h1:tZN4SuGy9otCo6dETp7Cvkgyiy0BvaJaZbTBv4Euvo4=
+github.com/xraph/go-utils v1.2.2 h1:zwRV3jRWDSGTqoC4zoYqxyXhXOCEI8tp66GJIPhqf8Y=
+github.com/xraph/go-utils v1.2.2/go.mod h1:Mckdi+nR0bI4bUESKSYajJq4tNSPsvZiuLRYJ0+qDQw=
 github.com/yusufpapurcu/wmi v1.2.4 h1:zFUKzehAFReQwLys1b/iSMl+JQGSCSjtVqQn9bBrPo0=
 github.com/yusufpapurcu/wmi v1.2.4/go.mod h1:SBZ9tNy3G9/m5Oi98Zks0QjeHVDvuK0qfxQmPyzfmi0=
 github.com/zeebo/xxh3 v1.0.2 h1:xZmwmqxHZA8AI603jOQ0tMqmBr9lPeFwGg6d+xy9DC0=

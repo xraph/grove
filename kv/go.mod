@@ -9,7 +9,7 @@ require github.com/xraph/grove v1.6.2
 require (
 	github.com/stretchr/testify v1.11.1
 	github.com/vmihailenco/msgpack/v5 v5.4.1
-	github.com/xraph/go-utils v1.1.1
+	github.com/xraph/go-utils v1.2.2
 	google.golang.org/protobuf v1.36.6
 )
 
