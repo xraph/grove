@@ -37,6 +37,17 @@ func (h *recordingHook) BeforeQuery(_ context.Context, _ *hook.QueryContext) (*h
 	return &hook.HookResult{Decision: hook.Allow}, nil
 }
 
+// dropKeyHook rewrites a command's keys to all but the last, which no
+// hook is allowed to do.
+type dropKeyHook struct{}
+
+func (dropKeyHook) BeforeQuery(_ context.Context, qc *hook.QueryContext) (*hook.HookResult, error) {
+	if keys, ok := qc.Values["_kv_keys"].([]string); ok && len(keys) > 0 {
+		qc.Values["_kv_keys"] = keys[:len(keys)-1]
+	}
+	return &hook.HookResult{Decision: hook.Modify}, nil
+}
+
 // testUser is a simple struct used in codec round-trip tests.
 type testUser struct {
 	Name string `json:"name"`
@@ -563,4 +574,28 @@ func TestStore_Hooks(t *testing.T) {
 func TestStore_Codec(t *testing.T) {
 	store := kvtest.SetupStore(t)
 	assert.Equal(t, "json", store.Codec().Name())
+}
+
+// A hook that drops a key would leave driver results misaligned with the
+// caller's keys, so every multi-key command refuses it.
+func TestStore_HookChangingKeyCount(t *testing.T) {
+	ctx := context.Background()
+	store := kvtest.SetupStore(t, kv.WithHook(dropKeyHook{}))
+
+	keys := []string{"a", "b"}
+
+	err := store.Delete(ctx, keys...)
+	assert.ErrorIs(t, err, kv.ErrHookKeyCount, "Delete")
+
+	_, err = store.Exists(ctx, keys...)
+	assert.ErrorIs(t, err, kv.ErrHookKeyCount, "Exists")
+
+	err = store.MGet(ctx, keys, map[string]any{})
+	assert.ErrorIs(t, err, kv.ErrHookKeyCount, "MGet")
+
+	_, err = store.MGetRaw(ctx, keys)
+	assert.ErrorIs(t, err, kv.ErrHookKeyCount, "MGetRaw")
+
+	err = store.MSet(ctx, map[string]any{"a": 1, "b": 2})
+	assert.ErrorIs(t, err, kv.ErrHookKeyCount, "MSet")
 }
