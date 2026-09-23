@@ -24,6 +24,11 @@ var (
 	// ErrHookDenied is returned when a hook denies the operation.
 	ErrHookDenied = errors.New("kv: hook denied the operation")
 
+	// ErrHookKeyCount is returned when a pre-query hook changes how many
+	// keys a command touches. Hooks may rewrite keys, as a namespace does,
+	// but results are matched to the caller's keys by position.
+	ErrHookKeyCount = errors.New("kv: hook changed the number of keys")
+
 	// ErrCodecEncode is returned when value encoding fails.
 	ErrCodecEncode = errors.New("kv: codec encode failed")
 

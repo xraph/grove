@@ -3,6 +3,7 @@ package kv
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -231,19 +232,32 @@ func (s *Store) Delete(ctx context.Context, keys ...string) error {
 		return nil
 	}
 
+	_, err := s.deleteKeys(ctx, keys)
+
+	return err
+}
+
+// deleteKeys is Delete returning how many keys the driver removed, which
+// Batch reports and Delete does not.
+func (s *Store) deleteKeys(ctx context.Context, keys []string) (int64, error) {
 	qc := newCommandContext(OpDelete, keys, nil)
 	if result, err := s.hooks.RunPreQuery(ctx, qc); err != nil {
-		return err
+		return 0, err
 	} else if result != nil && result.Decision == hook.Deny {
-		return ErrHookDenied
+		return 0, ErrHookDenied
 	}
 
-	_, err := s.drv.Delete(ctx, keys...)
+	resolved, err := resolveKeys(qc, keys)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	return s.hooks.RunPostQuery(ctx, qc, nil)
+	n, err := s.drv.Delete(ctx, resolved...)
+	if err != nil {
+		return 0, err
+	}
+
+	return n, s.hooks.RunPostQuery(ctx, qc, nil)
 }
 
 // Exists returns the count of keys that exist.
@@ -262,7 +276,12 @@ func (s *Store) Exists(ctx context.Context, keys ...string) (int64, error) {
 		return 0, ErrHookDenied
 	}
 
-	count, err := s.drv.Exists(ctx, keys...)
+	resolved, err := resolveKeys(qc, keys)
+	if err != nil {
+		return 0, err
+	}
+
+	count, err := s.drv.Exists(ctx, resolved...)
 	if err != nil {
 		return 0, err
 	}
@@ -292,7 +311,14 @@ func (s *Store) MGet(ctx context.Context, keys []string, dest map[string]any) er
 		return ErrHookDenied
 	}
 
-	results, err := batchDrv.MGet(ctx, keys)
+	resolved, err := resolveKeys(qc, keys)
+	if err != nil {
+		return err
+	}
+
+	// Results line up with resolved by position, and so with keys: dest
+	// is filled under the caller's keys, not the physical ones.
+	results, err := batchDrv.MGet(ctx, resolved)
 	if err != nil {
 		return err
 	}
@@ -325,8 +351,23 @@ func (s *Store) MSet(ctx context.Context, pairs map[string]any, opts ...SetOptio
 		return ErrNotSupported
 	}
 
-	so := applySetOptions(opts)
+	rawPairs := make(map[string][]byte, len(pairs))
+	for k, v := range pairs {
+		raw, err := s.codec.Encode(v)
+		if err != nil {
+			return fmt.Errorf("%w: key %s: %v", ErrCodecEncode, k, err)
+		}
+		rawPairs[k] = raw
+	}
 
+	return s.msetRaw(ctx, batchDrv, rawPairs, applySetOptions(opts).ttl)
+}
+
+// msetRaw writes already-encoded pairs under the keys the hooks resolve
+// them to. It is shared by MSet and Batch.
+func (s *Store) msetRaw(
+	ctx context.Context, batchDrv driver.BatchDriver, pairs map[string][]byte, ttl time.Duration,
+) error {
 	keys := make([]string, 0, len(pairs))
 	for k := range pairs {
 		keys = append(keys, k)
@@ -339,16 +380,17 @@ func (s *Store) MSet(ctx context.Context, pairs map[string]any, opts ...SetOptio
 		return ErrHookDenied
 	}
 
-	rawPairs := make(map[string][]byte, len(pairs))
-	for k, v := range pairs {
-		raw, err := s.codec.Encode(v)
-		if err != nil {
-			return fmt.Errorf("%w: key %s: %v", ErrCodecEncode, k, err)
-		}
-		rawPairs[k] = raw
+	resolved, err := resolveKeys(qc, keys)
+	if err != nil {
+		return err
 	}
 
-	if err := batchDrv.MSet(ctx, rawPairs, so.ttl); err != nil {
+	physical := make(map[string][]byte, len(pairs))
+	for i, k := range keys {
+		physical[resolved[i]] = pairs[k]
+	}
+
+	if err := batchDrv.MSet(ctx, physical, ttl); err != nil {
 		return err
 	}
 
@@ -373,7 +415,7 @@ func (s *Store) TTL(ctx context.Context, key string) (time.Duration, error) {
 		return 0, ErrHookDenied
 	}
 
-	ttl, err := ttlDrv.TTL(ctx, key)
+	ttl, err := ttlDrv.TTL(ctx, resolveKey(qc))
 	if err != nil {
 		return 0, err
 	}
@@ -400,7 +442,7 @@ func (s *Store) Expire(ctx context.Context, key string, ttl time.Duration) error
 		return ErrHookDenied
 	}
 
-	if err := ttlDrv.Expire(ctx, key, ttl); err != nil {
+	if err := ttlDrv.Expire(ctx, resolveKey(qc), ttl); err != nil {
 		return err
 	}
 
@@ -425,7 +467,23 @@ func (s *Store) Scan(ctx context.Context, pattern string, fn func(key string) er
 		return ErrHookDenied
 	}
 
-	if err := scanDrv.Scan(ctx, pattern, fn); err != nil {
+	resolved := resolveKey(qc)
+
+	// A namespacing hook hands back the caller's pattern with a prefix in
+	// front, and the driver then yields physical keys carrying that
+	// prefix. Stripping it again gives the caller keys it can pass
+	// straight back to Get or Delete, which would otherwise namespace
+	// them a second time. A hook that rewrites the pattern any other way
+	// leaves no prefix to strip, and its keys come through as the driver
+	// reports them.
+	yield := fn
+	if prefix, ok := strings.CutSuffix(resolved, pattern); ok && prefix != "" {
+		yield = func(key string) error {
+			return fn(strings.TrimPrefix(key, prefix))
+		}
+	}
+
+	if err := scanDrv.Scan(ctx, resolved, yield); err != nil {
 		return err
 	}
 
@@ -481,4 +539,23 @@ func resolveKey(qc *hook.QueryContext) string {
 		return keys[0]
 	}
 	return qc.RawQuery
+}
+
+// resolveKeys is resolveKey for a multi-key command: the keys the
+// pre-query hooks left in qc, or keys itself when no hook set any.
+//
+// A hook may rename keys but not add or drop them. Callers line driver
+// results up with their own keys by position, so a changed count is an
+// error rather than a quietly misaligned result.
+func resolveKeys(qc *hook.QueryContext, keys []string) ([]string, error) {
+	resolved, ok := qc.Values["_kv_keys"].([]string)
+	if !ok {
+		return keys, nil
+	}
+
+	if len(resolved) != len(keys) {
+		return nil, fmt.Errorf("%w: %d keys became %d", ErrHookKeyCount, len(keys), len(resolved))
+	}
+
+	return resolved, nil
 }

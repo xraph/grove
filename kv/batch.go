@@ -67,9 +67,13 @@ func (b *Batch) Exec(ctx context.Context) (*BatchResult, error) {
 		Values: make(map[string][]byte),
 	}
 
+	// Each phase goes through the store rather than straight to the
+	// driver, so hooks see it: a namespace rewrites its keys and a policy
+	// hook can deny it, as they would for the single-key commands.
+
 	// Execute gets.
 	if len(b.gets) > 0 {
-		vals, err := batchDrv.MGet(ctx, b.gets)
+		vals, err := b.store.MGetRaw(ctx, b.gets)
 		if err != nil {
 			return nil, fmt.Errorf("batch get: %w", err)
 		}
@@ -83,7 +87,7 @@ func (b *Batch) Exec(ctx context.Context) (*BatchResult, error) {
 	// Execute sets.
 	if len(b.sets) > 0 {
 		so := applySetOptions(b.opts)
-		if err := batchDrv.MSet(ctx, b.sets, so.ttl); err != nil {
+		if err := b.store.msetRaw(ctx, batchDrv, b.sets, so.ttl); err != nil {
 			return nil, fmt.Errorf("batch set: %w", err)
 		}
 		result.Written = int64(len(b.sets))
@@ -91,7 +95,7 @@ func (b *Batch) Exec(ctx context.Context) (*BatchResult, error) {
 
 	// Execute deletes.
 	if len(b.dels) > 0 {
-		n, err := b.store.drv.Delete(ctx, b.dels...)
+		n, err := b.store.deleteKeys(ctx, b.dels)
 		if err != nil {
 			return nil, fmt.Errorf("batch delete: %w", err)
 		}
