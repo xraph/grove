@@ -1,8 +1,10 @@
 package scan
 
 import (
+	"database/sql"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/xraph/grove/schema"
@@ -38,6 +40,8 @@ func wrapDest(ptr any, field *schema.Field) any {
 		return &timeDest{dst: p}
 	case **time.Time:
 		return &timePtrDest{dst: p}
+	case *sql.NullTime:
+		return &nullTimeDest{dst: p}
 	case *string:
 		// pgx cannot scan SQL NULL into *string and errors. For a nullable
 		// column, wrap the destination so NULL coerces to "" — the same
@@ -120,6 +124,24 @@ func (d *timePtrDest) Scan(src any) error {
 	return nil
 }
 
+// nullTimeDest scans a driver value into a sql.NullTime field. NullTime's own
+// Scan only accepts time.Time, so TEXT timestamps from sqlite and turso would
+// fail without this.
+type nullTimeDest struct{ dst *sql.NullTime }
+
+func (d *nullTimeDest) Scan(src any) error {
+	if src == nil {
+		*d.dst = sql.NullTime{}
+		return nil
+	}
+	var t time.Time
+	if err := (&timeDest{dst: &t}).Scan(src); err != nil {
+		return err
+	}
+	*d.dst = sql.NullTime{Time: t, Valid: true}
+	return nil
+}
+
 // timeLayouts are tried in order when parsing TEXT timestamps. The Go
 // default layout comes first because modernc/sqlite serializes time.Time
 // arguments with time.Time.String() unless configured otherwise, so that is
@@ -134,13 +156,37 @@ var timeLayouts = []string{
 	time.DateOnly,
 }
 
+// namelessZoneLayout matches time.Time.String() for a fixed zone with no
+// name, which prints the offset in place of the abbreviation
+// ("+0200 +0200"). time.Parse rejects that as an abbreviation, so it needs
+// its own layout.
+const namelessZoneLayout = "2006-01-02 15:04:05.999999999 -0700 -0700"
+
 func parseTimeString(s string) (time.Time, error) {
+	trimmed := trimMonotonic(s)
 	for _, layout := range timeLayouts {
-		if t, err := time.Parse(layout, s); err == nil {
+		if t, err := time.Parse(layout, trimmed); err == nil {
 			return t, nil
 		}
 	}
+	if t, err := time.Parse(namelessZoneLayout, trimmed); err == nil {
+		return t, nil
+	}
 	return time.Time{}, fmt.Errorf("scan: cannot parse %q as time.Time", s)
+}
+
+// trimMonotonic drops the " m=±<seconds>" suffix time.Time.String() adds when
+// the value still carries a monotonic clock reading. The reading is only
+// meaningful inside the process that took it, so nothing is lost.
+func trimMonotonic(s string) string {
+	i := strings.LastIndex(s, " m=")
+	if i < 0 || i+3 >= len(s) {
+		return s
+	}
+	if c := s[i+3]; c != '+' && c != '-' {
+		return s
+	}
+	return s[:i]
 }
 
 // IsNilable returns true if the given type can hold a nil value.

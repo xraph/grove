@@ -17,7 +17,7 @@ var _ driver.Stmt = (*sqliteStmt)(nil)
 
 // Exec executes the prepared statement with the given arguments.
 func (s *sqliteStmt) Exec(ctx context.Context, args ...any) (driver.Result, error) {
-	res, err := s.stmt.ExecContext(ctx, args...)
+	res, err := s.stmt.ExecContext(ctx, utcArgs(args)...)
 	if err != nil {
 		return nil, fmt.Errorf("sqlitedriver: stmt exec: %w", err)
 	}
