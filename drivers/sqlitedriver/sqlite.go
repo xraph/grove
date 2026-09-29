@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -107,7 +108,7 @@ func (db *SqliteDB) Exec(ctx context.Context, query string, args ...any) (driver
 	if db.txConn != nil {
 		return db.txConn.Exec(ctx, query, args...)
 	}
-	res, err := db.db.ExecContext(ctx, query, args...)
+	res, err := db.db.ExecContext(ctx, query, utcArgs(args)...)
 	if err != nil {
 		return nil, fmt.Errorf("sqlitedriver: exec: %w", err)
 	}
@@ -120,7 +121,7 @@ func (db *SqliteDB) Query(ctx context.Context, query string, args ...any) (drive
 	if db.txConn != nil {
 		return db.txConn.Query(ctx, query, args...)
 	}
-	rows, err := db.db.QueryContext(ctx, query, args...)
+	rows, err := db.db.QueryContext(ctx, query, utcArgs(args)...)
 	if err != nil {
 		return nil, fmt.Errorf("sqlitedriver: query: %w", err)
 	}
@@ -132,7 +133,7 @@ func (db *SqliteDB) QueryRow(ctx context.Context, query string, args ...any) dri
 	if db.txConn != nil {
 		return db.txConn.QueryRow(ctx, query, args...)
 	}
-	row := db.db.QueryRowContext(ctx, query, args...)
+	row := db.db.QueryRowContext(ctx, query, utcArgs(args)...)
 	return &sqliteRow{row: row}
 }
 
@@ -188,6 +189,50 @@ func (db *SqliteDB) Prepare(ctx context.Context, query string) (driver.Stmt, err
 		return nil, fmt.Errorf("sqlitedriver: prepare: %w", err)
 	}
 	return &sqliteStmt{stmt: stmt}, nil
+}
+
+// utcArgs returns args with every time.Time, non-nil *time.Time and valid
+// sql.NullTime converted to UTC. Unless the DSN sets _time_format, modernc/sqlite binds a time with
+// t.String(), which appends " m=+..." when the value carries a monotonic
+// reading and prints a nameless fixed zone as "+0200 +0200". UTC() drops both,
+// and writing every time in one zone keeps lexical comparison on TEXT columns
+// chronological. The caller's slice is copied, never modified, and returned
+// as is when it holds no times.
+func utcArgs(args []any) []any {
+	var out []any
+	for i, a := range args {
+		var norm any
+		switch v := a.(type) {
+		case time.Time:
+			norm = v.UTC()
+		case *time.Time:
+			if v == nil {
+				continue
+			}
+			norm = v.UTC()
+		case sql.NullTime:
+			if !v.Valid {
+				continue
+			}
+			norm = sql.NullTime{Time: v.Time.UTC(), Valid: true}
+		case *sql.NullTime:
+			if v == nil || !v.Valid {
+				continue
+			}
+			norm = sql.NullTime{Time: v.Time.UTC(), Valid: true}
+		default:
+			continue
+		}
+		if out == nil {
+			out = make([]any, len(args))
+			copy(out, args)
+		}
+		out[i] = norm
+	}
+	if out == nil {
+		return args
+	}
+	return out
 }
 
 // mapIsolationLevel converts a driver.IsolationLevel to the corresponding

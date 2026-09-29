@@ -82,7 +82,7 @@ var _ driver.Preparer = (*sqliteTx)(nil)
 
 // Exec executes a query within the transaction that does not return rows.
 func (t *sqliteTx) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
-	res, err := t.tx.ExecContext(ctx, query, args...)
+	res, err := t.tx.ExecContext(ctx, query, utcArgs(args)...)
 	if err != nil {
 		return nil, fmt.Errorf("sqlitedriver: tx exec: %w", err)
 	}
@@ -91,7 +91,7 @@ func (t *sqliteTx) Exec(ctx context.Context, query string, args ...any) (driver.
 
 // Query executes a query within the transaction that returns rows.
 func (t *sqliteTx) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
-	rows, err := t.tx.QueryContext(ctx, query, args...)
+	rows, err := t.tx.QueryContext(ctx, query, utcArgs(args)...)
 	if err != nil {
 		return nil, fmt.Errorf("sqlitedriver: tx query: %w", err)
 	}
@@ -101,7 +101,7 @@ func (t *sqliteTx) Query(ctx context.Context, query string, args ...any) (driver
 // QueryRow executes a query within the transaction expected to return at most
 // one row.
 func (t *sqliteTx) QueryRow(ctx context.Context, query string, args ...any) driver.Row {
-	row := t.tx.QueryRowContext(ctx, query, args...)
+	row := t.tx.QueryRowContext(ctx, query, utcArgs(args)...)
 	return &sqliteRow{row: row}
 }
 
