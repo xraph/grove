@@ -353,3 +353,79 @@ func TestFieldPtr_TimePassthroughAndNil(t *testing.T) {
 		}
 	}
 }
+
+// TestParseTimeString_GoStringForms covers what modernc/sqlite writes when it
+// binds a time.Time with t.String(): a trailing monotonic reading and, for a
+// nameless fixed zone, a numeric abbreviation. Rows like these are already on
+// disk, so the scanner has to read them even after writes are normalized.
+func TestParseTimeString_GoStringForms(t *testing.T) {
+	tests := []struct {
+		in   string
+		want time.Time
+	}{
+		{"2026-09-30 14:30:15.123456789 +0000 UTC m=+86400.020833334", time.Date(2026, 9, 30, 14, 30, 15, 123456789, time.UTC)},
+		{"2026-09-30 14:30:15 +0000 UTC m=-0.000001", time.Date(2026, 9, 30, 14, 30, 15, 0, time.UTC)},
+		{"2026-09-29 16:30:15.5 +0200 +0200", time.Date(2026, 9, 29, 14, 30, 15, 500_000_000, time.UTC)},
+		{"2026-09-29 11:00:15 -0330 -0330 m=+3.5", time.Date(2026, 9, 29, 14, 30, 15, 0, time.UTC)},
+		{"2026-09-29 10:30:15 -0400 EDT m=+1.25", time.Date(2026, 9, 29, 14, 30, 15, 0, time.UTC)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got, err := parseTimeString(tt.in)
+			if err != nil {
+				t.Fatalf("parseTimeString: %v", err)
+			}
+			if !got.Equal(tt.want) {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFieldPtr_NullTime checks sql.NullTime fields accept TEXT timestamps
+// (sqlite, turso), pass time.Time through (postgres), and map NULL to invalid.
+func TestFieldPtr_NullTime(t *testing.T) {
+	type row struct {
+		grove.BaseModel `grove:"table:null_timed"`
+		ID              int64        `grove:"id,pk"`
+		At              sql.NullTime `grove:"at"`
+	}
+	table, err := schema.NewTable((*row)(nil))
+	if err != nil {
+		t.Fatalf("NewTable failed: %v", err)
+	}
+	want := time.Date(2026, 9, 29, 14, 30, 15, 0, time.UTC)
+
+	for _, src := range []any{"2026-09-29 16:30:15 +0200 +0200", []byte("2026-09-29T14:30:15Z"), want} {
+		m := row{}
+		v := reflect.ValueOf(&m).Elem()
+		for _, field := range table.Fields {
+			if field.GoName != "At" {
+				continue
+			}
+			sc, ok := FieldPtr(v, field).(sql.Scanner)
+			if !ok {
+				t.Fatalf("expected sql.Scanner dest, got %T", FieldPtr(v, field))
+			}
+			if err := sc.Scan(src); err != nil {
+				t.Fatalf("scan %T: %v", src, err)
+			}
+		}
+		if !m.At.Valid || !m.At.Time.Equal(want) {
+			t.Errorf("src %T: At = %+v, want valid %v", src, m.At, want)
+		}
+	}
+
+	m := row{At: sql.NullTime{Time: want, Valid: true}}
+	v := reflect.ValueOf(&m).Elem()
+	for _, field := range table.Fields {
+		if field.GoName == "At" {
+			if err := FieldPtr(v, field).(sql.Scanner).Scan(nil); err != nil {
+				t.Fatalf("scan nil: %v", err)
+			}
+		}
+	}
+	if m.At.Valid {
+		t.Errorf("At = %+v, want invalid after NULL scan", m.At)
+	}
+}
