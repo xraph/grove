@@ -216,3 +216,16 @@ func TestValidateRoomMetadata_TooLarge(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "room metadata exceeds max size")
 }
+
+func TestValidateChangeRecord_OldOfflineChangeAccepted(t *testing.T) {
+	cfg := DefaultValidationConfig()
+	change := &ChangeRecord{
+		Table:    "documents",
+		PK:       "doc-1",
+		NodeID:   "node-a",
+		CRDTType: TypeLWW,
+		HLC:      HLC{Timestamp: time.Now().Add(-72 * time.Hour).UnixNano(), NodeID: "node-a"},
+		Value:    json.RawMessage(`"written offline three days ago"`),
+	}
+	require.NoError(t, cfg.ValidateChangeRecord(change))
+}

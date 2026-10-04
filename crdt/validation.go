@@ -12,7 +12,9 @@ type ValidationConfig struct {
 	MaxChangeValueSize int
 	// MaxChangesPerPush is the maximum number of changes in a single push (default: 10000).
 	MaxChangesPerPush int
-	// MaxHLCDrift is the maximum allowed HLC timestamp drift from server time (default: 1 hour).
+	// MaxHLCDrift is how far ahead of server time a change's HLC may be
+	// (default: 1 hour). Older changes are always accepted: a client that
+	// edits offline for days pushes changes stamped days in the past.
 	MaxHLCDrift time.Duration
 	// MaxRoomMetadataSize is the maximum byte size for room metadata (default: 100KB).
 	MaxRoomMetadataSize int
@@ -61,11 +63,7 @@ func (vc *ValidationConfig) ValidateChangeRecord(change *ChangeRecord) error {
 		}
 	}
 	if vc.MaxHLCDrift > 0 {
-		now := time.Now().UnixNano()
-		drift := change.HLC.Timestamp - now
-		if drift < 0 {
-			drift = -drift
-		}
+		drift := change.HLC.Timestamp - time.Now().UnixNano()
 		if drift > vc.MaxHLCDrift.Nanoseconds() {
 			return fmt.Errorf("crdt: change HLC timestamp drift too large (%v)", time.Duration(drift))
 		}
