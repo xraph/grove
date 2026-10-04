@@ -207,21 +207,27 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 	}
 	pushStart := time.Now()
 
-	merged := 0
-
+	// Run BeforeInboundChange for the whole batch before merging anything,
+	// so a hook rejection fails the push with nothing applied instead of
+	// after the earlier changes already merged. A nil result skips that
+	// change (it is filtered out and not counted in Merged).
+	processed := make([]*ChangeRecord, 0, len(req.Changes))
 	for _, change := range req.Changes {
 		// Update our clock with each incoming change.
 		c.plugin.clock.Update(change.HLC)
 
-		// Run BeforeInboundChange hook.
 		processedChange, err := c.hooks.BeforeInboundChange(ctx, &change)
 		if err != nil {
 			return nil, fmt.Errorf("crdt: inbound change hook: %w", err)
 		}
-		if processedChange == nil {
-			continue // Hook says skip this change.
+		if processedChange != nil {
+			processed = append(processed, processedChange)
 		}
+	}
 
+	merged := 0
+
+	for _, processedChange := range processed {
 		// A tombstoned document-type change carrying a value is a PATH
 		// delete inside the nested document, not a record delete — it
 		// falls through to ApplyChange below (mirrors sync.go).
