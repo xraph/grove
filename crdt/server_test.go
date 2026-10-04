@@ -592,6 +592,34 @@ func lwwRows(n int, startTS int64) []mockRow {
 	return rows
 }
 
+func TestSyncController_HandlePull_MultiTableBacklogNotSkipped(t *testing.T) {
+	fake := newShadowFake()
+	// "big" has a backlog larger than one page; "small" has one row newer
+	// than all of it. A single max-over-tables watermark would jump past
+	// big's second page.
+	fake.tables["big"] = lwwRows(DefaultChangesLimit+500, 1_000)
+	fake.tables["small"] = lwwRows(1, 1_000_000)
+	ctrl := NewSyncController(fake.plugin())
+
+	seen := map[string]bool{}
+	since := HLC{}
+	for range 5 {
+		resp, err := ctrl.HandlePull(context.Background(), &PullRequest{
+			Tables: []string{"big", "small"}, Since: since, NodeID: "client",
+		})
+		require.NoError(t, err)
+		for _, c := range resp.Changes {
+			seen[c.Table+"/"+c.PK] = true
+		}
+		if len(resp.Changes) == 0 {
+			break
+		}
+		since = resp.LatestHLC
+	}
+
+	assert.Len(t, seen, DefaultChangesLimit+500+1, "every row of both tables must arrive across pulls")
+}
+
 func TestSyncController_HandlePush_HookRejectionMergesNothing(t *testing.T) {
 	fake := newShadowFake()
 	fake.tables["docs"] = nil
