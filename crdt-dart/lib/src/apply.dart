@@ -50,6 +50,15 @@ FieldState _merge(FieldState? local, FieldState remote) {
 /// [local] is `null` for the first change to a field. The result may share
 /// untouched substructure with [local] and [c].
 ///
+/// Two kinds of change depend on delivery order, as they do in Go. A legacy
+/// set remove (no tags on the wire) removes only the tags [local] already
+/// holds that are older than the remove, so an add delivered after it
+/// survives and one delivered before it does not. A document path delete has
+/// no memory: it removes what is stored at that moment, so a write delivered
+/// after it brings the path back and one delivered before it is removed. A
+/// text field's `value` is set only when the last change was a state carrier,
+/// so read text through its `textState`, as `resolveFieldValue` does.
+///
 /// Throws a [CrdtApplyError], with Go's message text, where Go returns an
 /// error: a change type that differs from the field's, a missing payload, a
 /// malformed document change, or a text insert without content.

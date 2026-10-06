@@ -180,16 +180,26 @@ List<RgaNode> _walkList(RgaListState s) {
   return out;
 }
 
-/// The visible values in RGA order.
-List<Object?> listElements(RgaListState s) => [for (final n in _walkList(s)) n.value.value];
+/// A deep copy of a decoded JSON value. Maps and lists are rebuilt, so the
+/// copy shares nothing mutable with [v].
+Object? _deepCopy(Object? v) => switch (v) {
+      final Map<String, Object?> m => <String, Object?>{for (final e in m.entries) e.key: _deepCopy(e.value)},
+      final List<Object?> l => <Object?>[for (final e in l) _deepCopy(e)],
+      _ => v,
+    };
+
+/// The visible values in RGA order. Each value is a deep copy, so changing a
+/// returned map or list never changes the list state.
+List<Object?> listElements(RgaListState s) => [for (final n in _walkList(s)) _deepCopy(n.value.value)];
 
 /// The visible node ids in RGA order.
 List<HLC> listNodeIds(RgaListState s) => [for (final n in _walkList(s)) n.id];
 
 // --- Document ---
 
-/// Path-wise merge. A type mismatch at a path resolves by the higher clock.
-/// Port of Go `MergeDocument`.
+/// Path-wise merge. A type mismatch at a path resolves by the higher clock,
+/// which discards a merge of the two sides, so regrouping three states can
+/// give a different result (see [mergeState]). Port of Go `MergeDocument`.
 DocumentCrdtState mergeDocument(DocumentCrdtState local, DocumentCrdtState remote) {
   final out = <String, FieldState>{};
   for (final path in <String>{...local.fields.keys, ...remote.fields.keys}) {
@@ -206,6 +216,9 @@ DocumentCrdtState mergeDocument(DocumentCrdtState local, DocumentCrdtState remot
 }
 
 /// The nested materialised view of a document. Port of Go `Resolve`.
+///
+/// The result is the caller's: every map and list in it is new, so changing
+/// it cannot change [s], including a leaf object that has no nested path.
 ///
 /// Paths apply in ascending length, so a nested path always wins over a leaf
 /// at its prefix. Go documents that intent, but walks a map, so the winner
@@ -243,17 +256,20 @@ Map<String, Object?> documentResolve(DocumentCrdtState s) {
 
 /// The application-visible value of a field.
 ///
+/// The result is the caller's: any map or list in it is a deep copy, never a
+/// reference into [fs], so changing it cannot change the state.
+///
 /// Text resolves from its [TextState] when present (Go falls back to `value`,
 /// which `applyChange` deliberately leaves unset for text), and a document
 /// from its [DocumentCrdtState] when present.
 Object? resolveFieldValue(FieldState fs) => switch (fs.type) {
-      CrdtType.lww => fs.value?.value,
+      CrdtType.lww => _deepCopy(fs.value?.value),
       CrdtType.counter => fs.counterState == null ? 0 : counterValue(fs.counterState!),
       CrdtType.set => fs.setState == null ? <Object?>[] : setElements(fs.setState!),
       CrdtType.list => fs.listState == null ? <Object?>[] : listElements(fs.listState!),
-      CrdtType.text => fs.textState != null ? textValue(fs.textState!) : fs.value?.value,
-      CrdtType.document => fs.docState != null ? documentResolve(fs.docState!) : fs.value?.value,
-      CrdtType.none => fs.value?.value,
+      CrdtType.text => fs.textState != null ? textValue(fs.textState!) : _deepCopy(fs.value?.value),
+      CrdtType.document => fs.docState != null ? documentResolve(fs.docState!) : _deepCopy(fs.value?.value),
+      CrdtType.none => _deepCopy(fs.value?.value),
     };
 
 // --- Field states ---
@@ -348,6 +364,15 @@ HLC _latest(DocumentState s) {
 /// A `null` side yields the other side itself. Throws a [CrdtMergeError]
 /// naming the field when two fields cannot merge, and an [ArgumentError] when
 /// both sides are `null`.
+///
+/// Commutative, but not associative, exactly as in Go. Two cases break it:
+/// when both sides are tombstoned the later tombstone wins and the fields are
+/// ignored, so `(a, b), c` can differ from `a, (b, c)`; and a document path
+/// whose two sides have different types resolves by the higher clock and
+/// discards the merge of the two, so regrouping three states can lose a write.
+/// Fold remote states in one consistent order instead of regrouping them.
+/// Legacy set removes and document path deletes also depend on delivery order
+/// (see [applyChange]).
 DocumentState mergeState(DocumentState? local, DocumentState? remote) {
   if (local == null && remote == null) throw ArgumentError('mergeState: both sides are null');
   if (local == null) return remote!;
