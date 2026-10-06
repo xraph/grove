@@ -3,6 +3,10 @@ import 'package:collection/collection.dart';
 import 'hlc.dart';
 
 /// A pre-encoded JSON fragment that [goMarshal] emits verbatim.
+///
+/// Go compacts and HTML-escapes a `json.RawMessage`; this does not. Writing it
+/// verbatim is a deliberate exception, so a remove can send another engine's
+/// exact key bytes.
 final class RawJson {
   /// Wraps already-encoded JSON text.
   const RawJson(this.json);
@@ -23,7 +27,11 @@ String goMarshal(Object? value) {
 String setElementKey(Object? element) => goMarshal(element);
 
 /// Deep JSON equality where `1` and `1.0` are equal.
-bool jsonDeepEquals(Object? a, Object? b) => const _JsonEquality().equals(a, b);
+bool jsonDeepEquals(Object? a, Object? b) => jsonDeepEquality.equals(a, b);
+
+/// The [Equality] behind [jsonDeepEquals], for keying a hash collection by
+/// deep JSON value. Its `hash` agrees with `equals` for `1`, `1.0` and `-0.0`.
+const Equality<Object?> jsonDeepEquality = _JsonEquality();
 
 final class _JsonEquality implements Equality<Object?> {
   const _JsonEquality();
@@ -49,7 +57,17 @@ final class _JsonEquality implements Equality<Object?> {
   }
 
   @override
-  int hash(Object? e) => goMarshal(e).hashCode;
+  int hash(Object? e) => switch (e) {
+        // equals treats 1, 1.0 and -0.0 as the numbers they equal, so hash by
+        // double value, and fold -0.0 into 0.0.
+        final num n => n == 0 ? 0.0.hashCode : n.toDouble().hashCode,
+        final List<Object?> l => Object.hashAll(l.map(hash)),
+        final Map<String, Object?> m => m.entries.fold<int>(
+            0,
+            (acc, en) => acc + Object.hash(en.key, hash(en.value)),
+          ),
+        _ => e.hashCode,
+      };
 
   @override
   bool isValidKey(Object? o) => true;
@@ -76,12 +94,10 @@ void _write(StringBuffer out, Object? v) {
       out.write('null');
     case final bool b:
       out.write(b ? 'true' : 'false');
-    case final int i:
-      out.write(i.toString());
+    case final num n:
+      out.write(_formatNum(n));
     case final BigInt i:
       out.write(i.toString());
-    case final double d:
-      out.write(_formatDouble(d));
     case final String s:
       _writeString(out, s);
     case final RawJson r:
@@ -95,6 +111,16 @@ void _write(StringBuffer out, Object? v) {
       out.write(']');
     case final Map<String, Object?> m:
       final keys = m.keys.toList()..sort(compareGoStrings);
+      for (var i = 1; i < keys.length; i++) {
+        if (compareGoStrings(keys[i - 1], keys[i]) == 0) {
+          // Go would decode both keys to the same string and keep one.
+          throw ArgumentError.value(
+            m,
+            'value',
+            'goMarshal: keys collide after surrogate replacement',
+          );
+        }
+      }
       out.write('{');
       for (var i = 0; i < keys.length; i++) {
         if (i > 0) out.write(',');
@@ -108,10 +134,18 @@ void _write(StringBuffer out, Object? v) {
   }
 }
 
-String _formatDouble(double d) {
-  if (d.isNaN || d.isInfinite) {
-    throw UnsupportedError('goMarshal: unsupported value $d');
+// On the web an integral double is also an `int` (and so is Infinity), so the
+// checks that depend on the double's value run before the int/double split.
+String _formatNum(num n) {
+  if (!n.isFinite) {
+    throw UnsupportedError('goMarshal: unsupported value $n');
   }
+  if (n == 0 && n.isNegative) return '-0';
+  if (n is int) return n.toString();
+  return _formatDouble(n as double);
+}
+
+String _formatDouble(double d) {
   final abs = d.abs();
   if (abs != 0 && (abs < 1e-6 || abs >= 1e21)) {
     // Dart prints the shortest exponent form without zero padding, which is

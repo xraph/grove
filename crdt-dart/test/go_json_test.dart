@@ -33,6 +33,19 @@ void main() {
     test('sorts object keys by byte order', () {
       expect(goMarshal({'é': 1, 'e': 2, 'Z': 3}), '{"Z":3,"e":2,"é":1}');
     });
+    test('orders a key holding a lone surrogate as U+FFFD, like Go', () {
+      // Go parity: encoding/json sorts keys after decoding \ud800 to U+FFFD.
+      final keys = <String>['z', '\u00e9', '\ue000', '\uff00', '\uD800', '\uffff', '\u{1F600}'];
+      final m = <String, Object?>{for (var i = 0; i < keys.length; i++) keys[i]: i + 1};
+      expect(
+        goMarshal(m),
+        '{"z":1,"\u00e9":2,"\ue000":3,"\uff00":4,"\u{FFFD}":5,"\uffff":6,"\u{1F600}":7}',
+      );
+    });
+    test('rejects keys that collide after surrogate replacement', () {
+      // Go keeps one of them silently; a Dart map cannot, so fail loudly.
+      expect(() => goMarshal({'\uD800': 1, '\uDC00': 2}), throwsArgumentError);
+    });
     test('encodes nested values', () {
       expect(
         goMarshal({'b': 1, 'a': [true, false, null], 'c': {'z': '', 'y': 0}}),
@@ -77,6 +90,14 @@ void main() {
 
   test('setElementKey is goMarshal', () {
     expect(setElementKey({'b': 1, 'a': 'x<y'}), r'{"a":"x\u003cy","b":1}');
+  });
+
+  test('jsonDeepEquals hash agrees with equals for 1, 1.0 and -0.0', () {
+    const eq = jsonDeepEquality;
+    expect(eq.hash(1), eq.hash(1.0));
+    expect(eq.hash(0), eq.hash(-0.0));
+    expect(eq.hash([-0.0, 1]), eq.hash([0, 1.0]));
+    expect(eq.hash({'a': -0.0}), eq.hash({'a': 0}));
   });
 
   test('jsonDeepEquals treats 1 and 1.0 as equal', () {
