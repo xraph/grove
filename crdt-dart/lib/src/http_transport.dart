@@ -18,15 +18,6 @@ import 'retry.dart';
 import 'sync_types.dart';
 import 'transport.dart';
 
-/// The statuses worth another attempt: request timeout, throttling and the
-/// gateway failures.
-///
-/// A plain 500 is not here, and neither is any other 4xx. Go answers every
-/// deterministic push failure (validation, hook rejection) with a 500, so
-/// retrying one only repeats the rejection; the sync engine classifies it with
-/// `classifyPushError` instead.
-const _retryStatuses = {408, 429, 502, 503, 504};
-
 /// HTTP transport for pull, push and presence.
 ///
 /// Sends POST requests to `pullPath`, `pushPath` and `presencePath` under
@@ -39,10 +30,13 @@ const _retryStatuses = {408, 429, 502, 503, 504};
 /// goes out once more with fresh auth headers.
 ///
 /// Auth headers are read again for every attempt, never cached. An error from
-/// the auth provider or from `onUnauthorized` is never retried and is not
-/// turned into a 401 refresh: it reaches the caller unchanged, so a provider
-/// that cancels requests (the account it belongs to was switched away) stops
-/// the request for good.
+/// the auth provider or from `onUnauthorized` is never retried, by this
+/// transport or by `withRetry`, and is not turned into a 401 refresh. A
+/// [CrdtError] with [CrdtErrorCode.cancelled] (the account the provider
+/// belongs to was switched away) reaches the caller as thrown. Any other
+/// exception is wrapped in an [AuthError] carrying it as `cause`, so a
+/// `NetworkError` from an identity provider is not mistaken for a transport
+/// failure and retried. A Dart `Error` passes through untouched.
 ///
 /// A failed response throws [TransportError] carrying the status, the decoded
 /// body, the response headers and the server's `Date`; no response at all
@@ -192,7 +186,7 @@ base class HttpTransport implements Transport, PresenceTransport {
       // Read for every attempt: a cancellation thrown here ends the request,
       // and nothing from an earlier attempt is reused. Not inside `_attempt`,
       // so it is never mistaken for a network error.
-      final authHeaders = await _auth?.getHeaders() ?? const {};
+      final authHeaders = await _readAuth();
       final outcome = await _attempt(method, path, url, {
         'accept': 'application/json',
         if (body != null) 'content-type': 'application/json',
@@ -200,7 +194,7 @@ base class HttpTransport implements Transport, PresenceTransport {
         ...authHeaders,
       }, body);
       if (outcome is NetworkError) {
-        if (attempt >= retries) throw outcome;
+        if (!outcome.retryable || attempt >= retries) throw outcome;
         attempt++;
         await _sleep(retryDelay(backoff.next(), outcome));
         continue;
@@ -231,20 +225,53 @@ base class HttpTransport implements Transport, PresenceTransport {
         refreshed = true;
         // Not inside `_attempt`: an error thrown here propagates, never
         // retried, whatever its type.
-        if (await refresh()) continue;
+        if (await _refresh(refresh)) continue;
       }
-      if (!_retryStatuses.contains(status) || attempt >= retries) throw error;
+      if (!isTransientStatus(status) || attempt >= retries) throw error;
       attempt++;
       await _sleep(retryDelay(backoff.next(), error));
     }
   }
 
+  Future<Map<String, String>> _readAuth() async {
+    try {
+      return await _auth?.getHeaders() ?? const {};
+    } on Exception catch (error, stack) {
+      Error.throwWithStackTrace(
+        _asAuthError(error, 'reading credentials'),
+        stack,
+      );
+    }
+  }
+
+  Future<bool> _refresh(Future<bool> Function() refresh) async {
+    try {
+      return await refresh();
+    } on Exception catch (error, stack) {
+      Error.throwWithStackTrace(
+        _asAuthError(error, 'refreshing credentials'),
+        stack,
+      );
+    }
+  }
+
+  /// A cancellation passes through as thrown. Any other exception from the
+  /// credentials or the refresh callback is wrapped in an [AuthError], which
+  /// no retry layer retries (a `NetworkError` from an identity provider must
+  /// not look like a transport failure to `withRetry`).
+  static Exception _asAuthError(Exception error, String doing) =>
+      error is CrdtError && error.code == CrdtErrorCode.cancelled
+      ? error
+      : AuthError('CRDT auth failed while $doing: $error', cause: error);
+
   /// One attempt: the response, or the [NetworkError] that stopped it.
   ///
-  /// The error is returned, not thrown, so the retry loop has no `try`:
-  /// dart2js (the web and node builds) miscompiles an async loop that mixes a
-  /// `try`/`catch` around an await, a `continue` and a variable declared
-  /// before the loop, and the compiled code then reads an undeclared name.
+  /// The error is returned, not thrown, so the retry loop has no `try`. An
+  /// earlier shape of the loop (a `try`/`catch` around the await, a
+  /// `continue`, and state declared before the loop) failed the node (dart2js)
+  /// test run with `ReferenceError: refreshed0 is not defined`. This shape
+  /// passes on the VM and on node. A reduced copy of the earlier shape did not
+  /// reproduce the failure, so its cause is unconfirmed.
   Future<Object> _attempt(
     String method,
     String path,

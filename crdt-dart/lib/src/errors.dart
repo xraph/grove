@@ -134,15 +134,20 @@ final class TransportError extends CrdtError {
   /// How long the server asked the client to wait, from the `Retry-After`
   /// header: a count of seconds or an HTTP date. Null when the header is
   /// absent or malformed. A date in the past reads as zero. The value is not
-  /// capped; see [maxRetryAfter].
+  /// capped (see [maxRetryAfter]); a count of seconds too long to parse reads
+  /// as a hundred years.
   ///
   /// An HTTP date is measured from the response's own `Date` header when it
   /// has one, so a device clock that is off does not skew the wait.
   Duration? get retryAfter {
     final raw = headers['retry-after']?.trim();
     if (raw == null || raw.isEmpty) return null;
-    if (RegExp(r'^\d{1,9}$').hasMatch(raw)) {
-      return Duration(seconds: int.parse(raw));
+    if (RegExp(r'^\d+$').hasMatch(raw)) {
+      // Nine digits fit an int on the web and are already thirty years. A
+      // longer run reads as a hundred years, which the transports cap.
+      return raw.length > 9
+          ? const Duration(days: 36500)
+          : Duration(seconds: int.parse(raw));
     }
     final at = parseHttpDate(raw);
     if (at == null) return null;
@@ -171,6 +176,23 @@ final class NetworkError extends CrdtError {
 
   @override
   String get name => 'NetworkError';
+}
+
+/// An error thrown by the auth provider (the credentials read) or by
+/// `onUnauthorized`, wrapped by `HttpTransport` so no retry layer retries it.
+///
+/// A [CrdtError] with [CrdtErrorCode.cancelled] is not wrapped: it passes
+/// through as thrown.
+final class AuthError extends CrdtError {
+  /// Creates an error wrapping [cause].
+  AuthError(super.message, {this.cause})
+    : super(code: CrdtErrorCode.unauthorized);
+
+  /// What the provider or the refresh callback threw.
+  final Object? cause;
+
+  @override
+  String get name => 'AuthError';
 }
 
 /// Error thrown when input or state validation fails.

@@ -291,6 +291,36 @@ void main() {
       }
     });
 
+    test('retries exactly the statuses HttpTransport retries', () async {
+      for (final status in [408, 429, 502, 503, 504]) {
+        final flaky = _Flaky(1, TransportError('x', statusCode: status));
+        await _wrap(flaky).pull(_pull());
+        expect(flaky.calls, 2, reason: '$status');
+      }
+      for (final status in [400, 401, 404, 500, 501, 505, 507, 511, null]) {
+        final bad = _Flaky(99, TransportError('x', statusCode: status));
+        await expectLater(
+          _wrap(bad).pull(_pull()),
+          throwsA(isA<TransportError>()),
+        );
+        expect(bad.calls, 1, reason: '$status');
+      }
+    });
+
+    test('an AuthError or cancelled error is never retried, even by a custom isRetryable', () async {
+      for (final error in [AuthError('idp down'), _CancelledCrdt()]) {
+        final bad = _Flaky(99, error);
+        final t = withRetry(
+          bad,
+          backoff: _backoff,
+          sleep: _sleep,
+          isRetryable: (_) => true,
+        );
+        await expectLater(t.pull(_pull()), throwsA(same(error)));
+        expect(bad.calls, 1);
+      }
+    });
+
     test('isRetryable replaces the default policy', () async {
       final flaky = _Flaky(99, TransportError('bad request', statusCode: 400));
       final t = withRetry(

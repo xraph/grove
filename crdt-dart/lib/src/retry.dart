@@ -22,28 +22,42 @@ bool isStreamTransport(Transport t) =>
 bool isPresenceTransport(Transport t) =>
     t is RetryingTransport ? t.supportsPresence : t is PresenceTransport;
 
-/// The default retry policy: only a failure that says it is transient.
+/// Whether an HTTP [status] is a transient failure worth another attempt: 408
+/// (request timeout), 429 (throttling) and the gateway failures 502, 503 and
+/// 504. No status at all is not transient here.
+///
+/// A plain 500 is not, and neither is any other 4xx or 5xx. Go answers every
+/// deterministic push failure (validation, hook rejection) with a 500, so
+/// retrying one only repeats the rejection; the sync engine classifies it with
+/// `classifyPushError` instead.
+bool isTransientStatus(int? status) => switch (status) {
+  408 || 429 || 502 || 503 || 504 => true,
+  _ => false,
+};
+
+/// The default retry policy: the same set `HttpTransport` retries.
 ///
 /// A [NetworkError] is retried when it is marked retryable, and a
-/// [TransportError] when its status is (see `isRetryableStatus`). Nothing else
-/// is: not a [CrdtError] with [CrdtErrorCode.cancelled], not any other
-/// exception and not a Dart [Error].
+/// [TransportError] when [isTransientStatus] says its status is. Nothing else
+/// is: not an [AuthError] or any [CrdtError] with [CrdtErrorCode.cancelled]
+/// (they are never retried, whatever `isRetryable` says), not a
+/// [TransportError] without a status, not any other exception and not a Dart
+/// [Error].
 ///
 /// Differs from crdt-js: its default retries any `Error`. Retrying an unknown
 /// error would call the auth provider again after it threw a cancellation
 /// (the account was switched away), so the Dart default is narrower. Pass
 /// `isRetryable` to widen it.
-///
-/// Go parity: a 500 is not retried, though [TransportError] marks it
-/// retryable. Go answers every deterministic push failure (validation, hook
-/// rejection) with a 500, so retrying one only repeats the rejection.
 bool defaultIsRetryable(Object error) => switch (error) {
-  CrdtError(code: CrdtErrorCode.cancelled) => false,
-  TransportError(statusCode: 500) => false,
+  AuthError() || CrdtError(code: CrdtErrorCode.cancelled) => false,
   NetworkError(:final retryable) => retryable,
-  TransportError(:final retryable) => retryable,
+  TransportError(:final statusCode) => isTransientStatus(statusCode),
   _ => false,
 };
+
+bool _neverRetried(Object error) =>
+    error is AuthError ||
+    (error is CrdtError && error.code == CrdtErrorCode.cancelled);
 
 /// How long to wait before the next attempt: the backoff step, or the server's
 /// `Retry-After` on a 429 or 503 when that is longer, capped at
@@ -74,7 +88,9 @@ Future<T> _runWithRetry<T>(
     try {
       return await op();
     } on Object catch (error) {
-      if (attempt >= retries || !isRetryable(error)) rethrow;
+      if (attempt >= retries || _neverRetried(error) || !isRetryable(error)) {
+        rethrow;
+      }
       await sleep(retryDelay(schedule.next(), error));
     }
   }

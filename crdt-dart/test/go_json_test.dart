@@ -231,4 +231,38 @@ void main() {
       expect(goJsonCopy(raw), same(raw));
     });
   });
+
+  group('jsonDeepEquals', () {
+    test('treats an untyped map like a typed one', () {
+      final untyped = <dynamic, dynamic>{
+        'a': 1,
+        'n': <dynamic, dynamic>{
+          'x': <dynamic>[1.0, 'y'],
+        },
+      };
+      final typed = <String, Object?>{
+        'a': 1.0,
+        'n': <String, Object?>{
+          'x': <Object?>[1, 'y'],
+        },
+      };
+      expect(jsonDeepEquals(untyped, typed), isTrue);
+      expect(jsonDeepEquals(typed, untyped), isTrue);
+      expect(jsonDeepEquality.hash(untyped), jsonDeepEquality.hash(typed));
+      expect(jsonDeepEquals(untyped, <String, Object?>{'a': 2}), isFalse);
+      expect(
+        jsonDeepEquals(untyped, <dynamic, dynamic>{
+          'a': 1,
+          'n': <String, Object?>{'x': <Object?>[]},
+        }),
+        isFalse,
+      );
+    });
+
+    test('a map with a non-string key is only equal to an equal map', () {
+      final odd = <dynamic, dynamic>{1: 'x'};
+      expect(jsonDeepEquals(odd, <dynamic, dynamic>{1: 'x'}), isFalse);
+      expect(jsonDeepEquals(odd, odd), isTrue);
+    });
+  });
 }

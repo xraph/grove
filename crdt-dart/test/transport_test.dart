@@ -97,6 +97,9 @@ class _ThrowingAuth implements CrdtAuthProvider {
   }
 }
 
+Matcher _authFailure(Object cause) =>
+    isA<AuthError>().having((e) => e.cause, 'cause', same(cause));
+
 Backoff _fast() =>
     Backoff(initialDelay: const Duration(milliseconds: 1), jitter: false);
 
@@ -639,6 +642,8 @@ void main() {
           (503, '7', const Duration(seconds: 7)),
           (429, '86400', maxRetryAfter),
           (503, ' 3 ', const Duration(seconds: 3)),
+          (429, '99999999999', maxRetryAfter),
+          (503, '9999999999999999999999', maxRetryAfter),
           (429, 'soon', const Duration(milliseconds: 1)),
           (502, '30', const Duration(milliseconds: 1)),
         ]) {
@@ -822,7 +827,10 @@ void main() {
           sleep: (d) async => slept.add(d),
           backoff: _fast,
         );
-        await expectLater(t.pull(_pullReq()), throwsA(same(auth.error)));
+        await expectLater(
+          t.pull(_pullReq()),
+          throwsA(_authFailure(auth.error)),
+        );
         expect(server.calls, 1);
         expect(auth.calls, 2);
         expect(slept, hasLength(1));
@@ -879,7 +887,7 @@ void main() {
         client: server.client,
         auth: auth,
       );
-      await expectLater(t.pull(_pullReq()), throwsA(same(auth.error)));
+      await expectLater(t.pull(_pullReq()), throwsA(_authFailure(auth.error)));
       expect(server.calls, 0);
     });
 
@@ -893,12 +901,12 @@ void main() {
         sleep: _noSleep,
         onUnauthorized: () async => true,
       );
-      await expectLater(t.pull(_pullReq()), throwsA(same(auth.error)));
+      await expectLater(t.pull(_pullReq()), throwsA(_authFailure(auth.error)));
       expect(server.calls, 1);
     });
 
     test(
-      'onUnauthorized that throws is not retried and propagates unchanged',
+      'onUnauthorized that throws is not retried and is wrapped in AuthError',
       () async {
         final server = _Server.json('', 401);
         final cancelled = _Cancelled();
@@ -908,7 +916,7 @@ void main() {
           sleep: _noSleep,
           onUnauthorized: () async => throw cancelled,
         );
-        await expectLater(t.pull(_pullReq()), throwsA(same(cancelled)));
+        await expectLater(t.pull(_pullReq()), throwsA(_authFailure(cancelled)));
         expect(server.calls, 1);
       },
     );
@@ -922,7 +930,65 @@ void main() {
         sleep: _noSleep,
         onUnauthorized: () async => throw error,
       );
-      await expectLater(t.pull(_pullReq()), throwsA(same(error)));
+      await expectLater(t.pull(_pullReq()), throwsA(_authFailure(error)));
+      expect(server.calls, 1);
+    });
+
+    test('a cancelled onUnauthorized error passes through unwrapped', () async {
+      final server = _Server.json('', 401);
+      final cancelled = _CancelledCrdt();
+      final t = HttpTransport(
+        baseUrl: _base(),
+        client: server.client,
+        sleep: _noSleep,
+        onUnauthorized: () async => throw cancelled,
+      );
+      await expectLater(t.pull(_pullReq()), throwsA(same(cancelled)));
+    });
+
+    // M1: a retryable error from the credentials read must stop both layers.
+    test(
+      'auth that throws a retryable NetworkError is read once under withRetry',
+      () async {
+        final server = _Server.json(_pullOk);
+        final error = NetworkError('idp down');
+        var reads = 0;
+        final t = withRetry(
+          HttpTransport(
+            baseUrl: _base(),
+            client: server.client,
+            auth: _FnAuth(() {
+              reads++;
+              throw error;
+            }),
+            sleep: _noSleep,
+          ),
+          sleep: _noSleep,
+        );
+        await expectLater(t.pull(_pullReq()), throwsA(_authFailure(error)));
+        expect(reads, 1);
+        expect(server.calls, 0);
+      },
+    );
+
+    test('onUnauthorized that throws a retryable NetworkError refreshes once under withRetry', () async {
+      final server = _Server.json('', 401);
+      final error = NetworkError('idp down');
+      var refreshes = 0;
+      final t = withRetry(
+        HttpTransport(
+          baseUrl: _base(),
+          client: server.client,
+          sleep: _noSleep,
+          onUnauthorized: () async {
+            refreshes++;
+            throw error;
+          },
+        ),
+        sleep: _noSleep,
+      );
+      await expectLater(t.pull(_pullReq()), throwsA(_authFailure(error)));
+      expect(refreshes, 1);
       expect(server.calls, 1);
     });
   });
@@ -1114,6 +1180,7 @@ void main() {
       expect(read({'retry-after': '0'}), Duration.zero);
       expect(read({'retry-after': '-5'}), isNull);
       expect(read({'retry-after': '1.5'}), isNull);
+      expect(read({'retry-after': '99999999999'}), greaterThan(maxRetryAfter));
       expect(read({'retry-after': ''}), isNull);
       expect(read(const {}), isNull);
       final at = DateTime.utc(2026, 10, 4, 12);

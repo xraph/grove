@@ -87,6 +87,9 @@ bool jsonDeepEquals(Object? a, Object? b) => jsonDeepEquality.equals(a, b);
 /// deep JSON value. Its `hash` agrees with `equals` for `1`, `1.0` and `-0.0`.
 const Equality<Object?> jsonDeepEquality = _JsonEquality();
 
+bool _stringKeyed(Map<Object?, Object?> m) =>
+    m is Map<String, Object?> || m.keys.every((k) => k is String);
+
 final class _JsonEquality implements Equality<Object?> {
   const _JsonEquality();
 
@@ -100,7 +103,12 @@ final class _JsonEquality implements Equality<Object?> {
       }
       return true;
     }
-    if (a is Map<String, Object?> && b is Map<String, Object?>) {
+    // Any map whose keys are all strings at runtime is a JSON object, typed
+    // or not, as goMarshal reads it.
+    if (a is Map<Object?, Object?> &&
+        b is Map<Object?, Object?> &&
+        _stringKeyed(a) &&
+        _stringKeyed(b)) {
       if (a.length != b.length) return false;
       for (final e in a.entries) {
         if (!b.containsKey(e.key) || !equals(e.value, b[e.key])) return false;
@@ -116,7 +124,7 @@ final class _JsonEquality implements Equality<Object?> {
     // double value, and fold -0.0 into 0.0.
     final num n => n == 0 ? 0.0.hashCode : n.toDouble().hashCode,
     final List<Object?> l => Object.hashAll(l.map(hash)),
-    final Map<String, Object?> m => m.entries.fold<int>(
+    final Map<Object?, Object?> m when _stringKeyed(m) => m.entries.fold<int>(
       0,
       (acc, en) => acc + Object.hash(en.key, hash(en.value)),
     ),
