@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"math/rand"
+	"os"
 	"path/filepath"
 	"sort"
 
@@ -178,66 +179,86 @@ func textCases() []textCase {
 			record(recs, "n2", 101, op2)
 		}),
 	}
-	return append(cases,
-		shuffledWalkCase("walk_shuffled_complete", 7, 200, 1.0),
-		shuffledWalkCase("walk_shuffled_with_holes", 11, 200, 0.7),
-	)
+	return cases
 }
 
-// shuffledWalkCase builds a deep, branching tree and delivers its inserts to
-// the state in shuffled order with some dropped, so the walk meets holes,
-// anchors past coverage and orphan origins. Nodes "n～" and "n😀" order
-// differently in UTF-16 and in Go's byte order, and the clocks tie often, so
-// sibling order depends on the Go string comparison.
-func shuffledWalkCase(name string, seed int64, n int, keep float64) textCase {
-	return buildTextCase(name, func(st *crdt.TextState, recs *[]textRec) {
-		rng := rand.New(rand.NewSource(seed))
-		nodes := []string{"a", "b", "n～", "n😀", "c"}
-		alpha := []string{"x", "é", "😀", "中", "𝄞"}
-		src := crdt.NewTextState()
-		var all []textRec
-		var last crdt.TextRef
-		ts := int64(0)
-		for i := 0; i < n; i++ {
-			ts++
-			node := nodes[rng.Intn(len(nodes))]
-			clock := crdt.HLC{Timestamp: ts / 2, Counter: uint32(rng.Intn(2)), NodeID: node}
-			if _, ok := src.Frags[clock.String()]; ok {
-				continue
-			}
-			ref := crdt.TextRef{}
-			switch l := src.Len(); {
-			case rng.Intn(3) == 0 && i > 0:
-				ref = last // deep chain
-			case l > 0:
-				if idx := rng.Intn(l + 1); idx > 0 {
-					ref = refAt(src, idx-1)
-				}
-			}
-			text := ""
-			for k := 0; k < 1+rng.Intn(3); k++ {
-				text += alpha[rng.Intn(len(alpha))]
-			}
-			op := must(src.Insert(ref, text, node, clock))
-			all = append(all, textRec{NodeID: node, HLC: clock, Op: op})
-			idx, _ := src.IndexOf(crdt.TextRef{Origin: op.Origin, Offset: 0})
-			last = refAt(src, idx)
+// walkCase is a compact walk-order fixture: inserts only, in delivery order,
+// with the visible text and the address of every visible character as Go
+// reports them. A record is
+// [ts, c, node, refTs, refC, refNode, refOffset, originTs, originC, originNode, content]
+// and a ref is [ts, c, node, offset]. Intermediate state is not recorded.
+type walkCase struct {
+	Name      string  `json:"name"`
+	Records   [][]any `json:"records"`
+	Value     string  `json:"value"`
+	RefAt     [][]any `json:"ref_at"`
+	Unreached int     `json:"unreached"`
+}
+
+// shuffledWalkCase builds a tree with a chain of chainLen origins, each
+// anchored in the previous one, then branching inserts at random positions
+// (so branching happens at several depths), and delivers the inserts in
+// shuffled order with some dropped. The walk meets holes, anchors past
+// coverage and orphan origins. Nodes "n～" and "n😀" order differently in
+// UTF-16 and in Go's byte order, and clocks tie often, so sibling order
+// depends on the Go string comparison.
+func shuffledWalkCase(name string, seed int64, chainLen, branches int, keep float64) walkCase {
+	rng := rand.New(rand.NewSource(seed))
+	nodes := []string{"a", "b", "n～", "n😀", "c"}
+	alpha := []string{"x", "é", "😀", "中", "𝄞"}
+	src := crdt.NewTextState()
+	var all []textRec
+	var last crdt.TextRef
+	ts := int64(0)
+	for i := 0; i < chainLen+branches; i++ {
+		ts++
+		// Consecutive chain links use different nodes, so none extends the
+		// previous origin's span.
+		node := nodes[i%len(nodes)]
+		if i >= chainLen {
+			node = nodes[rng.Intn(len(nodes))]
 		}
-		for _, p := range rng.Perm(len(all)) {
-			if rng.Float64() > keep {
-				continue
+		clock := crdt.HLC{Timestamp: ts / 2, Counter: uint32(rng.Intn(2)), NodeID: node}
+		if _, ok := src.Frags[clock.String()]; ok {
+			continue
+		}
+		ref := crdt.TextRef{}
+		if i < chainLen {
+			ref = last
+		} else if l := src.Len(); l > 0 {
+			if idx := rng.Intn(l + 1); idx > 0 {
+				ref = refAt(src, idx-1)
 			}
-			r := all[p]
-			must(0, st.Apply(r.Op, r.NodeID, r.HLC))
-			*recs = append(*recs, r)
 		}
-		// Deletes assume causal delivery, so they come after the inserts.
-		for i := 0; i < 6 && st.Len() > 4; i++ {
-			op := must(st.Delete(refAt(st, rng.Intn(st.Len()-2)), 1+rng.Intn(2)))
-			ts++
-			*recs = append(*recs, textRec{NodeID: "a", HLC: textHLC(ts, "a"), Op: op})
+		text := alpha[rng.Intn(len(alpha))]
+		if i >= chainLen && rng.Intn(3) == 0 {
+			text += alpha[rng.Intn(len(alpha))]
 		}
-	})
+		op := must(src.Insert(ref, text, node, clock))
+		all = append(all, textRec{NodeID: node, HLC: clock, Op: op})
+		idx, _ := src.IndexOf(crdt.TextRef{Origin: op.Origin, Offset: 0})
+		last = refAt(src, idx)
+	}
+	dst := crdt.NewTextState()
+	c := walkCase{Name: name}
+	for _, p := range rng.Perm(len(all)) {
+		if rng.Float64() > keep {
+			continue
+		}
+		r := all[p]
+		must(0, dst.Apply(r.Op, r.NodeID, r.HLC))
+		c.Records = append(c.Records, []any{
+			r.HLC.Timestamp, r.HLC.Counter, r.HLC.NodeID,
+			r.Op.Ref.Origin.Timestamp, r.Op.Ref.Origin.Counter, r.Op.Ref.Origin.NodeID, r.Op.Ref.Offset,
+			r.Op.Origin.Timestamp, r.Op.Origin.Counter, r.Op.Origin.NodeID, r.Op.Content,
+		})
+	}
+	c.Value = dst.Value()
+	for i := 0; i < dst.Len(); i++ {
+		r := refAt(dst, i)
+		c.RefAt = append(c.RefAt, []any{r.Origin.Timestamp, r.Origin.Counter, r.Origin.NodeID, r.Offset})
+	}
+	return c
 }
 
 func setStringCases() []setStringCase {
@@ -277,4 +298,11 @@ func setStringCases() []setStringCase {
 
 func writeTextGolden(out string) {
 	write(filepath.Join(out, "text_astral_golden.json"), textGolden{Cases: textCases(), SetString: setStringCases()})
+	// Compact on purpose: the walk cases are large trees and the fixture is
+	// committed.
+	walks := []walkCase{
+		shuffledWalkCase("walk_shuffled_complete", 7, 70, 90, 1.0),
+		shuffledWalkCase("walk_shuffled_with_holes", 11, 70, 110, 0.75),
+	}
+	must(0, os.WriteFile(filepath.Join(out, "text_walk_golden.json"), append(must(json.Marshal(walks)), '\n'), 0o644))
 }

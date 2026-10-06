@@ -129,4 +129,39 @@ void main() {
       });
     }
   });
+
+  // Compact walk-order fixtures from Go: a chain of 70 origins plus branching
+  // inserts delivered in shuffled order, one complete and one with dropped ops
+  // (holes, orphans). See `walkCase` in cmd/golden/text.go for the layout.
+  final walks = (jsonDecode(readFixture('test/fixtures/text_walk_golden.json')) as List<Object?>).cast<Json>();
+
+  group('Go walk order on shuffled deep, branching trees', () {
+    HLC clock(List<Object?> a, int at) => HLC(BigInt.from(a[at]! as int), a[at + 1]! as int, a[at + 2]! as String);
+
+    for (final c in walks) {
+      test('replays ${c['name']} in the order Go walks it', () {
+        final st = newTextState();
+        for (final rec in (c['records']! as List<Object?>).cast<List<Object?>>()) {
+          final at = clock(rec, 0);
+          applyTextOp(
+            st,
+            TextOperation(
+              TextOpType.insert,
+              ref: TextRef(clock(rec, 3), rec[6]! as int),
+              origin: clock(rec, 7),
+              content: rec[10]! as String,
+            ),
+            at.node,
+            at,
+          );
+        }
+        expect(textValue(st), c['value']);
+        final want = (c['ref_at']! as List<Object?>).cast<List<Object?>>();
+        expect(textLength(st), want.length);
+        for (var i = 0; i < want.length; i++) {
+          expect(textRefAt(st, i), TextRef(clock(want[i], 0), want[i][3]! as int), reason: 'index $i');
+        }
+      });
+    }
+  });
 }
