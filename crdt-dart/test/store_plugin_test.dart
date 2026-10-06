@@ -283,7 +283,7 @@ void main() {
           return doc.copyWith(fields: const {});
         }));
         store.setField('t', '1', 'secret', 'plaintext');
-        await store.flushPersistence();
+        await expectLater(store.flushPersistence(), throwsA(isA<ReplicaPersistFailed>()));
         expect(storage.saved, isEmpty, reason: 'atomic: $atomic');
         expect(storage.savedPending, isEmpty);
         if (storage is RecordingAtomicStorage) expect(storage.commits, isEmpty);

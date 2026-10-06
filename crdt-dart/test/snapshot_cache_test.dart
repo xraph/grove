@@ -55,7 +55,7 @@ void main() {
     });
   });
 
-  group('beyond the crdt-js behaviour', () {
+  group('returned values are frozen copies', () {
     test('a returned document is frozen, so changing it never changes the store', () {
       final store = mk();
       store.setField('t', 'p', 'meta', {

@@ -71,7 +71,7 @@ void main() {
     );
   });
 
-  group('beyond the crdt-js behaviour', () {
+  group('eviction order and overflow handlers', () {
     test('eviction drops pushable changes before rejected ones, and never the one just queued', () {
       final store = mkStore(maxPendingChanges: 3);
       final dropped = <ChangeRecord>[];

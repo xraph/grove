@@ -62,6 +62,23 @@ final class ReplicaUnavailable implements Exception {
   String toString() => 'crdt: the persisted replica could not be read: $cause';
 }
 
+/// [CrdtStore.flushPersistence] and [CrdtStore.dispose] complete with this
+/// when a write failed: something the store holds did not reach storage.
+///
+/// What failed stays queued and is retried on the next flush, so after a
+/// [CrdtStore.flushPersistence] the store keeps trying. After a
+/// [CrdtStore.dispose] it does not: that data did not reach storage.
+final class ReplicaPersistFailed implements Exception {
+  /// Wraps the error the write failed with.
+  const ReplicaPersistFailed(this.cause);
+
+  /// The error the last failed write failed with.
+  final Object cause;
+
+  @override
+  String toString() => 'crdt: a replica write failed: $cause';
+}
+
 /// A serializable snapshot of a store. Port of crdt-js `StateSnapshot`, with
 /// the pending queue carrying rejection marks.
 final class StateSnapshot {
@@ -189,8 +206,8 @@ const List<TextDeltaSegment> _emptyDelta = <TextDeltaSegment>[];
 /// - Undo emits compensating changes, so an undo reaches the server and every
 ///   other replica. See [undo].
 /// - Hydration advances the clock past every persisted HLC before [ready]
-///   completes, so a restarted device never mints a clock below one it
-///   already issued.
+///   completes, and writes wait for [ready], so a restarted device never
+///   mints a clock below one it already issued.
 /// - Every change carries `clock.nodeId`, so a clock rebase switches the node
 ///   id of every later change.
 /// - Table, primary key and field names, and every string the app writes, are
@@ -248,6 +265,12 @@ final class CrdtStore {
     if (nodeId != clock.nodeId) {
       throw ArgumentError.value(nodeId, 'nodeId', 'must equal the clock node id "${clock.nodeId}"');
     }
+    if (_storage is MemoryReplicaStorage) {
+      // Nothing to load: hydration is complete at once.
+      _hydrated = true;
+      ready = Future<void>.value();
+      return;
+    }
     ready = _hydrate();
     // A store nobody awaits must not raise an unhandled error; a caller that
     // awaits ready still receives it.
@@ -266,14 +289,17 @@ final class CrdtStore {
   final void Function(Object error)? _onStorageError;
   final PluginManager _plugins;
 
-  /// Completes when persisted state has been hydrated. The store is usable
-  /// at once (it starts empty); await this before relying on persisted data.
+  /// Completes when persisted state has been hydrated. Await it before the
+  /// first write: a write before then throws a [StateError], because until
+  /// the persisted history is loaded the store can neither seed its clock
+  /// past it nor merge with it. Reads work at once and see an empty replica.
+  /// With [MemoryReplicaStorage] (the default) there is nothing to load, and
+  /// this is complete at once.
   ///
-  /// Nothing is persisted until hydration succeeds, so a write made before
-  /// then cannot overwrite what is still being read. A document that cannot
-  /// be decoded, or whose `afterHydrate` throws, is reported and skipped (see
-  /// the quarantine on [CrdtStore]). When the pending queue, or the document
-  /// set as a whole, cannot be read, this completes with a
+  /// A document that cannot be decoded, or whose `afterHydrate` throws, is
+  /// reported and skipped (see the quarantine on [CrdtStore]). A listener
+  /// that throws during hydration is reported. When the pending queue, or the
+  /// document set as a whole, cannot be read, this completes with a
   /// [ReplicaUnavailable] and the store fails closed.
   late final Future<void> ready;
 
@@ -307,6 +333,7 @@ final class CrdtStore {
 
   int _txDepth = 0;
   Map<String, Set<String>> _txTouched = {};
+  bool _txGlobal = false;
   int _suppressUndo = 0;
 
   // Persistence queue: documents touched since the last flush, and whether the
@@ -314,6 +341,10 @@ final class CrdtStore {
   Map<String, Set<String>> _docQueue = {};
   bool _pendingDirty = false;
   Timer? _persistTimer;
+  Timer? _retryTimer;
+  late Duration _retryDelay = _baseRetryDelay;
+  int _failures = 0;
+  Object? _lastFailure;
   Future<void>? _writeTail;
 
   bool _disposed = false;
@@ -693,6 +724,7 @@ final class CrdtStore {
     final t = goString(table);
     final p = goString(pk);
     final f = goString(field);
+    _assertPendingCapacity(_textOpsFor(t, p, f, value));
     return transact(() {
       final working = _textStateOf(t, p, f).clone();
       final clocks = <HLC>[];
@@ -829,77 +861,93 @@ final class CrdtStore {
     final f = goString(field);
     final want0 = goJsonCopy(value);
     final current = getDocumentState(t, p)?.fields[f];
-    final out = <ChangeRecord>[];
-    void add(ChangeRecord? c) {
-      if (c != null) out.add(c);
+    // Plan every step first, so the queue bound is checked for all of them
+    // before anything changes.
+    final steps = <List<ChangeRecord> Function()>[];
+    var needed = 0;
+    void step(ChangeRecord? Function() op) {
+      needed++;
+      steps.add(() {
+        final c = op();
+        return c == null ? const [] : [c];
+      });
     }
 
-    return transact(() {
-      switch (type) {
-        case CrdtType.lww || CrdtType.none:
-          if (current == null || !jsonDeepEquals(resolveFieldValue(current), want0)) add(setField(t, p, f, want0));
-        case CrdtType.counter:
-          final target = (want0 as num?)?.toInt() ?? 0;
-          final now = current?.counterState == null ? 0 : counterValue(current!.counterState!);
-          if (target > now) add(incrementCounter(t, p, f, target - now));
-          if (target < now) add(decrementCounter(t, p, f, now - target));
-        case CrdtType.set:
-          final want = (want0 as List<Object?>?) ?? const [];
-          final have = current?.setState == null ? const <Object?>[] : setElements(current!.setState!);
-          final adds = [
-            for (final w in want)
-              if (!have.any((h) => jsonDeepEquals(h, w))) w,
-          ];
-          final removes = [
-            for (final h in have)
-              if (!want.any((w) => jsonDeepEquals(h, w))) h,
-          ];
-          if (removes.isNotEmpty) add(removeFromSet(t, p, f, removes));
-          if (adds.isNotEmpty) add(addToSet(t, p, f, adds));
-        case CrdtType.list:
-          final want = (want0 as List<Object?>?) ?? const [];
-          final ids = current?.listState == null ? const <HLC>[] : listNodeIds(current!.listState!);
-          final have = current?.listState == null ? const <Object?>[] : listElements(current!.listState!);
-          var prefix = 0;
-          while (prefix < have.length && prefix < want.length && jsonDeepEquals(have[prefix], want[prefix])) {
-            prefix++;
-          }
-          var suffix = 0;
-          while (suffix < have.length - prefix &&
-              suffix < want.length - prefix &&
-              jsonDeepEquals(have[have.length - 1 - suffix], want[want.length - 1 - suffix])) {
-            suffix++;
-          }
-          for (var i = prefix; i < have.length - suffix; i++) {
-            add(deleteFromList(t, p, f, ids[i]));
-          }
-          HLC? after = prefix == 0 ? null : ids[prefix - 1];
-          for (var i = prefix; i < want.length - suffix; i++) {
-            final c = insertIntoList(t, p, f, want[i], afterId: after);
-            add(c);
+    switch (type) {
+      case CrdtType.lww || CrdtType.none:
+        if (current == null || !jsonDeepEquals(resolveFieldValue(current), want0)) step(() => setField(t, p, f, want0));
+      case CrdtType.counter:
+        final target = (want0 as num?)?.toInt() ?? 0;
+        final now = current?.counterState == null ? 0 : counterValue(current!.counterState!);
+        if (target > now) step(() => incrementCounter(t, p, f, target - now));
+        if (target < now) step(() => decrementCounter(t, p, f, now - target));
+      case CrdtType.set:
+        final want = (want0 as List<Object?>?) ?? const [];
+        final have = current?.setState == null ? const <Object?>[] : setElements(current!.setState!);
+        final adds = [
+          for (final w in want)
+            if (!have.any((h) => jsonDeepEquals(h, w))) w,
+        ];
+        final removes = [
+          for (final h in have)
+            if (!want.any((w) => jsonDeepEquals(h, w))) h,
+        ];
+        if (removes.isNotEmpty) step(() => removeFromSet(t, p, f, removes));
+        if (adds.isNotEmpty) step(() => addToSet(t, p, f, adds));
+      case CrdtType.list:
+        final want = (want0 as List<Object?>?) ?? const [];
+        final ids = current?.listState == null ? const <HLC>[] : listNodeIds(current!.listState!);
+        final have = current?.listState == null ? const <Object?>[] : listElements(current!.listState!);
+        var prefix = 0;
+        while (prefix < have.length && prefix < want.length && jsonDeepEquals(have[prefix], want[prefix])) {
+          prefix++;
+        }
+        var suffix = 0;
+        while (suffix < have.length - prefix &&
+            suffix < want.length - prefix &&
+            jsonDeepEquals(have[have.length - 1 - suffix], want[want.length - 1 - suffix])) {
+          suffix++;
+        }
+        for (var i = prefix; i < have.length - suffix; i++) {
+          final id = ids[i];
+          step(() => deleteFromList(t, p, f, id));
+        }
+        HLC? after = prefix == 0 ? null : ids[prefix - 1];
+        for (var i = prefix; i < want.length - suffix; i++) {
+          final v = want[i];
+          step(() {
+            final c = insertIntoList(t, p, f, v, afterId: after);
             if (c != null) after = c.listOp!.nodeId.isZero ? c.hlc : c.listOp!.nodeId;
+            return c;
+          });
+        }
+      case CrdtType.text:
+        final text = (want0 as String?) ?? '';
+        needed += _textOpsFor(t, p, f, text);
+        steps.add(() => setText(t, p, f, text));
+      case CrdtType.document:
+        final want = _flattenPaths((want0 as Map<String, Object?>?) ?? const {});
+        final have = current?.docState == null
+            ? const <String, Object?>{}
+            : {
+                for (final e in current!.docState!.fields.entries) e.key: resolveFieldValue(e.value),
+              };
+        for (final e in want.entries) {
+          if (!have.containsKey(e.key) || !jsonDeepEquals(have[e.key], e.value)) {
+            step(() => setDocumentField(t, p, f, e.key, e.value));
           }
-        case CrdtType.text:
-          out.addAll(setText(t, p, f, (want0 as String?) ?? ''));
-        case CrdtType.document:
-          final want = _flattenPaths((want0 as Map<String, Object?>?) ?? const {});
-          final have = current?.docState == null
-              ? const <String, Object?>{}
-              : {
-                  for (final e in current!.docState!.fields.entries) e.key: resolveFieldValue(e.value),
-                };
-          for (final e in want.entries) {
-            if (!have.containsKey(e.key) || !jsonDeepEquals(have[e.key], e.value)) {
-              add(setDocumentField(t, p, f, e.key, e.value));
-            }
-          }
-          for (final path in have.keys) {
-            if (!want.containsKey(path)) add(deleteDocumentField(t, p, f, path));
-          }
-      }
-      return out;
-    });
+        }
+        for (final path in have.keys) {
+          if (!want.containsKey(path)) step(() => deleteDocumentField(t, p, f, path));
+        }
+    }
+    _assertPendingCapacity(needed);
+    return transact(() => [for (final s in steps) ...s()]);
   }
+
+  /// How many changes [setText] would queue to reach [value].
+  int _textOpsFor(String t, String p, String f, String value) =>
+      textSetString(_textStateOf(t, p, f).clone(), value, nodeId, () => HLC.zero).length;
 
   static Map<String, Object?> _flattenPaths(Map<String, Object?> m, [String prefix = '']) {
     final out = <String, Object?>{};
@@ -932,7 +980,7 @@ final class CrdtStore {
     final fresh = old.copyWith(hlc: hlc, nodeId: hlc.node);
     final doc = _docOrEmpty(old.table, old.pk);
     DocumentState next = doc;
-    if (old.tombstone && old.crdtType != CrdtType.document) {
+    if (_isRecordDelete(old)) {
       if (doc.tombstone && doc.tombstoneHlc == old.hlc) next = doc.copyWith(tombstoneHlc: hlc);
     } else {
       final fs = doc.fields[old.field];
@@ -940,6 +988,28 @@ final class CrdtStore {
     }
     if (!identical(next, doc)) _setDocument(old.table, old.pk, next);
     _pending[index] = entry.copyWith(change: fresh, clearRejection: true, restamps: entry.restamps + 1);
+    if (old.crdtType == CrdtType.set && old.setOp?.op == SetOpType.add) {
+      // A later pending remove that observed the add names its old tag. Point
+      // it at the new one, for every element it covers, or the server would
+      // keep the element the user removed.
+      final oldTag = tagKey(OrSetTag(old.nodeId, old.hlc));
+      final newTag = OrSetTag(hlc.node, hlc);
+      for (var i = index + 1; i < _pending.length; i++) {
+        final c = _pending[i].change;
+        final op = c.setOp;
+        if (c.table != old.table || c.pk != old.pk || c.field != old.field) continue;
+        if (op == null || op.op != SetOpType.remove || !op.tags.any((t) => tagKey(t) == oldTag)) continue;
+        _pending[i] = _pending[i].copyWith(
+          change: c.copyWith(
+            setOp: SetOperation(
+              op.op,
+              op.elements,
+              tags: [for (final t in op.tags) tagKey(t) == oldTag ? newTag : t],
+            ),
+          ),
+        );
+      }
+    }
     _persistWrite(old.table, old.pk);
     _notifyListeners(old.table, old.pk);
     return fresh;
@@ -956,7 +1026,20 @@ final class CrdtStore {
         final entries = {
           for (final e in fs.setState!.entries.entries) e.key: [for (final t in e.value) tagKey(t) == oldTag ? newTag : t],
         };
-        return setFieldState(OrSetState(entries: entries, removed: fs.setState!.removed), fieldHlc, fieldNode);
+        // A local remove of the add already marked the old tag removed; move
+        // the mark to the new tag, as the rewritten pending remove will on the
+        // server.
+        final newKey = tagKey(newTag);
+        final removed = <String, bool>{
+          for (final e in fs.setState!.removed.entries)
+            if (e.key == oldTag)
+              newKey: e.value
+            else if (e.key.endsWith('|$oldTag'))
+              '${e.key.substring(0, e.key.length - oldTag.length)}$newKey': e.value
+            else
+              e.key: e.value,
+        };
+        return setFieldState(OrSetState(entries: entries, removed: removed), fieldHlc, fieldNode);
       case CrdtType.document:
         final path = (old.value!.value! as Map<String, Object?>)['path']! as String;
         final inner = fs.docState!.fields[path];
@@ -975,7 +1058,7 @@ final class CrdtStore {
     if (i < 0) return;
     _pending[i] = _pending[i].copyWith(rejection: rejection);
     _persistPending();
-    _notifyGlobal();
+    _notifyGlobalSoon();
   }
 
   /// Makes a rejected change pushable again.
@@ -985,7 +1068,7 @@ final class CrdtStore {
     if (i < 0 || !_pending[i].isRejected) return;
     _pending[i] = _pending[i].copyWith(clearRejection: true);
     _persistPending();
-    _notifyGlobal();
+    _notifyGlobalSoon();
   }
 
   /// Removes a pending change without pushing it and returns it. The local
@@ -998,7 +1081,7 @@ final class CrdtStore {
     if (i < 0) return null;
     final removed = _pending.removeAt(i);
     _persistPending();
-    _notifyGlobal();
+    _notifyGlobalSoon();
     return removed;
   }
 
@@ -1084,7 +1167,7 @@ final class CrdtStore {
     _assertPendingCapacity();
     final entry = _undo.popUndo()!;
     final c = entry.change;
-    if (c.tombstone && c.crdtType != CrdtType.document) return _undoDelete(entry);
+    if (_isRecordDelete(c)) return _undoDelete(entry);
     _suppressUndo++;
     try {
       transact(() => _compensate(entry));
@@ -1171,7 +1254,7 @@ final class CrdtStore {
     // holding the replayed change.
     _undo.popUndo();
     final c = entry.change;
-    final isDelete = c.tombstone && c.crdtType != CrdtType.document;
+    final isDelete = _isRecordDelete(c);
     final before = isDelete ? _getDoc(c.table, c.pk) : null;
     ChangeRecord? replayed;
     _suppressUndo++;
@@ -1195,7 +1278,7 @@ final class CrdtStore {
   ChangeRecord? _replay(UndoEntry entry) {
     final c = entry.change;
     final prev = entry.previousState;
-    if (c.tombstone && c.crdtType != CrdtType.document) return deleteDocument(c.table, c.pk);
+    if (_isRecordDelete(c)) return deleteDocument(c.table, c.pk);
     switch (c.crdtType) {
       case CrdtType.lww || CrdtType.none:
         return setField(c.table, c.pk, c.field, c.value?.value);
@@ -1204,6 +1287,7 @@ final class CrdtStore {
         final base = prev?.counterState;
         final inc = d.inc - (base?.inc[c.nodeId] ?? 0);
         final dec = d.dec - (base?.dec[c.nodeId] ?? 0);
+        _assertPendingCapacity((inc > 0 ? 1 : 0) + (dec > 0 ? 1 : 0));
         ChangeRecord? last;
         if (inc > 0) last = incrementCounter(c.table, c.pk, c.field, inc);
         if (dec > 0) last = decrementCounter(c.table, c.pk, c.field, dec);
@@ -1332,23 +1416,34 @@ final class CrdtStore {
   /// Throws [PendingQueueFullError] when the store throws on overflow and the
   /// bound is reached. Every mutator calls this first, before it reads the
   /// clock, so a refused write leaves no trace.
-  void _assertPendingCapacity() {
-    if (_throwOnOverflow && _maxPendingChanges > 0 && _pending.length >= _maxPendingChanges) {
+  void _assertPendingCapacity([int changes = 1]) {
+    if (_throwOnOverflow && _maxPendingChanges > 0 && _pending.length + changes > _maxPendingChanges) {
       throw PendingQueueFullError(_maxPendingChanges);
     }
   }
 
-  /// Queues [change], enforcing the bound. The bound counts every pending
-  /// change; eviction drops the oldest pushable changes before any rejected
-  /// one, and never the change just queued.
+  /// Queues [change], enforcing the bound.
   void _enqueuePending(ChangeRecord change) {
     _assertPendingCapacity();
     _pending.add(PendingChange(change));
     _markPending();
-    if (_maxPendingChanges <= 0 || _pending.length <= _maxPendingChanges) return;
+    _evictOverflow(keepNewest: true);
+  }
+
+  /// Trims the queue to the bound and tells the overflow handlers. Returns
+  /// whether anything was dropped.
+  ///
+  /// The bound counts every pending change. Eviction drops the oldest
+  /// pushable changes before any rejected one and, with [keepNewest], never
+  /// the change just queued. A handler that throws is reported through
+  /// `onStorageError` and the others still run, so the write that overflowed
+  /// is still persisted and notified.
+  bool _evictOverflow({required bool keepNewest}) {
+    if (_maxPendingChanges <= 0 || _pending.length <= _maxPendingChanges) return false;
     final excess = _pending.length - _maxPendingChanges;
     final dropped = <ChangeRecord>[];
-    for (var i = 0; i < _pending.length - 1 && dropped.length < excess;) {
+    final scanEnd = keepNewest ? 1 : 0;
+    for (var i = 0; i < _pending.length - scanEnd && dropped.length < excess;) {
       if (_pending[i].isRejected) {
         i++;
       } else {
@@ -1358,9 +1453,15 @@ final class CrdtStore {
     while (dropped.length < excess) {
       dropped.add(_pending.removeAt(0).change);
     }
+    final view = List<ChangeRecord>.unmodifiable(dropped);
     for (final h in List.of(_overflowHandlers)) {
-      h(dropped);
+      try {
+        h(view);
+      } on Object catch (e) {
+        _reportStorage(e);
+      }
     }
+    return true;
   }
 
   // --- Subscriptions ---
@@ -1427,12 +1528,16 @@ final class CrdtStore {
   void _flushTransaction() {
     final touched = _txTouched;
     _txTouched = {};
+    final global = _txGlobal;
+    _txGlobal = false;
     _requestPersist();
     for (final e in touched.entries) {
       for (final pk in e.value) {
         _notifyListenersNow(e.key, pk);
       }
     }
+    // Document notifications reach the global listeners already.
+    if (global && touched.isEmpty) _notifyGlobal();
   }
 
   /// A [BatchWriter] queuing writes to one document, applied as one
@@ -1510,6 +1615,14 @@ final class CrdtStore {
       _markDocument(k.table, k.pk);
     }
     _requestPersist();
+    if (_txDepth > 0) {
+      // Inside a transaction every affected document notifies when it ends.
+      for (final k in {...removed, ...imported}) {
+        (_txTouched[k.table] ??= {}).add(k.pk);
+      }
+      _txGlobal = true;
+      return;
+    }
     for (final l in List.of(_globalListeners)) {
       l();
     }
@@ -1560,12 +1673,12 @@ final class CrdtStore {
       // unpushed, and anything it wrote would overwrite it.
       _unavailable = cause;
       _persistStopped = true;
-      _persistTimer?.cancel();
-      _persistTimer = null;
+      _stopTimers();
       _reportStorage(cause);
       throw ReplicaUnavailable(cause);
     }
 
+    // No write can have landed: every write before ready throws.
     final hydrated = <DocKey>[];
     for (final t in loaded!.entries) {
       for (final d in t.value.entries) {
@@ -1579,24 +1692,11 @@ final class CrdtStore {
           _reportStorage(e);
           continue;
         }
-        final current = _getDoc(t.key, d.key);
-        var next = doc;
-        if (current != null) {
-          // A write landed while hydration ran. Merge rather than drop the
-          // stored state: nothing was persisted yet, so the stored document
-          // still holds fields the in-memory one lacks.
-          try {
-            next = mergeState(doc, current);
-          } on CrdtMergeError catch (e) {
-            _reportStorage(e);
-            next = current;
-          }
-        }
-        _setDocument(t.key, d.key, next);
+        _setDocument(t.key, d.key, doc);
         hydrated.add((table: t.key, pk: d.key));
       }
     }
-    if (loadedPending!.isNotEmpty) _pending.insertAll(0, loadedPending);
+    _pending.addAll(loadedPending!);
 
     // Never mint a clock below one this replica already issued or holds. This
     // is the replica's own history, so the drift clamp of update() must not
@@ -1605,12 +1705,17 @@ final class CrdtStore {
     if (!max.isZero) clock.advanceTo(max);
 
     _hydrated = true;
-    // Writes made while hydrating are queued already; their pending entries
-    // now follow the loaded ones, so the flush writes the whole queue.
-    if (_docQueue.isNotEmpty || _pendingDirty) _requestPersist();
+    // A stored queue longer than the bound (the bound was lowered) is trimmed
+    // through the usual overflow path, and the trimmed queue persisted.
+    if (_evictOverflow(keepNewest: false)) _persistPending();
 
     for (final l in List.of(_globalListeners)) {
-      l();
+      // A listener that throws is reported; it does not fail ready.
+      try {
+        l();
+      } on Object catch (e) {
+        _reportStorage(e);
+      }
     }
     for (final k in hydrated) {
       _emit(k.table, k.pk);
@@ -1620,6 +1725,13 @@ final class CrdtStore {
   void _markDocument(String table, String pk) => (_docQueue[table] ??= {}).add(pk);
 
   void _markPending() => _pendingDirty = true;
+
+  void _stopTimers() {
+    _persistTimer?.cancel();
+    _persistTimer = null;
+    _retryTimer?.cancel();
+    _retryTimer = null;
+  }
 
   /// Flushes now (no debounce), arms the debounce timer, or waits for the
   /// outermost [transact] to end.
@@ -1652,13 +1764,40 @@ final class CrdtStore {
     _requestPersist();
   }
 
+  /// Puts what a failed flush held back on the queue, reports the failure,
+  /// and arms a retry. The retry waits a debounce tick (at least
+  /// [_minRetryDelay]) and doubles per consecutive failure up to
+  /// [_maxRetryDelay], so a storage that stays down is not retried in a hot
+  /// loop.
+  void _requeue(Iterable<(String, String)> docs, {required bool pending, required Object cause}) {
+    for (final k in docs) {
+      _markDocument(k.$1, k.$2);
+    }
+    if (pending) _markPending();
+    _failures++;
+    _lastFailure = cause;
+    _reportStorage(cause);
+    if (_persistStopped || _retryTimer != null) return;
+    _retryTimer = Timer(_retryDelay, () {
+      _retryTimer = null;
+      _drain();
+    });
+    final doubled = _retryDelay * 2;
+    _retryDelay = doubled > _maxRetryDelay ? _maxRetryDelay : doubled;
+  }
+
+  static const Duration _minRetryDelay = Duration(milliseconds: 50);
+  static const Duration _maxRetryDelay = Duration(seconds: 30);
+
+  Duration get _baseRetryDelay => _persistDebounce > _minRetryDelay ? _persistDebounce : _minRetryDelay;
+
   /// Takes everything queued, reading documents now, and hands it to the
   /// write chain.
   ///
   /// A `beforePersist` hook that throws stops the whole flush: nothing
   /// reaches storage, the error is reported, and what the flush held goes
-  /// back on the queue for the next flush to retry. A broken encryptor
-  /// therefore blocks persistence rather than letting plaintext through.
+  /// back on the queue for a retry. A broken encryptor therefore blocks
+  /// persistence rather than letting plaintext through.
   void _drain() {
     if (_persistStopped || !_hydrated || (_docQueue.isEmpty && !_pendingDirty)) return;
     final queued = _docQueue;
@@ -1675,11 +1814,10 @@ final class CrdtStore {
         }
       }
     } on Object catch (err) {
-      _reportStorage(err);
-      for (final e in queued.entries) {
-        (_docQueue[e.key] ??= {}).addAll(e.value);
-      }
-      if (pendingDirty) _pendingDirty = true;
+      _requeue([
+        for (final e in queued.entries)
+          for (final pk in e.value) (e.key, pk),
+      ], pending: pendingDirty, cause: err);
       return;
     }
     final pending = pendingDirty ? List<PendingChange>.unmodifiable(_pending) : null;
@@ -1692,39 +1830,70 @@ final class CrdtStore {
     }));
   }
 
-  /// Writes one flush. Never completes with an error.
+  /// Writes one flush and requeues whatever did not reach storage. Never
+  /// completes with an error.
+  ///
+  /// With plain storage the pending queue is written first, and the documents
+  /// only once it is stored. A failure part way then leaves an edit queued
+  /// (and still pushed) rather than saved in a document with no queue entry.
   Future<void> _writeOut(Map<(String, String), DocumentState?> docs, List<PendingChange>? pending) async {
     final s = _storage;
     if (s is AtomicReplicaStorage) {
-      await _guard(() => s.commit(documents: docs, pending: pending));
+      final error = await _attempt(() => s.commit(documents: docs, pending: pending));
+      if (error != null) {
+        _requeue(docs.keys, pending: pending != null, cause: error);
+      } else {
+        _retryDelay = _baseRetryDelay;
+      }
       return;
     }
-    await Future.wait([
-      for (final e in docs.entries)
-        _guard(() {
-          final doc = e.value;
-          return doc == null ? s.deleteDocument(e.key.$1, e.key.$2) : s.saveDocument(e.key.$1, e.key.$2, doc);
+    if (pending != null) {
+      final error = await _attempt(() => s.savePendingChanges(pending));
+      if (error != null) {
+        _requeue(docs.keys, pending: true, cause: error);
+        return;
+      }
+    }
+    final keys = docs.keys.toList();
+    final errors = await Future.wait([
+      for (final k in keys)
+        _attempt(() {
+          final doc = docs[k];
+          return doc == null ? s.deleteDocument(k.$1, k.$2) : s.saveDocument(k.$1, k.$2, doc);
         }),
-      if (pending != null) _guard(() => s.savePendingChanges(pending)),
     ]);
-  }
-
-  /// Runs a storage call, reporting a synchronous or asynchronous failure.
-  Future<void> _guard(Future<void> Function() call) async {
-    try {
-      await call();
-    } on Object catch (e) {
-      _reportStorage(e);
+    final failed = [
+      for (var i = 0; i < keys.length; i++)
+        if (errors[i] != null) keys[i],
+    ];
+    if (failed.isEmpty) {
+      _retryDelay = _baseRetryDelay;
+    } else {
+      _requeue(failed, pending: false, cause: errors.firstWhere((e) => e != null)!);
     }
   }
 
-  /// Writes every debounced change now and waits for every write in flight.
+  /// Runs a storage call and returns the error it failed with, synchronously
+  /// or asynchronously, or null.
+  Future<Object?> _attempt(Future<void> Function() call) async {
+    try {
+      await call();
+      return null;
+    } on Object catch (e) {
+      return e;
+    }
+  }
+
+  /// Writes every queued change now and waits for every write in flight.
   /// Call it before unload, or in tests that assert on storage.
   ///
-  /// The pending queue is written only when it changed since the last flush.
+  /// The pending queue is written only when it changed since the last
+  /// successful write of it. Anything that failed before is retried here.
   ///
-  /// Throws a [StateError] when the replica is unavailable (see
-  /// [ReplicaUnavailable]).
+  /// Completes with a [ReplicaPersistFailed] when a write failed during this
+  /// call (including a `beforePersist` hook that threw); what failed stays
+  /// queued and is retried. Throws a [StateError] when the replica is
+  /// unavailable (see [ReplicaUnavailable]).
   Future<void> flushPersistence() async {
     final unavailable = _unavailable;
     if (unavailable != null) throw StateError('crdt: the replica is unavailable: $unavailable');
@@ -1736,37 +1905,47 @@ final class CrdtStore {
         throw StateError('crdt: the replica is unavailable: ${e.cause}');
       }
     }
-    _persistTimer?.cancel();
-    _persistTimer = null;
+    final failuresBefore = _failures;
+    _stopTimers();
     _drain();
     while (true) {
       final tail = _writeTail;
-      if (tail == null) return;
+      if (tail == null) break;
       await tail;
     }
+    if (_failures != failuresBefore) throw ReplicaPersistFailed(_lastFailure!);
   }
 
-  /// Flushes persistence, then stops persisting and closes
-  /// [documentChanges]. A write after `dispose` is called throws a
+  /// Stops the timers, makes one final flush attempt, then stops persisting
+  /// and closes [documentChanges]. A write after `dispose` is called throws a
   /// [StateError]; reads keep working.
+  ///
+  /// When the final flush leaves anything unwritten, this completes with a
+  /// [ReplicaPersistFailed] after closing, so the caller knows that data did
+  /// not reach storage.
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _stopTimers();
+    Object? failed;
     if (_unavailable == null) {
       try {
         await flushPersistence();
+      } on ReplicaPersistFailed catch (e) {
+        failed = e;
       } on StateError {
         // The replica became unavailable while hydrating: nothing to flush.
       }
     }
     _persistStopped = true;
-    _persistTimer?.cancel();
-    _persistTimer = null;
+    _stopTimers();
     await _events.close();
+    if (failed != null) throw failed;
   }
 
   void _checkWritable() {
     if (_disposed) throw StateError('crdt: the store is disposed');
+    if (!_hydrated && _unavailable == null) throw StateError('await store.ready before writing');
     final unavailable = _unavailable;
     if (unavailable != null) throw StateError('crdt: the replica is unavailable: $unavailable');
   }
@@ -1812,7 +1991,7 @@ final class CrdtStore {
   /// [prebuilt] supplies a field state already built for a local text edit.
   void _applyChangeInternal(ChangeRecord c, {FieldState Function(FieldState? existing)? prebuilt}) {
     final doc = _docOrEmpty(c.table, c.pk);
-    if (c.tombstone && c.crdtType != CrdtType.document) {
+    if (_isRecordDelete(c)) {
       final at = doc.tombstone ? hlcMax(doc.tombstoneHlc, c.hlc) : c.hlc;
       _setDocument(c.table, c.pk, doc.copyWith(tombstone: true, tombstoneHlc: at));
       return;
@@ -1829,6 +2008,14 @@ final class CrdtStore {
     }
     _setDocument(c.table, c.pk, _withField(doc, c.field, next));
   }
+
+  /// Whether [c] deletes the whole record rather than a path inside a
+  /// nested document.
+  // Go parity: crdt/server.go:227-228 (MergeChanges) treats a tombstone as a
+  // path delete only when it is a document change carrying a value
+  // (`CRDTType == TypeDocument && len(Value) > 0`); every other tombstone,
+  // a value-less document one included, writes a record tombstone.
+  static bool _isRecordDelete(ChangeRecord c) => c.tombstone && !(c.crdtType == CrdtType.document && c.value != null);
 
   DocumentState? _getDoc(String table, String pk) => _state[table]?[pk];
 
@@ -1895,6 +2082,16 @@ final class CrdtStore {
       return;
     }
     _notifyListenersNow(table, pk);
+  }
+
+  /// Notifies the global listeners, or defers to the end of the outermost
+  /// [transact].
+  void _notifyGlobalSoon() {
+    if (_txDepth > 0) {
+      _txGlobal = true;
+      return;
+    }
+    _notifyGlobal();
   }
 
   /// Notifies the global listeners only.

@@ -63,7 +63,7 @@ void main() {
     });
   });
 
-  group('beyond the crdt-js behaviour', () {
+  group('BatchWriter queues every write type', () {
     test('every queued write type commits in one transaction', () {
       final store = mk();
       var fired = 0;

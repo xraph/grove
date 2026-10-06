@@ -12,6 +12,7 @@ void main() {
       fakeAsync((async) {
         final storage = RecordingStorage();
         final store = CrdtStore('n1', HybridClock('n1'), storage: storage, persistDebounce: const Duration(milliseconds: 20));
+        async.flushMicrotasks(); // ready
         for (var i = 0; i < 50; i++) {
           store.setField('t', 'p', 'f$i', i);
         }
@@ -84,7 +85,7 @@ void main() {
     });
   });
 
-  group('beyond the crdt-js behaviour', () {
+  group('flush gating, timing and order', () {
     test('does not re-persist pending changes on a document-only flush (compact)', () {
       fakeAsync((async) {
         final storage = RecordingStorage();
@@ -130,11 +131,15 @@ void main() {
         async.flushMicrotasks();
         store.setField('t', 'p', 'f', 1);
         store.setField('t', 'p', 'f', 2);
-        // The first flush is in flight; the second waits for it.
-        expect(storage.started, 2); // doc and pending of the first flush
+        // The first flush is in flight, writing its pending queue first; the
+        // second flush waits for it.
+        expect(storage.calls, ['pending']);
         async.elapse(const Duration(milliseconds: 10));
-        expect(storage.started, 4);
+        expect(storage.calls, ['pending', 'doc']); // the document once the queue is stored
         async.elapse(const Duration(milliseconds: 10));
+        expect(storage.calls, ['pending', 'doc', 'pending']);
+        async.elapse(const Duration(milliseconds: 20));
+        expect(storage.calls, ['pending', 'doc', 'pending', 'doc']);
         expect([for (final d in storage.saved) d.doc.fields['f']!.value!.value], [1, 2]);
       });
     });
@@ -142,17 +147,17 @@ void main() {
 }
 
 final class _SlowStorage extends RecordingStorage {
-  int started = 0;
+  final List<String> calls = [];
 
   @override
   Future<void> saveDocument(String table, String pk, DocumentState doc) {
-    started++;
+    calls.add('doc');
     return Future<void>.delayed(const Duration(milliseconds: 10), () => saved.add((table: table, pk: pk, doc: doc)));
   }
 
   @override
   Future<void> savePendingChanges(List<PendingChange> changes) {
-    started++;
+    calls.add('pending');
     return Future<void>.delayed(const Duration(milliseconds: 10), () => savedPending.add(List.of(changes)));
   }
 }

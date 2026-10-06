@@ -212,7 +212,7 @@ void main() {
     await sub.cancel();
   });
 
-  group('beyond the brief', () {
+  group('apply errors, undo, redo and queue bookkeeping', () {
     test('a batch of good, bad, good applies both good changes and reports once', () {
       final errors = <(Object, ChangeRecord)>[];
       final s = CrdtStore('a', HybridClock('a', nowMs: () => 1000), persistDebounce: Duration.zero, onError: (e, c) => errors.add((e, c)));
@@ -557,7 +557,7 @@ void main() {
     });
   });
 
-  group('fix round 0', () {
+  group('clock seeding, quarantine and raw removes across restarts', () {
     test('hydration seeds the clock past a persisted max an hour ahead of the device clock', () async {
       final kv = MapReplicaKeyValue();
       const hourMs = 3600 * 1000;
@@ -652,6 +652,201 @@ void main() {
         expect(written.where((k) => k.$2 == 'locked'), isEmpty, reason: 'atomic: $atomic');
         await s.dispose();
       }
+    });
+  });
+
+  group('re-stamping a set add keeps later removes on the new tag', () {
+    test('add x, remove x, restamp everything: x stays removed locally and on the server', () {
+      var now = 99999999;
+      final s = CrdtStore('a', HybridClock('a', nowMs: () => now), persistDebounce: Duration.zero);
+      s.addToSet('t', '1', 'tags', ['x']);
+      s.removeFromSet('t', '1', 'tags', ['x']);
+      now = 1000;
+      for (final p in List.of(s.pending)) {
+        expect(s.restampPending(p.key), isNotNull);
+      }
+      final server = CrdtStore('srv', HybridClock('srv', nowMs: () => 1000), persistDebounce: Duration.zero);
+      server.applyChanges(s.getPendingChanges());
+      expect(s.getDocument('t', '1')!['tags'], isEmpty);
+      expect(server.getDocument('t', '1')!['tags'], isEmpty);
+      final add = s.getPendingChanges().first;
+      expect(s.getPendingChanges().last.setOp!.tags.single.hlc, add.hlc);
+    });
+
+    test('every element a multi-element remove covers moves to the new tag', () {
+      var now = 99999999;
+      final s = CrdtStore('a', HybridClock('a', nowMs: () => now), persistDebounce: Duration.zero);
+      s.addToSet('t', '1', 'tags', ['x', 'y', 'z']);
+      s.removeFromSet('t', '1', 'tags', ['x', 'y']);
+      now = 1000;
+      s.restampPending(s.pending.first.key);
+      final server = CrdtStore('srv', HybridClock('srv', nowMs: () => 1000), persistDebounce: Duration.zero);
+      server.applyChanges(s.getPendingChanges());
+      expect(s.getDocument('t', '1')!['tags'], ['z']);
+      expect(server.getDocument('t', '1')!['tags'], ['z']);
+    });
+
+    test('a remove on another field or document is left alone, and the rewrite is persisted with the add', () async {
+      var now = 99999999;
+      final storage = RecordingAtomicStorage();
+      final s = CrdtStore('a', HybridClock('a', nowMs: () => now), storage: storage, persistDebounce: Duration.zero);
+      await s.ready;
+      s.addToSet('t', '1', 'tags', ['x']);
+      s.removeFromSet('t', '1', 'tags', ['x']);
+      s.removeFromSet('t', '1', 'other', ['x']);
+      final otherBefore = s.getPendingChanges().last;
+      await s.flushPersistence();
+      now = 1000;
+      final commitsBefore = storage.commits.length;
+      final fresh = s.restampPending(s.pending.first.key)!;
+      await s.flushPersistence();
+      expect(storage.commits, hasLength(commitsBefore + 1));
+      final written = storage.commits.last.pending!;
+      expect(written[1].change.setOp!.tags.single.hlc, fresh.hlc);
+      expect(written[2].change, same(otherBefore));
+    });
+  });
+
+  group('record deletes, overflow handlers, hydration listeners and transactions', () {
+    test('a document-type tombstone without a value deletes the record, as in Go', () {
+      final errors = <Object>[];
+      final s = CrdtStore('a', HybridClock('a', nowMs: () => 1000), persistDebounce: Duration.zero, onError: (e, c) => errors.add(e));
+      s.setField('t', '1', 'title', 'x');
+      s.setDocumentField('t', '1', 'meta', 'a', 1);
+      s.applyChanges([
+        ChangeRecord(table: 't', pk: '1', field: 'meta', crdtType: CrdtType.document, hlc: n(999999999999999), nodeId: 'srv', tombstone: true),
+      ]);
+      expect(errors, isEmpty);
+      expect(s.getDocument('t', '1'), isNull);
+      expect(s.getDocumentState('t', '1')!.tombstoneHlc, n(999999999999999));
+    });
+
+    test('a document-type tombstone with a value is a path delete, as in Go', () {
+      final s = newStore();
+      s.setDocumentField('t', '1', 'meta', 'a', 1);
+      s.setDocumentField('t', '1', 'meta', 'b', 2);
+      s.applyChanges([
+        ChangeRecord(table: 't', pk: '1', field: 'meta', crdtType: CrdtType.document, hlc: n(999999999999999), nodeId: 'srv',
+            tombstone: true, value: const JsonValue({'path': 'a'})),
+      ]);
+      expect(s.getDocument('t', '1')!['meta'], {'b': 2});
+    });
+
+    test('a throwing overflow handler is reported, and the write is still persisted and notified', () async {
+      final storage = RecordingStorage();
+      final errors = <Object>[];
+      final s = CrdtStore('a', HybridClock('a', nowMs: () => 1000),
+          storage: storage, persistDebounce: Duration.zero, maxPendingChanges: 1, onStorageError: errors.add);
+      await s.ready;
+      var notified = 0;
+      s.subscribe(() => notified++);
+      final heard = <ChangeRecord>[];
+      s.onPendingOverflow((_) => throw StateError('handler'));
+      s.onPendingOverflow(heard.addAll);
+      s.setField('t', '1', 'a', 1);
+      notified = 0;
+      final c = s.setField('t', '2', 'a', 2);
+      expect(c, isNotNull);
+      expect(errors.single, isA<StateError>());
+      expect(heard.single.pk, '1');
+      expect(notified, 1);
+      await s.flushPersistence();
+      expect(storage.saved.map((d) => d.pk), ['1', '2']);
+      expect(storage.savedPending.last.single.change.pk, '2');
+    });
+
+    test('a listener that throws during hydration is reported and does not fail ready', () async {
+      final storage = RecordingStorage()
+        ..preloaded = {
+          't': {'1': DocumentState(table: 't', pk: '1')},
+        };
+      final errors = <Object>[];
+      final s = CrdtStore('a', HybridClock('a', nowMs: () => 1000), storage: storage, onStorageError: errors.add);
+      var second = 0;
+      s.subscribe(() => throw StateError('listener'));
+      s.subscribe(() => second++);
+      final events = <DocKey>[];
+      final sub = s.documentChanges.listen(events.add);
+      await expectLater(s.ready, completes);
+      await Future<void>.delayed(Duration.zero);
+      expect(errors.single, isA<StateError>());
+      expect(second, 1);
+      expect(events, [(table: 't', pk: '1')]);
+      await s.flushPersistence();
+      await sub.cancel();
+    });
+
+    test('an operation that queues several changes checks room for all of them first', () {
+      final s = CrdtStore('a', HybridClock('a', nowMs: () => 1000),
+          persistDebounce: Duration.zero, maxPendingChanges: 4, throwOnOverflow: true);
+      s.setText('t', '1', 'body', 'hello world');
+      s.addToSet('t', '1', 'tags', ['a']);
+      s.clearPendingChanges();
+      s.setField('t', '1', 'x', 1);
+      s.setField('t', '1', 'y', 1);
+      s.setField('t', '1', 'z', 1); // one slot left
+      final before = s.exportTable('t')['1']!.toJson();
+      // A delete and an insert need two slots.
+      expect(() => s.setText('t', '1', 'body', 'hello there'), throwsA(isA<PendingQueueFullError>()));
+      // A remove and an add need two slots.
+      expect(() => s.reconcileField('t', '1', 'tags', CrdtType.set, ['b']), throwsA(isA<PendingQueueFullError>()));
+      expect(s.exportTable('t')['1']!.toJson(), before);
+      expect(s.pending, hasLength(3));
+      expect(s.getText('t', '1', 'body'), 'hello world');
+    });
+
+    test('an undo that needs more room than is left changes nothing and keeps its entry', () {
+      final s = CrdtStore('a', HybridClock('a', nowMs: () => 1000),
+          persistDebounce: Duration.zero, maxPendingChanges: 3, throwOnOverflow: true);
+      s.setDocumentField('t', '1', 'meta', 'a', 1);
+      s.clearPendingChanges();
+      s.setField('t', '1', 'z', 1);
+      s.setDocumentField('t', '1', 'meta', 'x', 1);
+      // A remote path lands after the write, so undoing it needs two deletes.
+      s.applyChanges([
+        ChangeRecord(table: 't', pk: '1', field: 'meta', crdtType: CrdtType.document, hlc: n(5), nodeId: 'srv',
+            value: const JsonValue({'path': 'y', 'value': 2})),
+      ]);
+      final before = s.exportTable('t')['1']!.toJson();
+      expect(s.undo, throwsA(isA<PendingQueueFullError>()));
+      expect(s.exportTable('t')['1']!.toJson(), before);
+      expect(s.pending, hasLength(2));
+      expect(s.canRedo, isFalse);
+      s.clearPendingChanges();
+      expect(s.undo(), isTrue);
+      expect(s.getDocument('t', '1')!['meta'], {'a': 1});
+      expect(s.getPendingChanges().map((c) => c.tombstone), [true, true]);
+    });
+
+    test('rejection bookkeeping inside a transaction notifies once, when it ends', () {
+      final s = newStore();
+      final a = s.setField('t', '1', 'a', 1)!;
+      final b = s.setField('t', '1', 'b', 1)!;
+      var notified = 0;
+      s.subscribe(() => notified++);
+      s.transact(() {
+        s.markRejected(pendingKey(a), const PendingRejection(kind: 'hook', reason: 'no'));
+        s.retryRejected(pendingKey(a));
+        s.discardPending(pendingKey(b));
+        expect(notified, 0);
+      });
+      expect(notified, 1);
+    });
+
+    test('importState inside a transaction notifies when it ends', () {
+      final s = newStore();
+      s.setField('t', '1', 'a', 1);
+      final snap = s.exportState();
+      var notified = 0;
+      var docNotified = 0;
+      s.subscribe(() => notified++);
+      s.subscribeDocument('t', '1', () => docNotified++);
+      s.transact(() {
+        s.importState(snap);
+        expect(notified + docNotified, 0);
+      });
+      expect(docNotified, 1);
+      expect(notified, 1);
     });
   });
 }

@@ -175,7 +175,7 @@ typedef Commit = ({Map<(String, String), DocumentState?> documents, List<Pending
 
 /// A [RecordingStorage] that is also an [AtomicReplicaStorage], recording
 /// each [commit].
-final class RecordingAtomicStorage extends RecordingStorage implements AtomicReplicaStorage {
+class RecordingAtomicStorage extends RecordingStorage implements AtomicReplicaStorage {
   /// Every `commit`, in order.
   final List<Commit> commits = [];
 

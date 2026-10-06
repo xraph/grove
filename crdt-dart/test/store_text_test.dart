@@ -49,7 +49,7 @@ void main() {
     });
   });
 
-  group('beyond the crdt-js behaviour', () {
+  group('text undo, redo, setText and edit errors', () {
     test('undo and redo of every text edit converge on a second replica', () {
       final a = newStore('a');
       final b = newStore('b');
