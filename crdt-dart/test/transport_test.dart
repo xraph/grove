@@ -70,6 +70,19 @@ final class _Cancelled implements Exception {
   String toString() => 'cancelled';
 }
 
+final class _CancelledCrdt extends CrdtError {
+  _CancelledCrdt()
+    : super('cancelled', code: CrdtErrorCode.cancelled, retryable: true);
+}
+
+class _FnAuth implements CrdtAuthProvider {
+  _FnAuth(this.fn);
+  final Map<String, String> Function() fn;
+
+  @override
+  Map<String, String> getHeaders() => fn();
+}
+
 class _ThrowingAuth implements CrdtAuthProvider {
   _ThrowingAuth({required this.throwOnCall});
   final int throwOnCall;
@@ -813,6 +826,48 @@ void main() {
         expect(server.calls, 1);
         expect(auth.calls, 2);
         expect(slept, hasLength(1));
+      },
+    );
+
+    test('a cancelled error from auth is called once and not retried, even through withRetry', () async {
+      final server = _Server.json(_pullOk);
+      final cancelled = _CancelledCrdt();
+      var calls = 0;
+      final t = withRetry(
+        HttpTransport(
+          baseUrl: _base(),
+          client: server.client,
+          auth: _FnAuth(() {
+            calls++;
+            throw cancelled;
+          }),
+          sleep: _noSleep,
+        ),
+        sleep: _noSleep,
+      );
+      await expectLater(t.pull(_pullReq()), throwsA(same(cancelled)));
+      expect(calls, 1);
+      expect(server.calls, 0);
+    });
+
+    test(
+      'a cancelled error thrown by the client is not wrapped or retried',
+      () async {
+        final cancelled = _CancelledCrdt();
+        final network = NetworkError('gone', code: CrdtErrorCode.cancelled);
+        for (final error in [cancelled, network]) {
+          var calls = 0;
+          final t = HttpTransport(
+            baseUrl: _base(),
+            client: MockClient((r) async {
+              calls++;
+              throw error;
+            }),
+            sleep: _noSleep,
+          );
+          await expectLater(t.pull(_pullReq()), throwsA(same(error)));
+          expect(calls, 1);
+        }
       },
     );
 

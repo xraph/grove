@@ -253,18 +253,43 @@ void main() {
       expect(flaky.calls, 1);
     });
 
-    test(
-      'retries an exception that is not a CrdtError, but not an Error',
-      () async {
-        final netDown = _Flaky(1, const FormatException('connection reset'));
-        await _wrap(netDown).pull(_pull());
-        expect(netDown.calls, 2);
+    // Differs from crdt-js: it retries any Error. Retrying an unknown error
+    // would call the auth provider again after a cancellation.
+    test('does not retry an arbitrary exception or Error', () async {
+      for (final error in [
+        StateError('a bug'),
+        const FormatException('garbled'),
+        Exception('unknown'),
+      ]) {
+        final bad = _Flaky(99, error);
+        await expectLater(_wrap(bad).pull(_pull()), throwsA(same(error)));
+        expect(bad.calls, 1, reason: '$error');
+      }
+    });
 
-        final bug = _Flaky(99, StateError('a bug'));
-        await expectLater(_wrap(bug).pull(_pull()), throwsStateError);
-        expect(bug.calls, 1);
-      },
-    );
+    test('retries a NetworkError only when it is marked retryable', () async {
+      final down = _Flaky(1, NetworkError('unreachable'));
+      await _wrap(down).pull(_pull());
+      expect(down.calls, 2);
+
+      final fixed = _Flaky(99, NetworkError('refused', retryable: false));
+      await expectLater(
+        _wrap(fixed).pull(_pull()),
+        throwsA(isA<NetworkError>()),
+      );
+      expect(fixed.calls, 1);
+    });
+
+    test('never retries a cancelled error, whatever its type says', () async {
+      for (final error in [
+        _CancelledCrdt(),
+        NetworkError('cancelled', code: CrdtErrorCode.cancelled),
+      ]) {
+        final bad = _Flaky(99, error);
+        await expectLater(_wrap(bad).pull(_pull()), throwsA(same(error)));
+        expect(bad.calls, 1);
+      }
+    });
 
     test('isRetryable replaces the default policy', () async {
       final flaky = _Flaky(99, TransportError('bad request', statusCode: 400));
@@ -360,4 +385,9 @@ class _CountingPresence extends _Bare implements PresenceTransport {
 
   @override
   Future<List<PresenceState>> getPresence(String topic) async => const [];
+}
+
+final class _CancelledCrdt extends CrdtError {
+  _CancelledCrdt()
+    : super('cancelled', code: CrdtErrorCode.cancelled, retryable: true);
 }

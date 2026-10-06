@@ -74,6 +74,8 @@ void main() {
           'pluginRejected': 'PLUGIN_REJECTED',
           'storageError': 'STORAGE_ERROR',
           'invalidState': 'INVALID_STATE',
+          // Dart only: crdt-js has no cancellation code.
+          'cancelled': 'CANCELLED',
         },
       );
     });

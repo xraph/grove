@@ -35,6 +35,11 @@ enum CrdtErrorCode {
   /// A storage read or write failed.
   storageError('STORAGE_ERROR'),
 
+  /// The operation was cancelled on purpose, for example because the account
+  /// it belonged to was switched away. Never retried. New in the Dart port;
+  /// crdt-js has no equivalent.
+  cancelled('CANCELLED'),
+
   /// The operation is not valid in the current state.
   invalidState('INVALID_STATE');
 

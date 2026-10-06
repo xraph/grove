@@ -255,6 +255,7 @@ base class HttpTransport implements Transport, PresenceTransport {
     try {
       return await _roundTrip(method, path, url, headers, body);
     } on NetworkError catch (error) {
+      if (error.code == CrdtErrorCode.cancelled) rethrow;
       return error;
     }
   }
@@ -294,6 +295,9 @@ base class HttpTransport implements Transport, PresenceTransport {
     } on NetworkError {
       rethrow;
     } on Exception catch (e) {
+      // A cancellation from the client ends the request; it is not a network
+      // failure to retry.
+      if (e is CrdtError && e.code == CrdtErrorCode.cancelled) rethrow;
       throw NetworkError('CRDT $path failed: $e', cause: e);
     }
   }

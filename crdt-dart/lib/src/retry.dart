@@ -22,20 +22,26 @@ bool isStreamTransport(Transport t) =>
 bool isPresenceTransport(Transport t) =>
     t is RetryingTransport ? t.supportsPresence : t is PresenceTransport;
 
-/// The default retry policy.
+/// The default retry policy: only a failure that says it is transient.
 ///
-/// A [CrdtError] says for itself whether trying again could succeed. Any other
-/// exception is retried, as crdt-js retries any `Error`. A Dart [Error] is a
-/// bug in the caller and is not.
+/// A [NetworkError] is retried when it is marked retryable, and a
+/// [TransportError] when its status is (see `isRetryableStatus`). Nothing else
+/// is: not a [CrdtError] with [CrdtErrorCode.cancelled], not any other
+/// exception and not a Dart [Error].
+///
+/// Differs from crdt-js: its default retries any `Error`. Retrying an unknown
+/// error would call the auth provider again after it threw a cancellation
+/// (the account was switched away), so the Dart default is narrower. Pass
+/// `isRetryable` to widen it.
 ///
 /// Go parity: a 500 is not retried, though [TransportError] marks it
 /// retryable. Go answers every deterministic push failure (validation, hook
-/// rejection) with a 500, so retrying one only repeats the rejection. See
-/// `isRetryableStatus`.
+/// rejection) with a 500, so retrying one only repeats the rejection.
 bool defaultIsRetryable(Object error) => switch (error) {
+  CrdtError(code: CrdtErrorCode.cancelled) => false,
   TransportError(statusCode: 500) => false,
-  CrdtError(:final retryable) => retryable,
-  Exception() => true,
+  NetworkError(:final retryable) => retryable,
+  TransportError(:final retryable) => retryable,
   _ => false,
 };
 
