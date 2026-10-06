@@ -77,12 +77,13 @@ void main() {
       expect(frags[1].content, 'kept');
     });
 
-    test(
-      'store.compact is a no-op for a zero horizon',
-      () {},
-      skip: 'needs CrdtStore, which is ported in Task 10. The store-independent '
-          'zero-horizon cases are below.',
-    );
+    test('store.compact is a no-op for a zero horizon', () {
+      final store = CrdtStore('n1', HybridClock('n1'), persistDebounce: Duration.zero);
+      store.setField('t', 'p', 'f', 1);
+      final before = store.getDocumentState('t', 'p');
+      expect(store.compact(HLC.zero), 0);
+      expect(store.getDocumentState('t', 'p'), same(before));
+    });
 
     test('compactDocument compacts list and set fields, leaves other field types untouched', () {
       final title = FieldState(type: CrdtType.lww, hlc: h(1), nodeId: 'n1', value: const JsonValue('hello'));

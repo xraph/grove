@@ -11,6 +11,7 @@ export 'src/plugin.dart';
 export 'src/presence_types.dart';
 export 'src/protocol.dart';
 export 'src/storage.dart';
+export 'src/store.dart';
 export 'src/sync_types.dart';
 export 'src/text.dart';
 export 'src/types.dart';
