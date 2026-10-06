@@ -33,6 +33,59 @@ void main() {
     test('keeps a paired surrogate as the astral character', () {
       expect(goMarshal('\u{1F600}'), '"\u{1F600}"');
     });
+    // An untyped `{}` literal or a `jsonDecode` result is a
+    // Map<dynamic, dynamic> at runtime. It encodes like its typed twin.
+    test('encodes a Map<dynamic, dynamic> like the typed map', () {
+      final untyped = <dynamic, dynamic>{
+        'b': <dynamic, dynamic>{
+          'y': 1,
+          'x': <dynamic>[<dynamic, dynamic>{}],
+        },
+        'a': <dynamic, dynamic>{},
+      };
+      final typed = <String, Object?>{
+        'b': <String, Object?>{
+          'y': 1,
+          'x': <Object?>[<String, Object?>{}],
+        },
+        'a': <String, Object?>{},
+      };
+      expect(goMarshal(untyped), goMarshal(typed));
+      expect(goMarshal(untyped), '{"a":{},"b":{"x":[{}],"y":1}}');
+    });
+    test('encodes an untyped empty map in a presence update', () {
+      expect(goMarshal({}), '{}');
+      expect(
+        goMarshal(
+          const PresenceUpdate(nodeId: 'n', topic: 't', data: {}).toJson(),
+        ),
+        '{"data":{},"node_id":"n","topic":"t"}',
+      );
+    });
+    test('throws an ArgumentError naming the type of a non-String key', () {
+      expect(
+        () => goMarshal(<dynamic, dynamic>{1: 'x'}),
+        throwsA(
+          isA<ArgumentError>().having(
+            (e) => e.message,
+            'message',
+            contains('int'),
+          ),
+        ),
+      );
+      expect(
+        () => goMarshal(<String, Object?>{
+          'ok': <dynamic, dynamic>{2.5: 1},
+        }),
+        throwsA(
+          isA<ArgumentError>().having(
+            (e) => e.message,
+            'message',
+            contains('double'),
+          ),
+        ),
+      );
+    });
     test('sorts object keys by byte order', () {
       expect(goMarshal({'é': 1, 'e': 2, 'Z': 3}), '{"Z":3,"e":2,"é":1}');
     });

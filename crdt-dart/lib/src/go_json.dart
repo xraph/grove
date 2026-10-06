@@ -167,8 +167,20 @@ void _write(StringBuffer out, Object? v) {
         _write(out, l[i]);
       }
       out.write(']');
-    case final Map<String, Object?> m:
-      final keys = m.keys.toList()..sort(compareGoStrings);
+    case final Map<Object?, Object?> m:
+      // A `{}` literal or `jsonDecode` result is a Map<dynamic, dynamic> at
+      // runtime, so the keys are checked one by one.
+      final keys = <String>[
+        for (final k in m.keys)
+          k is String
+              ? k
+              : throw ArgumentError.value(
+                  k,
+                  'key',
+                  'goMarshal: a JSON object key must be a string, '
+                      'got ${k.runtimeType}',
+                ),
+      ]..sort(compareGoStrings);
       for (var i = 1; i < keys.length; i++) {
         if (compareGoStrings(keys[i - 1], keys[i]) == 0) {
           // Go would decode both keys to the same string and keep one.
