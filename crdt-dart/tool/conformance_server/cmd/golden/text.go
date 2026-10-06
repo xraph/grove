@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"math/rand"
 	"path/filepath"
 	"sort"
 
@@ -18,7 +19,7 @@ type textRec struct {
 
 type textRefIndex struct {
 	Ref   crdt.TextRef `json:"ref"`
-	Index int          `json:"index"`
+	Index *int         `json:"index"`
 }
 
 // textCase is a replayable text history with everything Go says about the
@@ -118,11 +119,13 @@ func buildTextCase(name string, edit func(st *crdt.TextState, recs *[]textRec)) 
 		for _, f := range st.Frags[k] {
 			for off := f.Start; off < f.Start+f.Length; off++ {
 				ref := crdt.TextRef{Origin: f.Origin, Offset: off}
-				idx, ok := st.IndexOf(ref)
-				if !ok {
-					panic(name + ": IndexOf")
+				// A null index means Go cannot place the address: its origin's
+				// head has not arrived, so the walk never reaches it.
+				entry := textRefIndex{Ref: ref}
+				if idx, ok := st.IndexOf(ref); ok {
+					entry.Index = &idx
 				}
-				c.IndexOf = append(c.IndexOf, textRefIndex{Ref: ref, Index: idx})
+				c.IndexOf = append(c.IndexOf, entry)
 			}
 		}
 	}
@@ -139,7 +142,7 @@ func insertAt(st *crdt.TextState, recs *[]textRec, index int, s, node string, ts
 }
 
 func textCases() []textCase {
-	return []textCase{
+	cases := []textCase{
 		buildTextCase("astral_insert_split", func(st *crdt.TextState, recs *[]textRec) {
 			insertAt(st, recs, 0, "a😀b🌍c", "a", 1)
 			insertAt(st, recs, 3, "X", "b", 100)
@@ -175,6 +178,66 @@ func textCases() []textCase {
 			record(recs, "n2", 101, op2)
 		}),
 	}
+	return append(cases,
+		shuffledWalkCase("walk_shuffled_complete", 7, 200, 1.0),
+		shuffledWalkCase("walk_shuffled_with_holes", 11, 200, 0.7),
+	)
+}
+
+// shuffledWalkCase builds a deep, branching tree and delivers its inserts to
+// the state in shuffled order with some dropped, so the walk meets holes,
+// anchors past coverage and orphan origins. Nodes "n～" and "n😀" order
+// differently in UTF-16 and in Go's byte order, and the clocks tie often, so
+// sibling order depends on the Go string comparison.
+func shuffledWalkCase(name string, seed int64, n int, keep float64) textCase {
+	return buildTextCase(name, func(st *crdt.TextState, recs *[]textRec) {
+		rng := rand.New(rand.NewSource(seed))
+		nodes := []string{"a", "b", "n～", "n😀", "c"}
+		alpha := []string{"x", "é", "😀", "中", "𝄞"}
+		src := crdt.NewTextState()
+		var all []textRec
+		var last crdt.TextRef
+		ts := int64(0)
+		for i := 0; i < n; i++ {
+			ts++
+			node := nodes[rng.Intn(len(nodes))]
+			clock := crdt.HLC{Timestamp: ts / 2, Counter: uint32(rng.Intn(2)), NodeID: node}
+			if _, ok := src.Frags[clock.String()]; ok {
+				continue
+			}
+			ref := crdt.TextRef{}
+			switch l := src.Len(); {
+			case rng.Intn(3) == 0 && i > 0:
+				ref = last // deep chain
+			case l > 0:
+				if idx := rng.Intn(l + 1); idx > 0 {
+					ref = refAt(src, idx-1)
+				}
+			}
+			text := ""
+			for k := 0; k < 1+rng.Intn(3); k++ {
+				text += alpha[rng.Intn(len(alpha))]
+			}
+			op := must(src.Insert(ref, text, node, clock))
+			all = append(all, textRec{NodeID: node, HLC: clock, Op: op})
+			idx, _ := src.IndexOf(crdt.TextRef{Origin: op.Origin, Offset: 0})
+			last = refAt(src, idx)
+		}
+		for _, p := range rng.Perm(len(all)) {
+			if rng.Float64() > keep {
+				continue
+			}
+			r := all[p]
+			must(0, st.Apply(r.Op, r.NodeID, r.HLC))
+			*recs = append(*recs, r)
+		}
+		// Deletes assume causal delivery, so they come after the inserts.
+		for i := 0; i < 6 && st.Len() > 4; i++ {
+			op := must(st.Delete(refAt(st, rng.Intn(st.Len()-2)), 1+rng.Intn(2)))
+			ts++
+			*recs = append(*recs, textRec{NodeID: "a", HLC: textHLC(ts, "a"), Op: op})
+		}
+	})
 }
 
 func setStringCases() []setStringCase {

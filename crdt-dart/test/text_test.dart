@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:grove_crdt/grove_crdt.dart';
 import 'package:test/test.dart';
 
@@ -210,28 +212,72 @@ void main() {
       expectRuneLengths(ab);
     });
 
-    test('an unpaired surrogate is one offset, as Go decodes it to one U+FFFD', () {
+    test('an unpaired surrogate is one offset and is held as U+FFFD, as Go holds it', () {
       final st = newTextState();
       typeChunks(st, 'a', 1, ['a\uD83Db']);
       expect(textLength(st), 3);
+      expect(textValue(st), 'a\uFFFDb');
       expect(textRefAt(st, 2)!.offset, 2);
       textDeleteOp(st, textRefAt(st, 1)!, 1);
       expect(textValue(st), 'ab');
     });
 
-    test('typing a high then a low surrogate never fuses them into one character', () {
+    test('typing a high then a low surrogate gives two characters, never one astral', () {
       final st = newTextState();
       typeChunks(st, 'a', 1, ['x\uD83D', '\uDE00y']);
+      expect(textValue(st), 'x\uFFFD\uFFFDy');
       expect(textLength(st), 4);
       expectRuneLengths(st);
       expect(textRefAt(st, 3)!.offset, 3);
       textInsert(st, textRefAt(st, 1)!, 'M', 'b', hlc(100, 'b'));
       expect(textLength(st), 5);
       expectRuneLengths(st);
-      // SetString counts the same runes the offsets do.
-      var t = 100;
-      textSetString(st, 'x😀y', 'a', () => hlc(++t, 'a'));
-      expect(textValue(st), 'x\u{1F600}y');
+    });
+
+    test('the op a local insert returns already carries U+FFFD', () {
+      final st = newTextState();
+      final op = textInsert(st, null, 'a\uD83D', 'a', hlc(1, 'a'));
+      expect(op.content, 'a\uFFFD');
+      expect(textValue(st), 'a\uFFFD');
+    });
+
+    test('a local lone surrogate converges with a replica that got it over the wire', () {
+      final local = newTextState();
+      final op = textInsert(local, null, 'a\uD83D', 'a', hlc(1, 'a'));
+      final remote = newTextState();
+      applyTextOp(remote, TextOperation.fromJson(jsonDecode(encodeWire(op.toJson()))), 'a', hlc(1, 'a'));
+      expect(textValue(local), textValue(remote));
+      expect(jsonEncode(local.toJson()), jsonEncode(remote.toJson()));
+      final lr = mergeText(local, remote);
+      final rl = mergeText(remote, local);
+      expect(textValue(lr), textValue(rl));
+      expect(textValue(lr), 'a\uFFFD');
+      expect(jsonEncode(lr.toJson()), jsonEncode(rl.toJson()));
+    });
+
+    test('a lone surrogate arriving as a remote op is normalised as well', () {
+      final st = newTextState();
+      applyTextOp(st, TextOperation(TextOpType.insert, content: '\uDE00z', origin: hlc(1, 'a')), 'a', hlc(1, 'a'));
+      expect(textValue(st), '\uFFFDz');
+      expect(st.frags.values.single.single.length, 2);
+    });
+
+    test('a lone surrogate in an attribute value is normalised', () {
+      final st = newTextState();
+      typeChunks(st, 'a', 1, ['hi']);
+      textFormat(st, textRefAt(st, 0)!, 2, {'k\uD83D': 'v\uD83D'}, 'a', hlc(5, 'a'));
+      expect(textDelta(st).single.attributes, {'k\uFFFD': 'v\uFFFD'});
+    });
+
+    test('textSetString compares against what is stored, so a lone surrogate is not a change', () {
+      final st = newTextState();
+      typeChunks(st, 'a', 1, ['a\uD83Db']);
+      var t = 10;
+      expect(textSetString(st, 'a\uD83Db', 'a', () => hlc(++t, 'a')), isEmpty);
+      expect(textSetString(st, 'a\uFFFDb', 'a', () => hlc(++t, 'a')), isEmpty);
+      final ops = textSetString(st, 'a\uDE00b!', 'a', () => hlc(++t, 'a'));
+      expect(ops.map((o) => o.content), ['!']);
+      expect(textValue(st), 'a\uFFFDb!');
     });
   });
 

@@ -10,8 +10,10 @@
 /// Every offset, start and length counts runes (Unicode code points), as Go
 /// does. A Dart string is UTF-16, so content is only ever indexed through
 /// `String.runes` and rebuilt with `String.fromCharCodes`. An astral character
-/// is one offset, and an unpaired surrogate is one offset too, as Go decodes
-/// it to a single U+FFFD.
+/// is one offset. An unpaired surrogate is replaced by U+FFFD when content
+/// enters the CRDT (a local insert, `textSetString` or a remote op), because
+/// that is what Go holds after decoding the wire, so every replica stores the
+/// same characters.
 library;
 
 import 'hlc.dart';
@@ -72,6 +74,28 @@ String _refKey(TextRef r) {
 }
 
 int _runeCount(String s) => s.runes.length;
+
+bool _isSurrogate(int rune) => rune >= 0xD800 && rune <= 0xDFFF;
+
+/// [s] as Go holds it: every unpaired surrogate becomes U+FFFD, because Go
+/// decodes a JSON string to valid UTF-8 and the wire writes U+FFFD for one.
+/// Normalising on the way in keeps the local replica identical to every other
+/// replica, so `mergeText` does not depend on argument order.
+String _goString(String s) {
+  if (!s.runes.any(_isSurrogate)) return s;
+  return String.fromCharCodes([for (final r in s.runes) _isSurrogate(r) ? 0xFFFD : r]);
+}
+
+/// [v] with every string, object keys included, passed through [_goString].
+Object? _goJson(Object? v) => switch (v) {
+      final String s => _goString(s),
+      final List<Object?> l => [for (final e in l) _goJson(e)],
+      final Map<Object?, Object?> m => {for (final e in m.entries) _goString(e.key! as String): _goJson(e.value)},
+      _ => v,
+    };
+
+Map<String, JsonValue> _goAttrs(Map<String, JsonValue> attrs) =>
+    {for (final e in attrs.entries) _goString(e.key): JsonValue(_goJson(e.value.value))};
 
 /// The runes `[from, to)` of [s], clamped to the string, as Go `substring`.
 String _substringRunes(String s, int from, int to) {
@@ -349,10 +373,6 @@ void _applySpans(TextState state, List<TextSpan> spans, void Function(TextFragme
   }
 }
 
-bool _isHighSurrogate(int unit) => unit >= 0xD800 && unit <= 0xDBFF;
-
-bool _isLowSurrogate(int unit) => unit >= 0xDC00 && unit <= 0xDFFF;
-
 /// Folds one [TextOperation] into [s]. Inserts are idempotent: a duplicate
 /// delivery is ignored. Delete and format ops touch the exact spans they name
 /// and assume causal delivery per origin, so they must arrive after the insert
@@ -369,8 +389,9 @@ void applyTextOp(TextState s, TextOperation op, String nodeId, HLC clock) {
     case TextOpType.delete:
       _applySpans(s, op.spans, (f) => f.tombstone = true);
     case TextOpType.format:
+      final attrs = _goAttrs(op.attrs);
       _applySpans(s, op.spans, (f) {
-        for (final e in op.attrs.entries) {
+        for (final e in attrs.entries) {
           final existing = f.attrs[e.key];
           if (existing != null && !clock.isAfter(existing.hlc)) continue;
           f.attrs[e.key] = AttrState(e.value, clock, nodeId);
@@ -393,7 +414,9 @@ void _applyInsert(TextState s, TextOperation op, String nodeId, HLC clock) {
     parent = TextRef.head;
   }
 
-  final length = _runeCount(op.content);
+  final content = _goString(op.content);
+  final attrs = _goAttrs(op.attrs);
+  final length = _runeCount(content);
   final frags = s.frags.putIfAbsent(key, () => <TextFragment>[]);
   // Idempotence: skip if any part of [start, start + length) already exists.
   for (final f in frags) {
@@ -403,28 +426,23 @@ void _applyInsert(TextState s, TextOperation op, String nodeId, HLC clock) {
   final frag = TextFragment(
     origin: origin,
     start: start,
-    content: op.content,
+    content: content,
     length: length,
     parent: parent,
     attrs: {
-      for (final e in op.attrs.entries) e.key: AttrState(e.value, clock, nodeId),
+      for (final e in attrs.entries) e.key: AttrState(e.value, clock, nodeId),
     },
   );
 
-  // Coalesce with the preceding tail fragment when storage-compatible. Joining
-  // a trailing high surrogate to a leading low surrogate would fuse two
-  // unpaired surrogates into one astral character and put the fragment's rune
-  // length out of step with its content, so that case stays a separate
-  // fragment.
+  // Coalesce with the preceding tail fragment when storage-compatible.
   if (frags.isNotEmpty && start > 0) {
     final tail = frags.last;
     if (tail.start + tail.length == start &&
         !tail.tombstone &&
         tail.attrs.isEmpty &&
         frag.attrs.isEmpty &&
-        tail.content.isNotEmpty &&
-        !(_isHighSurrogate(tail.content.codeUnits.last) && _isLowSurrogate(op.content.codeUnitAt(0)))) {
-      tail.content += op.content;
+        tail.content.isNotEmpty) {
+      tail.content += content;
       tail.length += length;
       return;
     }
@@ -503,6 +521,7 @@ TextOperation textInsert(TextState s, TextRef? ref, String content, String nodeI
   if (content.isEmpty) {
     throw ArgumentError.value(content, 'content', 'crdt: empty text insert');
   }
+  content = _goString(content);
   final anchor = ref ?? TextRef.head;
   var origin = clock;
   if (!_isHeadRef(anchor) && anchor.origin.node == nodeId) {
@@ -546,7 +565,7 @@ TextOperation textFormat(
   final op = TextOperation(
     TextOpType.format,
     spans: spans,
-    attrs: {for (final e in attrs.entries) e.key: JsonValue(e.value)},
+    attrs: _goAttrs({for (final e in attrs.entries) e.key: JsonValue(e.value)}),
   );
   applyTextOp(s, op, nodeId, clock);
   return op;
@@ -677,7 +696,7 @@ List<int> _visibleRunes(TextState s) {
 /// an error.
 List<TextOperation> textSetString(TextState s, String value, String nodeId, HLC Function() nextClock) {
   final oldRunes = _visibleRunes(s);
-  final newRunes = value.runes.toList();
+  final newRunes = _goString(value).runes.toList();
 
   var prefix = 0;
   while (prefix < oldRunes.length && prefix < newRunes.length && oldRunes[prefix] == newRunes[prefix]) {
