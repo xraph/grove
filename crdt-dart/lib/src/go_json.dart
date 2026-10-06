@@ -156,7 +156,8 @@ void _writeString(StringBuffer out, String s) {
       continue;
     }
     if (u >= 0xD800 && u <= 0xDFFF) {
-      out.write(r'\ufffd');
+      // Go decodes a lone surrogate escape to U+FFFD and writes that rune raw.
+      out.writeCharCode(0xFFFD);
       continue;
     }
     switch (u) {

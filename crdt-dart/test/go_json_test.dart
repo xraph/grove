@@ -18,8 +18,17 @@ void main() {
     test('leaves DEL and non-ASCII raw', () {
       expect(goMarshal('\u007fhé😀'), '"\u007fhé😀"');
     });
-    test('replaces a lone surrogate with U+FFFD', () {
-      expect(goMarshal(String.fromCharCode(0xD800)), r'"\ufffd"');
+    test('replaces a lone surrogate with a raw U+FFFD', () {
+      expect(goMarshal(String.fromCharCode(0xD800)), '"\u{FFFD}"');
+    });
+    // Go parity: json.Unmarshal turns the escape \ud800 into U+FFFD and
+    // json.Marshal then writes that rune raw, not as \ufffd.
+    test('writes a lone high or low surrogate as raw U+FFFD like Go', () {
+      expect(goMarshal('a\uD800b'), '"a\u{FFFD}b"');
+      expect(goMarshal('a\uDC00b'), '"a\u{FFFD}b"');
+    });
+    test('keeps a paired surrogate as the astral character', () {
+      expect(goMarshal('\u{1F600}'), '"\u{1F600}"');
     });
     test('sorts object keys by byte order', () {
       expect(goMarshal({'é': 1, 'e': 2, 'Z': 3}), '{"Z":3,"e":2,"é":1}');
