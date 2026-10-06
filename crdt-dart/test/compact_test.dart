@@ -117,7 +117,7 @@ void main() {
       expect(r.doc.fields['title'], same(title));
     });
 
-    test("does not recurse into nested docState (Go's State.Compact has no TypeDocument case)", () {
+    test("does not recurse into nested doc_state (Go's State.Compact has no TypeDocument case)", () {
       final nested = FieldState(
         type: CrdtType.document,
         hlc: h(1),

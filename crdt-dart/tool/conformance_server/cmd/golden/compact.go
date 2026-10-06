@@ -160,6 +160,13 @@ func compactCases() []compactCase {
 	_ = newer.Add("a", "n1", ch1(50))
 	_ = newer.Remove("a")
 
+	// The same tag twice in one entry, with its element marker. Go deletes the
+	// marker on the first copy, so the second copy is no longer removed.
+	dup := &crdt.ORSetState{
+		Entries: map[string][]crdt.Tag{`"a"`: {tag("n1", 1), tag("n1", 1)}},
+		Removed: map[string]bool{`"a"|n1:` + h(1, 0, "n1").String(): true},
+	}
+
 	live := crdt.NewORSetState()
 	_ = live.Add("a", "n1", ch1(1))
 
@@ -175,7 +182,14 @@ func compactCases() []compactCase {
 		setCase("set_keeps_the_legacy_tag_only_marker", ch1(10), legacy),
 		setCase("set_element_marker_goes_but_the_legacy_marker_stays", ch1(10), both),
 		setCase("set_prunes_an_entry_with_no_tags_without_counting_it", ch1(10), tagless),
-		setCase("set_zero_horizon_is_a_no_op", crdt.HLC{}, multi),
+		setCase("set_zero_horizon_is_a_no_op", crdt.HLC{}, func() *crdt.ORSetState {
+			// Fresh: a removed tag that WOULD drop under a real horizon.
+			s := crdt.NewORSetState()
+			_ = s.Add("a", "n1", ch1(1))
+			_ = s.Remove("a")
+			return s
+		}()),
+		setCase("set_duplicate_tags_in_one_entry_drop_once", ch1(10), dup),
 		setCase("set_live_tags_untouched", ch1(10), live),
 	)
 
@@ -237,8 +251,10 @@ func compactCases() []compactCase {
 	cases = append(cases,
 		docCase("document_compacts_list_set_and_text_and_skips_the_rest", ch1(10), doc),
 		docCase("document_zero_horizon_is_a_no_op", crdt.HLC{}, func() *crdt.State {
+			// Fresh: a droppable tombstone, which a real horizon would remove.
 			d := crdt.NewState("t", "p")
-			d.Fields["items"] = list.ToFieldState(ch1(1), "n1")
+			d.Fields["items"] = listOf(
+				listNode(ch1(1), root, "a", false), listNode(ch1(2), ch1(1), "b", true)).ToFieldState(ch1(1), "n1")
 			return d
 		}()),
 		docCase("document_with_nothing_compactable", ch1(10), flat),

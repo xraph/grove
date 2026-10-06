@@ -68,7 +68,11 @@ import 'types.dart';
     final elem = e.key;
     final kept = <OrSetTag>[];
     for (final tag in e.value) {
-      if (tagRemoved(s, elem, tag) && before.isAfter(tag.hlc)) {
+      // Go parity: Go reads the live Removed map, which earlier iterations have
+      // already deleted markers from. A duplicate tag in one entry therefore
+      // drops once and the copy stays (and is visible again), so this reads the
+      // working map too, not the input.
+      if (_tagRemoved(removed, elem, tag) && before.isAfter(tag.hlc)) {
         removed.remove(removedKey(elem, tag));
         dropped++;
         continue;
@@ -85,6 +89,9 @@ import 'types.dart';
       ? (state: s, dropped: 0)
       : (state: OrSetState(entries: entries, removed: removed), dropped: dropped);
 }
+
+bool _tagRemoved(Map<String, bool> removed, String elem, OrSetTag t) =>
+    (removed[removedKey(elem, t)] ?? false) || (removed[tagKey(t)] ?? false);
 
 /// Skeletonizes tombstoned fragments whose origin is older than [before]:
 /// content and attributes are freed and adjacent skeletons coalesce, but
