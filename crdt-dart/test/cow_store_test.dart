@@ -53,12 +53,14 @@ void main() {
       expect(first.fields['f']!.value!.value, 1);
     });
 
-    test('installs a new DocumentState object rather than mutating in place', () {
+    test('installs a new DocumentState object rather than mutating in place', () async {
       // persistDebounce: zero: this test asserts one beforePersist call per
       // setField; the default debounce coalesces same-document writes into a
       // single call, which is what the debounce is for but not what this
       // identity check is testing.
       final store = CrdtStore('n1', HybridClock('n1'), persistDebounce: Duration.zero);
+      // Dart: nothing persists until hydration completes.
+      await store.ready;
       final seen = <DocumentState>[];
       store.use(FnPlugin('identity-watcher', onBeforePersist: (t, p, doc) {
         seen.add(doc);
@@ -157,8 +159,10 @@ void main() {
     // which made writes quadratic. The honest signature of the fix is
     // structural, not temporal: undo's previousState must be the SAME OBJECT
     // that was in the document, not a copy of it.
-    test('undo captures the previous field state by reference, not by clone (D8)', () {
+    test('undo captures the previous field state by reference, not by clone (D8)', () async {
       final store = CrdtStore('n1', HybridClock('n1'), persistDebounce: Duration.zero);
+      // Dart: nothing persists until hydration completes.
+      await store.ready;
       FieldState? liveAfterFirstWrite;
       FieldState? previousSeenBySecondWrite;
       store.use(FnPlugin(

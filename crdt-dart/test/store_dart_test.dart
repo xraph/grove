@@ -1,6 +1,8 @@
 import 'package:grove_crdt/grove_crdt.dart';
 import 'package:test/test.dart';
 
+import 'support/store_fakes.dart';
+
 HLC n(int ts, [String node = 'srv']) => HLC(BigInt.from(ts), 0, node);
 
 CrdtStore newStore({String node = 'a', ReplicaStorage? storage, int Function()? now}) =>
@@ -554,4 +556,114 @@ void main() {
       expect(second, 2);
     });
   });
+
+  group('fix round 0', () {
+    test('hydration seeds the clock past a persisted max an hour ahead of the device clock', () async {
+      final kv = MapReplicaKeyValue();
+      const hourMs = 3600 * 1000;
+      final first = newStore(storage: KeyValueReplicaStorage(kv), now: () => 10 * hourMs);
+      await first.ready;
+      final written = first.setField('t', '1', 'title', 'x')!;
+      await first.flushPersistence();
+      // The device clock now reads an hour behind, far past the drift bound.
+      final second = newStore(storage: KeyValueReplicaStorage(kv), now: () => 9 * hourMs);
+      await second.ready;
+      final next = second.setField('t', '1', 'title', 'y')!;
+      expect(next.hlc.isAfter(written.hlc), isTrue);
+      expect(second.getDocument('t', '1')!['title'], 'y');
+    });
+
+    test('hydration seeds the clock past the max pending HLC too', () async {
+      final kv = MapReplicaKeyValue();
+      const hourMs = 3600 * 1000;
+      final first = newStore(storage: KeyValueReplicaStorage(kv), now: () => 10 * hourMs);
+      await first.ready;
+      final c = first.setField('t', '1', 'title', 'x')!;
+      await first.flushPersistence();
+      kv.entries.removeWhere((k, _) => k.startsWith('doc/'));
+      final second = newStore(storage: KeyValueReplicaStorage(kv), now: () => 9 * hourMs);
+      await second.ready;
+      expect(second.setField('t', '2', 'f', 1)!.hlc.isAfter(c.hlc), isTrue);
+    });
+
+    test('a pending remove built from a non-canonical key sends the same bytes after a restart', () async {
+      final kv = MapReplicaKeyValue();
+      final first = newStore(storage: KeyValueReplicaStorage(kv));
+      await first.ready;
+      first.applyChanges([
+        ChangeRecord(table: 't', pk: '1', field: 's', crdtType: CrdtType.set, hlc: n(2), nodeId: 'js',
+            state: setFieldState(OrSetState(entries: {'"a<b"': [OrSetTag('js', n(1, 'js'))]}), n(1, 'js'), 'js')),
+      ]);
+      final c = first.removeFromSet('t', '1', 's', ['a<b', 'plain'])!;
+      final bytes = encodeWire(c.toJson());
+      expect(bytes, contains(r'"elements":["a<b","plain"]'));
+      await first.flushPersistence();
+
+      final second = newStore(storage: KeyValueReplicaStorage(kv));
+      await second.ready;
+      final restored = second.getPendingChanges().single;
+      expect(encodeWire(restored.toJson()), bytes);
+      expect(restored.setOp!.elements.first, isA<RawJson>());
+      expect(restored.setOp!.elements.last, 'plain');
+    });
+
+    test('quarantine: a key whose afterHydrate failed is never written, and local writes to it throw', () async {
+      for (final atomic in [false, true]) {
+        final storage = atomic ? RecordingAtomicStorage() : RecordingStorage();
+        storage.preloaded = {
+          't': {
+            'locked': DocumentState(table: 't', pk: 'locked', fields: {
+              'secret': FieldState(type: CrdtType.lww, hlc: n(1), nodeId: 'srv', value: const JsonValue('ciphertext')),
+            }),
+            'open': DocumentState(table: 't', pk: 'open'),
+          },
+        };
+        final storageErrors = <Object>[];
+        final s = CrdtStore('a', HybridClock('a', nowMs: () => 1000),
+            storage: storage, persistDebounce: Duration.zero, onStorageError: storageErrors.add);
+        s.use(_HydrateFails('locked'));
+        await s.ready;
+        expect(storageErrors, hasLength(1)); // reported once
+        expect(s.getDocument('t', 'locked'), isNull);
+
+        // A remote change is applied in memory and served, but not persisted.
+        s.applyChanges([
+          ChangeRecord(table: 't', pk: 'locked', field: 'title', crdtType: CrdtType.lww, hlc: n(5), nodeId: 'srv', value: const JsonValue('hi')),
+        ]);
+        expect(s.getDocument('t', 'locked')!['title'], 'hi');
+        expect(storageErrors, hasLength(2));
+        expect(storageErrors.last, isA<StateError>());
+
+        // Every local write to it throws, and nothing is queued.
+        expect(() => s.setField('t', 'locked', 'title', 'x'), throwsStateError);
+        expect(() => s.deleteDocument('t', 'locked'), throwsStateError);
+        expect(() => s.insertText('t', 'locked', 'body', 0, 'x'), throwsStateError);
+        expect(() => s.reconcileField('t', 'locked', 'n', CrdtType.counter, 3), throwsStateError);
+        expect(s.pending, isEmpty);
+
+        // Neither a drop nor a flush ever touches its stored bytes.
+        s.setField('t', 'open', 'f', 1);
+        s.dropDocument('t', 'locked');
+        await s.flushPersistence();
+        final written = storage is RecordingAtomicStorage
+            ? [for (final c in storage.commits) ...c.documents.keys]
+            : [for (final d in storage.saved) (d.table, d.pk), ...storage.deleted];
+        expect(written, isNotEmpty, reason: 'atomic: $atomic');
+        expect(written.where((k) => k.$2 == 'locked'), isEmpty, reason: 'atomic: $atomic');
+        await s.dispose();
+      }
+    });
+  });
+}
+
+final class _HydrateFails extends StorePlugin {
+  _HydrateFails(this.pk);
+  final String pk;
+
+  @override
+  String get name => 'decryptor';
+
+  @override
+  DocumentState afterHydrate(String table, String pk, DocumentState doc) =>
+      pk == this.pk ? throw StateError('bad key') : doc;
 }

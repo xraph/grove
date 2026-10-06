@@ -180,6 +180,21 @@ final class HybridClock {
     return last;
   }
 
+  /// Raises the last issued value to at least [floor], so the next [now] is
+  /// strictly after it whatever the wall clock reads.
+  ///
+  /// Unlike [update] there is no drift clamp: this seeds the clock from the
+  /// replica's own persisted history, which it must never stamp below, even
+  /// when the wall clock stepped back by more than the drift bound.
+  void advanceTo(HLC floor) {
+    if (floor.ts > _lastTs) {
+      _lastTs = floor.ts;
+      _lastC = floor.c;
+    } else if (floor.ts == _lastTs && floor.c > _lastC) {
+      _lastC = floor.c;
+    }
+  }
+
   /// Merges a remote value so the next [now] is after both. Port of Go
   /// `HybridClock.Update`, including the drift clamp.
   void update(HLC remote) {

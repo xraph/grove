@@ -25,9 +25,13 @@ void main() {
       });
     });
 
-    test('persistDebounceMs: 0 writes synchronously', () {
+    test('persistDebounceMs: 0 writes synchronously', () async {
       final storage = RecordingStorage();
       final store = CrdtStore('n1', HybridClock('n1'), storage: storage, persistDebounce: Duration.zero);
+      // Changed from crdt-js: nothing persists until hydration completes, so a
+      // write cannot overwrite what is still being read. After it, a write is
+      // synchronous.
+      await store.ready;
       store.setField('t', 'p', 'f', 1);
       expect(storage.savedPending, hasLength(1));
     });

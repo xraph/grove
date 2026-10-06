@@ -1,5 +1,6 @@
 import 'package:meta/meta.dart';
 
+import 'go_json.dart';
 import 'hlc.dart';
 import 'types.dart';
 import 'wire_helpers.dart';
@@ -89,19 +90,49 @@ final class PendingChange {
       );
 
   /// JSON form.
-  Map<String, Object?> toJson() => {
-        'change': change.toJson(),
-        if (rejection != null) 'rejection': rejection!.toJson(),
-        if (restamps != 0) 'restamps': restamps,
-      };
+  ///
+  /// A set element held as a [RawJson] (the exact key bytes of a remove) is
+  /// also listed under `raw_elements` by position, as its JSON text, so
+  /// [fromJson] restores it as a [RawJson] and a push after a restart sends
+  /// the same bytes.
+  Map<String, Object?> toJson() {
+    final elements = change.setOp?.elements ?? const <Object?>[];
+    final hasRaw = elements.any((e) => e is RawJson);
+    return {
+      'change': change.toJson(),
+      if (rejection != null) 'rejection': rejection!.toJson(),
+      if (restamps != 0) 'restamps': restamps,
+      if (hasRaw) 'raw_elements': [for (final e in elements) e is RawJson ? e.json : null],
+    };
+  }
 
-  /// Decodes the JSON form. A missing `change`, or a value of the wrong type,
-  /// throws a [FormatException].
+  /// Decodes the JSON form. A missing `change`, a `raw_elements` list that
+  /// does not match the set elements, or a value of the wrong type throws a
+  /// [FormatException].
   static PendingChange fromJson(Object? j) {
     final m = wireObj(j);
     if (m['change'] == null) throw const FormatException('crdt: pending change has no "change"');
+    var change = ChangeRecord.fromJson(m['change']);
+    final raw = m['raw_elements'];
+    if (raw != null) {
+      final texts = wireList<String?>(raw, (e) {
+        if (e == null || e is String) return e as String?;
+        throw FormatException('crdt: pending "raw_elements" entries must be strings or null, got $e');
+      });
+      final op = change.setOp;
+      if (op == null || op.elements.length != texts.length) {
+        throw const FormatException('crdt: pending "raw_elements" does not match the set elements');
+      }
+      change = change.copyWith(
+        setOp: SetOperation(
+          op.op,
+          [for (var i = 0; i < texts.length; i++) texts[i] == null ? op.elements[i] : RawJson(texts[i]!)],
+          tags: op.tags,
+        ),
+      );
+    }
     return PendingChange(
-      ChangeRecord.fromJson(m['change']),
+      change,
       rejection: m['rejection'] == null ? null : PendingRejection.fromJson(m['rejection']),
       restamps: wireInt(m, 'restamps'),
     );

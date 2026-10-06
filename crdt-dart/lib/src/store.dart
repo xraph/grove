@@ -44,6 +44,24 @@ final class PendingQueueFullError implements Exception {
   String toString() => message;
 }
 
+/// [CrdtStore.ready] completes with this when the persisted replica could
+/// not be read: the pending queue, or the document set as a whole.
+///
+/// The store then fails closed. It refuses writes and flushes (they throw a
+/// [StateError]) and never writes to storage, so the stored queue, which holds
+/// the user's unpushed offline edits, is never overwritten by a store that
+/// does not know what it held. Retry by constructing a new store.
+final class ReplicaUnavailable implements Exception {
+  /// Wraps the error the load failed with.
+  const ReplicaUnavailable(this.cause);
+
+  /// The error the load failed with.
+  final Object cause;
+
+  @override
+  String toString() => 'crdt: the persisted replica could not be read: $cause';
+}
+
 /// A serializable snapshot of a store. Port of crdt-js `StateSnapshot`, with
 /// the pending queue carrying rejection marks.
 final class StateSnapshot {
@@ -182,6 +200,14 @@ const List<TextDeltaSegment> _emptyDelta = <TextDeltaSegment>[];
 ///   object, and changing it throws instead of changing what the next read
 ///   returns.
 ///
+/// A document whose `afterHydrate` hook throws (a decryptor without its key)
+/// is quarantined for the life of this store: it is not served from storage,
+/// a local write to it throws a [StateError], and its stored bytes are never
+/// overwritten or deleted, by local writes or by remote changes. A remote
+/// change for it is still applied in memory and served, but not persisted,
+/// and each one is reported through `onStorageError`. The stored copy
+/// survives until the plugin is fixed or the app resets the replica.
+///
 /// Persistence is debounced over `persistDebounce`. [Duration.zero] writes
 /// synchronously when no earlier write is still in flight. Writes go out one
 /// flush at a time, in order. With an [AtomicReplicaStorage] each flush is one
@@ -223,6 +249,9 @@ final class CrdtStore {
       throw ArgumentError.value(nodeId, 'nodeId', 'must equal the clock node id "${clock.nodeId}"');
     }
     ready = _hydrate();
+    // A store nobody awaits must not raise an unhandled error; a caller that
+    // awaits ready still receives it.
+    ready.ignore();
   }
 
   /// The clock that stamps every local change.
@@ -239,8 +268,13 @@ final class CrdtStore {
 
   /// Completes when persisted state has been hydrated. The store is usable
   /// at once (it starts empty); await this before relying on persisted data.
-  /// It never completes with an error: a storage failure is reported through
-  /// `onStorageError` and hydration carries on with what it could read.
+  ///
+  /// Nothing is persisted until hydration succeeds, so a write made before
+  /// then cannot overwrite what is still being read. A document that cannot
+  /// be decoded, or whose `afterHydrate` throws, is reported and skipped (see
+  /// the quarantine on [CrdtStore]). When the pending queue, or the document
+  /// set as a whole, cannot be read, this completes with a
+  /// [ReplicaUnavailable] and the store fails closed.
   late final Future<void> ready;
 
   /// The node id stamped on new changes: `clock.nodeId`.
@@ -284,6 +318,12 @@ final class CrdtStore {
 
   bool _disposed = false;
   bool _persistStopped = false;
+  bool _hydrated = false;
+  Object? _unavailable;
+
+  /// Documents whose `afterHydrate` threw. Their stored bytes are never
+  /// overwritten or deleted by this store.
+  final Set<(String, String)> _quarantined = {};
 
   // --- Plugins ---
 
@@ -723,6 +763,7 @@ final class CrdtStore {
     _assertPendingCapacity();
     final t = goString(table);
     final p = goString(pk);
+    _checkNotQuarantined(t, p);
     final hlc = clock.now();
     final change = ChangeRecord(
       table: t,
@@ -749,6 +790,7 @@ final class CrdtStore {
     Object? value, {
     FieldState Function(FieldState? existing)? prebuilt,
   }) {
+    _checkNotQuarantined(change.table, change.pk);
     final previous = _captureFieldState(change.table, change.pk, change.field);
     final allowed = _plugins.dispatchBeforeWrite(WriteEvent(
       table: change.table,
@@ -1025,6 +1067,10 @@ final class CrdtStore {
   /// by a format over the same characters (the original spans) with each
   /// attribute set back to its value at the first character, or null.
   ///
+  /// Because undo reconciles the whole field toward its earlier value, it also
+  /// overrides concurrent edits to that field made since, as crdt-js undo
+  /// does when it restores the earlier field state.
+  ///
   /// Undoing a `deleteDocument` whose tombstone is still pending drops it from
   /// the queue and restores the document's earlier tombstone state. Once the
   /// tombstone was pushed (or a later tombstone superseded it) undo returns
@@ -1218,6 +1264,9 @@ final class CrdtStore {
         final c = _normalizeKeys(allowed);
         _applyChangeInternal(c);
         affected.add((table: c.table, pk: c.pk));
+        if (_quarantined.contains((c.table, c.pk))) {
+          _reportStorage(StateError('crdt: document ${c.table}/${c.pk} is quarantined; a remote change is held in memory only'));
+        }
         // The merge installed a new document object, so re-read the result.
         final result = _getDoc(c.table, c.pk)?.fields[c.field];
         event.result = result;
@@ -1488,47 +1537,77 @@ final class CrdtStore {
 
   // --- Hydration and persistence ---
 
-  Future<T> _safeLoad<T>(Future<T> Function() load, T fallback) async {
-    try {
-      return await load();
-    } on Object catch (e) {
-      _reportStorage(e);
-      return fallback;
-    }
-  }
-
   Future<void> _hydrate() async {
-    final stateFuture = _safeLoad(
-      () => _storage.loadState(onUnreadable: _reportStorage),
-      <String, Map<String, DocumentState>>{},
-    );
-    final pendingFuture = _safeLoad(_storage.loadPendingChanges, <PendingChange>[]);
+    // Start both loads before awaiting either, and catch each, so a failure
+    // of one is never an unhandled error while the other is awaited.
+    Object? failure;
+    Future<T?> load<T>(Future<T> Function() call) async {
+      try {
+        return await call();
+      } on Object catch (e) {
+        failure ??= e;
+        return null;
+      }
+    }
+
+    final stateFuture = load(() => _storage.loadState(onUnreadable: _reportStorage));
+    final pendingFuture = load(_storage.loadPendingChanges);
     final loaded = await stateFuture;
     final loadedPending = await pendingFuture;
-    if (_disposed) return;
+    final cause = failure;
+    if (cause != null) {
+      // Fail closed: without the stored queue the store cannot know what is
+      // unpushed, and anything it wrote would overwrite it.
+      _unavailable = cause;
+      _persistStopped = true;
+      _persistTimer?.cancel();
+      _persistTimer = null;
+      _reportStorage(cause);
+      throw ReplicaUnavailable(cause);
+    }
 
     final hydrated = <DocKey>[];
-    for (final t in loaded.entries) {
+    for (final t in loaded!.entries) {
       for (final d in t.value.entries) {
-        // Keep any document written while hydration ran.
-        if (_getDoc(t.key, d.key) != null) continue;
         final DocumentState doc;
         try {
           doc = _plugins.dispatchAfterHydrate(t.key, d.key, _normalizeHlcKeys(d.value));
         } on Object catch (e) {
-          // A decryptor that failed: the document is not served.
+          // A decryptor that failed: the document is not served, and its
+          // stored bytes are left alone.
+          _quarantined.add((t.key, d.key));
           _reportStorage(e);
           continue;
         }
-        _setDocument(t.key, d.key, doc);
+        final current = _getDoc(t.key, d.key);
+        var next = doc;
+        if (current != null) {
+          // A write landed while hydration ran. Merge rather than drop the
+          // stored state: nothing was persisted yet, so the stored document
+          // still holds fields the in-memory one lacks.
+          try {
+            next = mergeState(doc, current);
+          } on CrdtMergeError catch (e) {
+            _reportStorage(e);
+            next = current;
+          }
+        }
+        _setDocument(t.key, d.key, next);
         hydrated.add((table: t.key, pk: d.key));
       }
     }
-    if (loadedPending.isNotEmpty) _pending.insertAll(0, loadedPending);
+    if (loadedPending!.isNotEmpty) _pending.insertAll(0, loadedPending);
 
-    // Never mint a clock below one this replica already issued.
+    // Never mint a clock below one this replica already issued or holds. This
+    // is the replica's own history, so the drift clamp of update() must not
+    // apply.
     final max = maxHlc;
-    if (!max.isZero) clock.update(max);
+    if (!max.isZero) clock.advanceTo(max);
+
+    _hydrated = true;
+    // Writes made while hydrating are queued already; their pending entries
+    // now follow the loaded ones, so the flush writes the whole queue.
+    if (_docQueue.isNotEmpty || _pendingDirty) _requestPersist();
 
     for (final l in List.of(_globalListeners)) {
       l();
@@ -1545,7 +1624,7 @@ final class CrdtStore {
   /// Flushes now (no debounce), arms the debounce timer, or waits for the
   /// outermost [transact] to end.
   void _requestPersist() {
-    if (_txDepth > 0 || _persistStopped) return;
+    if (_txDepth > 0 || _persistStopped || !_hydrated) return;
     if (_persistDebounce <= Duration.zero) {
       _drain();
       return;
@@ -1581,7 +1660,7 @@ final class CrdtStore {
   /// back on the queue for the next flush to retry. A broken encryptor
   /// therefore blocks persistence rather than letting plaintext through.
   void _drain() {
-    if (_persistStopped || (_docQueue.isEmpty && !_pendingDirty)) return;
+    if (_persistStopped || !_hydrated || (_docQueue.isEmpty && !_pendingDirty)) return;
     final queued = _docQueue;
     _docQueue = {};
     final pendingDirty = _pendingDirty;
@@ -1590,6 +1669,7 @@ final class CrdtStore {
     try {
       for (final e in queued.entries) {
         for (final pk in e.value) {
+          if (_quarantined.contains((e.key, pk))) continue;
           final doc = _getDoc(e.key, pk);
           docs[(e.key, pk)] = doc == null ? null : _plugins.dispatchBeforePersist(e.key, pk, doc);
         }
@@ -1642,7 +1722,20 @@ final class CrdtStore {
   /// Call it before unload, or in tests that assert on storage.
   ///
   /// The pending queue is written only when it changed since the last flush.
+  ///
+  /// Throws a [StateError] when the replica is unavailable (see
+  /// [ReplicaUnavailable]).
   Future<void> flushPersistence() async {
+    final unavailable = _unavailable;
+    if (unavailable != null) throw StateError('crdt: the replica is unavailable: $unavailable');
+    if (!_hydrated) {
+      // Nothing may be written before hydration; wait for it, then flush.
+      try {
+        await ready;
+      } on ReplicaUnavailable catch (e) {
+        throw StateError('crdt: the replica is unavailable: ${e.cause}');
+      }
+    }
     _persistTimer?.cancel();
     _persistTimer = null;
     _drain();
@@ -1659,7 +1752,13 @@ final class CrdtStore {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
-    await flushPersistence();
+    if (_unavailable == null) {
+      try {
+        await flushPersistence();
+      } on StateError {
+        // The replica became unavailable while hydrating: nothing to flush.
+      }
+    }
     _persistStopped = true;
     _persistTimer?.cancel();
     _persistTimer = null;
@@ -1668,6 +1767,14 @@ final class CrdtStore {
 
   void _checkWritable() {
     if (_disposed) throw StateError('crdt: the store is disposed');
+    final unavailable = _unavailable;
+    if (unavailable != null) throw StateError('crdt: the replica is unavailable: $unavailable');
+  }
+
+  void _checkNotQuarantined(String table, String pk) {
+    if (_quarantined.contains((table, pk))) {
+      throw StateError('crdt: document $table/$pk is quarantined: its afterHydrate hook failed');
+    }
   }
 
   void _reportStorage(Object error) {

@@ -253,6 +253,26 @@ void main() {
       await expectLater(KeyValueReplicaStorage(kv).loadState(), throwsFormatException);
     });
 
+    test('a pending set remove keeps its RawJson elements through JSON, and a bad raw_elements throws', () {
+      final c = ChangeRecord(
+        table: 't',
+        pk: '1',
+        field: 's',
+        crdtType: CrdtType.set,
+        hlc: n(3),
+        nodeId: 'n1',
+        setOp: SetOperation(SetOpType.remove, const [RawJson('"a<b"'), 'plain'], tags: [OrSetTag('js', n(1))]),
+      );
+      final json = PendingChange(c).toJson();
+      expect(json['raw_elements'], ['"a<b"', null]);
+      final back = PendingChange.fromJson(jsonDecode(encodeWire(json)));
+      expect(encodeWire(back.change.toJson()), encodeWire(c.toJson()));
+      expect(back.change.setOp!.elements.first, isA<RawJson>());
+      expect(PendingChange(lwwChange(1)).toJson().containsKey('raw_elements'), isFalse);
+      expect(() => PendingChange.fromJson({...json, 'raw_elements': [null]}), throwsFormatException);
+      expect(() => PendingChange.fromJson({...json, 'raw_elements': [1, null]}), throwsFormatException);
+    });
+
     test('with onUnreadable, an unreadable document is reported by key and skipped', () async {
       final kv = MapReplicaKeyValue();
       final s = KeyValueReplicaStorage(kv);

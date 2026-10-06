@@ -261,18 +261,54 @@ void main() {
       expect(storage.commits.single.documents[('t', '1')]!.fields.keys, unorderedEquals(['a', 'b']));
     });
 
-    test('a failing load is reported and ready still completes with a usable store', () async {
-      for (final sync in [false, true]) {
-        final errors = <Object>[];
-        final storage = RecordingStorage()
-          ..failLoad = StateError('closed')
-          ..failLoadPending = StateError('closed')
-          ..throwSynchronously = sync;
-        final store = CrdtStore('n1', HybridClock('n1'), storage: storage, onStorageError: errors.add);
-        await expectLater(store.ready, completes);
-        expect(errors, hasLength(2), reason: 'sync: $sync');
-        expect(store.setField('t', '1', 'a', 1), isNotNull);
+    test('a failing load fails closed: ready errors with ReplicaUnavailable and the store refuses writes', () async {
+      for (final which in ['pending', 'state']) {
+        for (final sync in [false, true]) {
+          final errors = <Object>[];
+          final storage = RecordingStorage()..throwSynchronously = sync;
+          if (which == 'pending') {
+            storage.failLoadPending = StateError('closed');
+          } else {
+            storage.failLoad = StateError('closed');
+          }
+          final store = CrdtStore('n1', HybridClock('n1'), storage: storage, onStorageError: errors.add);
+          await expectLater(
+            store.ready,
+            throwsA(isA<ReplicaUnavailable>().having((e) => e.cause, 'cause', isA<StateError>())),
+            reason: '$which sync: $sync',
+          );
+          expect(errors.single, isA<StateError>());
+          expect(() => store.setField('t', '1', 'a', 1), throwsStateError);
+          expect(() => store.applyChanges([]), throwsStateError);
+          await expectLater(store.flushPersistence(), throwsStateError);
+          await store.dispose();
+          expect(storage.saved, isEmpty);
+          expect(storage.savedPending, isEmpty);
+        }
       }
+    });
+
+    test('an unread pending queue is never overwritten, even by a write made while it loads', () async {
+      final gate = Completer<void>();
+      final kv = _GatedKv(gate.future);
+      kv.entries['pending'] = 'stored queue bytes';
+      final storage = KeyValueReplicaStorage(kv);
+      final store = CrdtStore('n1', HybridClock('n1'), storage: storage, persistDebounce: Duration.zero);
+      store.setField('t', '1', 'a', 1); // before the load fails
+      kv.failGet = StateError('transient');
+      gate.complete();
+      await expectLater(store.ready, throwsA(isA<ReplicaUnavailable>()));
+      expect(() => store.setField('t', '1', 'b', 2), throwsStateError);
+      await store.dispose();
+      expect(kv.puts, 0);
+      expect(kv.batches, 0);
+      expect(kv.entries['pending'], 'stored queue bytes');
+    });
+
+    test('a store nobody awaits does not raise its load failure as an unhandled error', () async {
+      final storage = RecordingStorage()..failLoadPending = StateError('closed');
+      CrdtStore('n1', HybridClock('n1'), storage: storage);
+      await pumpEventQueue();
     });
 
     test('a corrupt stored document is skipped on hydrate, reported with its key, and the rest load', () async {
@@ -293,13 +329,17 @@ void main() {
       expect(second.pending, hasLength(2));
     });
 
-    test('a corrupt stored pending queue is reported and ready completes', () async {
+    test('a corrupt stored pending queue fails closed', () async {
       final kv = MapReplicaKeyValue()..entries['pending'] = '{"not":"a list"}';
       final errors = <Object>[];
       final store = CrdtStore('n1', HybridClock('n1'), storage: KeyValueReplicaStorage(kv), onStorageError: errors.add);
-      await expectLater(store.ready, completes);
+      await expectLater(
+        store.ready,
+        throwsA(isA<ReplicaUnavailable>().having((e) => e.cause, 'cause', isA<FormatException>())),
+      );
       expect(errors.single, isA<FormatException>());
-      expect(store.pending, isEmpty);
+      expect(() => store.setField('t', '1', 'a', 1), throwsStateError);
+      expect(kv.entries['pending'], '{"not":"a list"}');
     });
 
     test('a session closed underneath the store is reported and does not crash', () async {
@@ -380,6 +420,27 @@ void main() {
       await store.ready;
       expect(store.getDocument('t', '1')!['a'], 'fresh');
       expect(store.pending.map((p) => p.change.pk), ['9', '1']);
+    });
+
+    test('a write made while hydrating merges with the stored document and persists after ready', () async {
+      final kv = MapReplicaKeyValue();
+      final first = CrdtStore('n1', HybridClock('n1'), storage: KeyValueReplicaStorage(kv));
+      await first.ready;
+      first.setField('t', '1', 'stored', 'kept');
+      await first.flushPersistence();
+
+      final storage = RecordingAtomicStorage()..preloaded = {'t': {'1': first.getDocumentState('t', '1')!}};
+      storage.preloadedPending = first.pending;
+      final second = CrdtStore('n1', HybridClock('n1'), storage: storage, persistDebounce: Duration.zero);
+      second.setField('t', '1', 'fresh', 'new');
+      expect(storage.commits, isEmpty); // nothing persists before hydration
+      await second.ready;
+      expect(second.getDocument('t', '1'), containsPair('stored', 'kept'));
+      expect(second.getDocument('t', '1'), containsPair('fresh', 'new'));
+      await second.flushPersistence();
+      final commit = storage.commits.single;
+      expect(commit.documents[('t', '1')]!.fields.keys, unorderedEquals(['stored', 'fresh']));
+      expect(commit.pending!.map((p) => p.change.field), ['stored', 'fresh']);
     });
 
     test('table, key and field names are held as the server holds them', () {
@@ -508,6 +569,42 @@ final class _ClosableKv extends _DelegatingKv {
   @override
   Future<void> batch(void Function(ReplicaKeyValueBatch batch) build) {
     _check();
+    return super.batch(build);
+  }
+}
+
+/// A key-value store whose reads wait for [gate], can then fail, and which
+/// counts every write.
+final class _GatedKv extends _DelegatingKv {
+  _GatedKv(this.gate);
+  final Future<void> gate;
+  Object? failGet;
+  int puts = 0;
+  int batches = 0;
+
+  @override
+  Future<String?> get(String key) async {
+    await gate;
+    final f = failGet;
+    if (f != null) throw f;
+    return super.get(key);
+  }
+
+  @override
+  Future<Map<String, String>> scan(String prefix) async {
+    await gate;
+    return super.scan(prefix);
+  }
+
+  @override
+  Future<void> put(String key, String value) {
+    puts++;
+    return super.put(key, value);
+  }
+
+  @override
+  Future<void> batch(void Function(ReplicaKeyValueBatch batch) build) {
+    batches++;
     return super.batch(build);
   }
 }
