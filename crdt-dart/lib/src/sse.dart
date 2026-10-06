@@ -83,6 +83,15 @@ const _errorBodyTimeout = Duration(seconds: 10);
 ///
 /// Header names are lower-cased before the request is made, so a header from
 /// `auth` replaces a static one whatever its case.
+///
+/// The server is expected to send a keep-alive (an SSE comment line) at least
+/// every 15 seconds. The default `idleTimeout` of 45 seconds is three missed
+/// keep-alives. A server that sends none makes a quiet stream reconnect every
+/// `idleTimeout`; that is quiet: it emits [StreamDisconnected] and then
+/// [StreamConnected], both with [ConnectionReason.idle], and no [StreamError].
+/// Each reconnect resumes from [lastHlc], so no change is lost, but a server
+/// that drops per-connection state on disconnect (the grove extension removes
+/// the node's presence when `node_id` is sent) does so on every cycle.
 final class CrdtStream implements CrdtSubscription {
   /// Creates a stream for the server at [baseUrl], connecting to [streamPath]
   /// under it.
@@ -135,6 +144,7 @@ final class CrdtStream implements CrdtSubscription {
   final Set<void Function(CrdtStreamEvent)> _handlers = {};
   Completer<void>? _abort;
   bool _idleFired = false;
+  ConnectionReason _nextReason = ConnectionReason.normal;
   bool _connected = false;
   HLC? _lastHlc;
   bool _shouldReconnect = false;
@@ -167,6 +177,7 @@ final class CrdtStream implements CrdtSubscription {
     // loops and leak the first connection.
     if (_shouldReconnect) return;
     _shouldReconnect = true;
+    _nextReason = ConnectionReason.normal;
     final gen = ++_generation;
     unawaited(_connectLoop(gen));
   }
@@ -210,9 +221,11 @@ final class CrdtStream implements CrdtSubscription {
       if (config.nodeId.isNotEmpty) 'node_id': config.nodeId,
     };
     final slash = streamPath.startsWith('/') ? streamPath : '/$streamPath';
+    // A query already on baseUrl is kept, and ours is added to it.
+    final merged = {...baseUrl.queryParameters, ...query};
     return baseUrl.replace(
       path: '${baseUrl.path}$slash',
-      queryParameters: query.isEmpty ? null : query,
+      queryParameters: merged.isEmpty ? null : merged,
     );
   }
 
@@ -274,8 +287,9 @@ final class CrdtStream implements CrdtSubscription {
   Future<void> _connectLoop(int gen) async {
     while (gen == _generation) {
       Object? failure;
+      var idle = false;
       try {
-        await _connectOnce(gen);
+        idle = await _connectOnce(gen);
       } on Object catch (error) {
         failure = error;
       }
@@ -294,7 +308,16 @@ final class CrdtStream implements CrdtSubscription {
 
       if (_connected) {
         _connected = false;
-        _emit(const StreamDisconnected());
+        _emit(
+          StreamDisconnected(
+            reason: idle ? ConnectionReason.idle : ConnectionReason.normal,
+          ),
+        );
+      }
+      if (idle) {
+        // A quiet stream is not a failing one: do not grow the wait for it.
+        _nextReason = ConnectionReason.idle;
+        _backoff.reset();
       }
 
       if (gen != _generation) break;
@@ -339,10 +362,11 @@ final class CrdtStream implements CrdtSubscription {
     }
   }
 
-  Future<void> _connectOnce(int gen) async {
+  /// One connection. Returns true when it ended because the stream went idle.
+  Future<bool> _connectOnce(int gen) async {
     // Last line of defence: _connectLoop checks this before calling in, but a
     // stale generation must never be able to assign _abort.
-    if (gen != _generation) return;
+    if (gen != _generation) return false;
 
     final abort = Completer<void>();
     _abort = abort;
@@ -353,18 +377,46 @@ final class CrdtStream implements CrdtSubscription {
       final authHeaders = await _readAuth();
       // A disconnect (or a newer generation) may have landed while the
       // credentials were pending. Never open a connection for it.
-      if (gen != _generation) return;
+      if (gen != _generation) return false;
 
-      final response = await _connect(buildStreamUrl(), {
+      // The idle timer also covers the wait for the response, so a server
+      // that accepts the connection and never answers does not park the loop.
+      _armIdleTimer(gen);
+      final connecting = _connect(buildStreamUrl(), {
         'accept': 'text/event-stream',
         'cache-control': 'no-cache',
         ..._headers,
         ...authHeaders,
       }, abort.future);
+      final response = await Future.any<SseResponse?>([
+        connecting,
+        abort.future.then<SseResponse?>((_) => null),
+      ]);
+      if (response == null) {
+        // Aborted before any answer: a late answer must not leak its body.
+        unawaited(
+          connecting.then<void>(
+            (late) =>
+                _release(late.body.listen((_) {}, onError: (Object _) {})),
+            onError: (Object _) {},
+          ),
+        );
+        if (gen == _generation && _idleFired) {
+          throw NetworkError(
+            'CRDT stream got no response within '
+            '${config.idleTimeout.inMilliseconds}ms',
+            code: CrdtErrorCode.syncTimeout,
+          );
+        }
+        return false;
+      }
 
       // A newer generation may have taken over while the request was in
       // flight. Do not touch _connected or emit on behalf of a stale one.
-      if (gen != _generation) return;
+      if (gen != _generation) {
+        _release(response.body.listen((_) {}, onError: (Object _) {}));
+        return false;
+      }
 
       final serverTime = _observeDate(response.headers);
       final status = response.status;
@@ -380,17 +432,13 @@ final class CrdtStream implements CrdtSubscription {
       }
 
       _connected = true;
-      _backoff.reset();
       _armIdleTimer(gen);
-      _emit(const StreamConnected());
+      final reason = _nextReason;
+      _nextReason = ConnectionReason.normal;
+      _emit(StreamConnected(reason: reason));
 
       await _read(gen, response.body, abort);
-      if (gen == _generation && _idleFired) {
-        throw NetworkError(
-          'CRDT stream idle for ${config.idleTimeout.inMilliseconds}ms',
-          code: CrdtErrorCode.syncTimeout,
-        );
-      }
+      return gen == _generation && _idleFired;
     } finally {
       if (!abort.isCompleted) abort.complete();
       if (identical(_abort, abort)) _abort = null;
@@ -413,7 +461,12 @@ final class CrdtStream implements CrdtSubscription {
       }
     }
 
-    final parser = _SseParser(_processEvent);
+    // An event a handler's disconnect() has made stale is dropped, not
+    // delivered: the rest of the chunk is of no interest to anyone.
+    final parser = _SseParser((type, data) {
+      if (gen == _generation) _processEvent(type, data);
+    });
+    var sawBytes = false;
     final sub = body
         .transform(const Utf8Decoder(allowMalformed: true))
         .listen(
@@ -421,6 +474,13 @@ final class CrdtStream implements CrdtSubscription {
             // A newer generation may have taken over while this read was
             // pending. Stop without touching shared state.
             if (gen != _generation) return finish();
+            if (!sawBytes) {
+              // The server is talking: only now is this a working connection.
+              // One that answers 200 and hangs up at once never gets here, so
+              // it keeps backing off.
+              sawBytes = true;
+              _backoff.reset();
+            }
             _armIdleTimer(gen);
             try {
               parser.add(chunk);
@@ -531,7 +591,6 @@ final class CrdtStream implements CrdtSubscription {
             'Failed to parse SSE $type event: $why',
             code: CrdtErrorCode.validationFailed,
             phase: SyncPhase.stream,
-            cause: error,
           ),
         ),
       );

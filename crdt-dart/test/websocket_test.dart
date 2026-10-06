@@ -42,6 +42,11 @@ final class FakeWs implements WsConnection {
     if (!_in.isClosed) _in.add(jsonEncode(frame));
   }
 
+  /// The socket fails with [error], as a broken connection does.
+  void serverError(Object error) {
+    if (!_in.isClosed) _in.addError(error);
+  }
+
   void serverSendsRaw(String text) {
     if (!_in.isClosed) _in.add(text);
   }
@@ -737,6 +742,58 @@ void main() {
       await t.close();
     });
 
+    test('an error frame for a request that already timed out is dropped', () {
+      fakeAsync((async) {
+        final c = Connector();
+        final t = _transport(c, requestTimeout: const Duration(seconds: 5));
+        final sub = t.subscribe(const StreamConfig(tables: ['docs']));
+        final events = _collect(sub);
+        sub.connect();
+        async.flushMicrotasks();
+        t.pull(_pullReq()).then<void>((_) {}, onError: (Object _) {});
+        async.flushMicrotasks();
+        async.elapse(const Duration(seconds: 6));
+        c.latest.serverSends({
+          'type': 'error',
+          'request_id': 'r1',
+          'payload': {'error': 'late'},
+        });
+        async.flushMicrotasks();
+        expect(events.whereType<StreamError>(), isEmpty);
+        // An error with no id is still a stream error.
+        c.latest.serverSends({
+          'type': 'error',
+          'payload': {'error': 'real'},
+        });
+        async.flushMicrotasks();
+        expect(events.whereType<StreamError>(), hasLength(1));
+        t.close();
+      });
+    });
+
+    test('a handshake that never finishes fails the request and a late socket '
+        'is closed', () {
+      fakeAsync((async) {
+        final gate = Completer<WsConnection>();
+        final t = WebSocketTransport(
+          url: _url,
+          requestTimeout: const Duration(seconds: 5),
+          pingInterval: Duration.zero,
+          connect: (u, h, p) => gate.future,
+        );
+        Object? error;
+        t.pull(_pullReq()).then<void>((_) {}, onError: (Object e) => error = e);
+        async.elapse(const Duration(seconds: 6));
+        expect(error, isA<NetworkError>());
+        expect((error! as NetworkError).message, contains('connect timed out'));
+        final late = FakeWs();
+        gate.complete(late);
+        async.flushMicrotasks();
+        expect(late.closed, isTrue);
+        t.close();
+      });
+    });
+
     group('frames the transport does not understand', () {
       test(
         'an unknown message type is ignored and the socket keeps working',
@@ -815,17 +872,19 @@ void main() {
       test('headers change between reconnects, each connect sees the current '
           'headers', () async {
         final c = Connector();
-        final auth = _FnAuth((n) => {'Authorization': 'Bearer t$n'});
+        var token = 't1';
+        final auth = _FnAuth((n) => {'Authorization': 'Bearer $token'});
         final t = _transport(c, auth: auth);
         final sub = t.subscribe(const StreamConfig(tables: ['docs']));
         sub.connect();
         await pumpEventQueue();
+        token = 't2';
         c.latest.drop();
         await pumpEventQueue();
+        token = 't3';
         c.latest.drop();
         await pumpEventQueue();
         expect(c.calls, 3);
-        expect(auth.calls, 3);
         expect(
           [for (final h in c.headers) h['Authorization']],
           ['Bearer t1', 'Bearer t2', 'Bearer t3'],
@@ -838,8 +897,9 @@ void main() {
           'connect calls', () {
         fakeAsync((async) {
           final c = Connector();
+          var cancel = false;
           final auth = _FnAuth(
-            (n) => n == 1 ? {'authorization': 'Bearer a'} : throw _cancelled(),
+            (n) => cancel ? throw _cancelled() : {'authorization': 'Bearer a'},
           );
           final t = WebSocketTransport(
             url: _url,
@@ -853,10 +913,10 @@ void main() {
           sub.connect();
           async.flushMicrotasks();
           expect(c.calls, 1);
+          cancel = true;
           c.latest.drop();
           async.elapse(const Duration(minutes: 10));
           expect(c.calls, 1);
-          expect(auth.calls, 2);
           final errors = events.whereType<StreamError>().toList();
           expect(errors, hasLength(1));
           expect(
@@ -867,6 +927,161 @@ void main() {
           expect(async.pendingTimers, isEmpty);
           t.close();
         });
+      });
+
+      test('after a switch to bob, a push opens a new handshake with bob\'s '
+          'headers and sends nothing on alice\'s socket', () async {
+        final c = Connector();
+        var token = 'alice';
+        final t = _transport(
+          c,
+          auth: _FnAuth((n) => {'authorization': 'Bearer $token'}),
+        );
+        await pumpEventQueue();
+        final alice = c.latest;
+        expect(c.headers.single['authorization'], 'Bearer alice');
+
+        token = 'bob';
+        c.onNew = (ws) => ws.respond = (m) => {
+          'type': 'push_response',
+          'request_id': m['request_id'],
+          'payload': {'merged': 1, 'latest_hlc': _hlc0},
+        };
+        final pushed = await t.push(_pushReq());
+        expect(pushed.merged, 1);
+        expect(c.sockets, hasLength(2));
+        expect(c.headers.last['authorization'], 'Bearer bob');
+        expect(alice.sent, isEmpty);
+        expect(alice.closed, isTrue);
+        expect(c.latest.ofType('push_request'), hasLength(1));
+        await t.close();
+      });
+
+      test('a request in flight on alice\'s socket fails on the switch and is '
+          'never replayed on bob\'s', () async {
+        final c = Connector();
+        var token = 'alice';
+        final t = _transport(
+          c,
+          auth: _FnAuth((n) => {'authorization': 'Bearer $token'}),
+        );
+        await pumpEventQueue();
+        final first = t.push(_pushReq());
+        final failed = expectLater(first, throwsA(isA<NetworkError>()));
+        await pumpEventQueue();
+        final alice = c.latest;
+        expect(alice.ofType('push_request'), hasLength(1));
+
+        token = 'bob';
+        c.onNew = (ws) => ws.respond = (m) => {
+          'type': 'push_response',
+          'request_id': m['request_id'],
+          'payload': {'merged': 1, 'latest_hlc': _hlc0},
+        };
+        await t.push(_pushReq());
+        await failed;
+        expect(alice.ofType('push_request'), hasLength(1));
+        expect(c.latest.ofType('push_request'), hasLength(1));
+        await t.close();
+      });
+
+      test(
+        'a subscription resubscribes on the new socket after a switch',
+        () async {
+          final c = Connector();
+          var token = 'alice';
+          final t = _transport(
+            c,
+            auth: _FnAuth((n) => {'authorization': 'Bearer $token'}),
+          );
+          final sub = t.subscribe(const StreamConfig(tables: ['docs']));
+          final events = _collect(sub);
+          sub.connect();
+          await pumpEventQueue();
+          token = 'bob';
+          c.onNew = (ws) => ws.respond = (m) => {
+            'type': 'pull_response',
+            'request_id': m['request_id'],
+            'payload': {'changes': <Object?>[], 'latest_hlc': _hlc0},
+          };
+          await t.pull(_pullReq());
+          expect(c.sockets, hasLength(2));
+          expect(c.latest.ofType('subscribe'), hasLength(1));
+          expect(_types(events), ['connected', 'disconnected', 'connected']);
+          // The bounce is not a failure: nothing reconnects on top of it.
+          await pumpEventQueue();
+          expect(c.sockets, hasLength(2));
+          sub.disconnect();
+          await t.close();
+        },
+      );
+
+      test('the provider throws cancelled with the socket open: the push fails '
+          'with it, the socket closes, and nothing reconnects', () {
+        fakeAsync((async) {
+          final c = Connector();
+          var cancel = false;
+          final t = WebSocketTransport(
+            url: _url,
+            connect: c.call,
+            auth: _FnAuth(
+              (n) =>
+                  cancel ? throw _cancelled() : {'authorization': 'Bearer a'},
+            ),
+            pingInterval: Duration.zero,
+            backoff: _fast,
+          );
+          final sub = t.subscribe(const StreamConfig(tables: ['docs']));
+          final events = _collect(sub);
+          sub.connect();
+          async.flushMicrotasks();
+          final alice = c.latest;
+
+          cancel = true;
+          Object? error;
+          t
+              .push(_pushReq())
+              .then<void>((_) {}, onError: (Object e) => error = e);
+          async.elapse(const Duration(minutes: 10));
+          expect(error, isA<CrdtError>());
+          expect((error! as CrdtError).code, CrdtErrorCode.cancelled);
+          expect(alice.closed, isTrue);
+          expect(alice.ofType('push_request'), isEmpty);
+          expect(c.calls, 1);
+          expect(sub.connected, isFalse);
+          expect(
+            events.whereType<StreamError>().map(
+              (e) => (e.error as CrdtError).code,
+            ),
+            [CrdtErrorCode.cancelled],
+          );
+          expect(async.pendingTimers, isEmpty);
+          t.close();
+        });
+      });
+
+      test('another auth error fails that request without retry and leaves '
+          'the socket alone', () async {
+        final c = Connector();
+        var fail = false;
+        final t = _transport(
+          c,
+          auth: _FnAuth(
+            (n) => fail ? throw Exception('token endpoint down') : {'a': 'b'},
+          ),
+        );
+        await pumpEventQueue();
+        fail = true;
+        await expectLater(
+          t.push(_pushReq()),
+          throwsA(
+            isA<AuthError>().having((e) => e.retryable, 'retryable', isFalse),
+          ),
+        );
+        expect(c.sockets, hasLength(1));
+        expect(c.latest.closed, isFalse);
+        expect(c.latest.sent, isEmpty);
+        await t.close();
       });
 
       test('a cancellation passes through to pull unwrapped and nothing '
@@ -972,6 +1187,100 @@ void main() {
         await t.close();
       });
 
+      test('a thrown error that names the url leaves neither the message nor '
+          'the cause with a query value', () async {
+        // What dart:io says about a refused upgrade, `http://` form included.
+        final c = Connector()
+          ..failures.addAll([
+            NetworkError('eager'),
+            Exception(
+              "Connection to 'http://127.0.0.1:63218/ws?token=sekrit#' was "
+              'not upgraded to websocket, HTTP status code: 403',
+            ),
+          ]);
+        final t = _transport(
+          c,
+          url: Uri.parse('ws://127.0.0.1:63218/ws?token=sekrit'),
+        );
+        await pumpEventQueue();
+        Object? caught;
+        try {
+          await t.pull(_pullReq());
+        } on Object catch (e) {
+          caught = e;
+        }
+        final error = caught! as NetworkError;
+        expect(error.message, isNot(contains('sekrit')));
+        expect('${error.cause}', isNot(contains('sekrit')));
+        expect(error.message, contains('403'));
+        expect(
+          error.message,
+          contains('http://127.0.0.1:63218/ws?token=REDACTED'),
+        );
+        await t.close();
+      });
+
+      test('a socket drop names no secret, in the message or the cause', () async {
+        final c = Connector();
+        final t = _transport(
+          c,
+          url: Uri.parse('wss://x/ws?token=sekrit'),
+          auth: StaticAuthProvider({'Authorization': 'Bearer hdr-sekrit'}),
+        );
+        final sub = t.subscribe(const StreamConfig(tables: ['docs']));
+        final events = _collect(sub);
+        sub.connect();
+        await pumpEventQueue();
+        // On the web the auth values are in the URL the browser connected to.
+        c.latest.serverError(
+          Exception(
+            'lost wss://x/ws?token=sekrit&authorization=Bearer+hdr-sekrit now',
+          ),
+        );
+        await pumpEventQueue();
+        final error =
+            events.whereType<StreamError>().first.error as NetworkError;
+        for (final text in [error.message, '${error.cause}', '$error']) {
+          expect(text, isNot(contains('sekrit')));
+        }
+        expect(
+          error.message,
+          contains('wss://x/ws?token=REDACTED&authorization=REDACTED'),
+        );
+        sub.disconnect();
+        await t.close();
+      });
+
+      test('two secrets where one contains the other are both removed whole, '
+          'whatever their case', () async {
+        final c = Connector()
+          ..failures.addAll([
+            NetworkError('eager'),
+            Exception(
+              'bad BEARER Hdr-Sekrit and SEKRIT, retry with bearer+hdr-sekrit',
+            ),
+          ]);
+        final t = _transport(
+          c,
+          url: Uri.parse('wss://x/ws?token=sekrit'),
+          auth: StaticAuthProvider({'Authorization': 'Bearer hdr-sekrit'}),
+        );
+        await pumpEventQueue();
+        Object? caught;
+        try {
+          await t.pull(_pullReq());
+        } on Object catch (e) {
+          caught = e;
+        }
+        final error = caught! as NetworkError;
+        expect(
+          error.message,
+          'CRDT ws connection failed: Exception: bad REDACTED and REDACTED, retry with REDACTED',
+        );
+        expect('${error.cause}', isNot(contains('ekrit')));
+        await t.close();
+      });
+
       test('toString shows the url with its query values hidden', () async {
         final t = WebSocketTransport(
           url: Uri.parse('wss://user:pw@host:9/ws?token=sekrit&a=b'),
@@ -979,7 +1288,10 @@ void main() {
         );
         expect(t.toString(), isNot(contains('sekrit')));
         expect(t.toString(), isNot(contains('pw')));
-        expect(t.toString(), contains('wss://host:9/ws?token=***&a=***'));
+        expect(
+          t.toString(),
+          contains('wss://host:9/ws?token=REDACTED&a=REDACTED'),
+        );
         await t.close();
       });
 

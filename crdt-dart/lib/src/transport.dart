@@ -102,16 +102,37 @@ final class StreamError extends CrdtStreamEvent {
   final Object error;
 }
 
+/// Why a connection event happened. New in the Dart port.
+enum ConnectionReason {
+  /// The usual: a first connect, a requested disconnect, a server hang-up or
+  /// an error (an error also arrives as a [StreamError]).
+  normal,
+
+  /// The stream went quiet for `StreamConfig.idleTimeout` and was recycled.
+  /// Not an error: a server that sends no keep-alive makes every quiet stream
+  /// do this, and no [StreamError] is emitted for it. A [StreamDisconnected]
+  /// with this reason is followed by a [StreamConnected] with this reason when
+  /// the new connection comes up.
+  idle,
+}
+
 /// The connection came up.
 final class StreamConnected extends CrdtStreamEvent {
   /// Creates the event.
-  const StreamConnected();
+  const StreamConnected({this.reason = ConnectionReason.normal});
+
+  /// [ConnectionReason.idle] when this connection replaces one that was
+  /// recycled for being idle.
+  final ConnectionReason reason;
 }
 
 /// The connection went down.
 final class StreamDisconnected extends CrdtStreamEvent {
   /// Creates the event.
-  const StreamDisconnected();
+  const StreamDisconnected({this.reason = ConnectionReason.normal});
+
+  /// [ConnectionReason.idle] when the connection was recycled for being idle.
+  final ConnectionReason reason;
 }
 
 /// Configuration for a stream subscription. Port of crdt-js `StreamConfig`.
@@ -141,7 +162,9 @@ final class StreamConfig {
   final HLC? since;
 
   /// Abort and reconnect when no bytes arrive for this long. Zero disables.
-  /// Server keep-alive comments reset it.
+  /// Server keep-alive comments reset it. An idle reconnect is quiet: it emits
+  /// [StreamDisconnected] and [StreamConnected] with [ConnectionReason.idle],
+  /// not a [StreamError].
   final Duration idleTimeout;
 
   /// This node's id, so the server can skip echoing its own changes back.

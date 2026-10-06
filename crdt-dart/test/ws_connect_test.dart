@@ -116,4 +116,31 @@ void main() {
       );
     },
   );
+
+  test('a 403 on the upgrade leaves no query value in the message or the '
+      'cause', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) {
+      request.response
+        ..statusCode = HttpStatus.forbidden
+        ..close();
+    });
+    final transport = WebSocketTransport(
+      url: Uri.parse('ws://127.0.0.1:${server.port}/ws?token=sekrit-value'),
+      auth: StaticAuthProvider({'Authorization': 'Bearer hdr-sekrit-value'}),
+      pingInterval: Duration.zero,
+    );
+    addTearDown(transport.close);
+    Object? caught;
+    try {
+      await transport.pull(PullRequest(tables: const [], nodeId: 'n'));
+    } on Object catch (e) {
+      caught = e;
+    }
+    final error = caught! as NetworkError;
+    expect(error.message, isNot(contains('sekrit-value')));
+    expect('${error.cause}', isNot(contains('sekrit-value')));
+    expect('$error', contains('connection failed'));
+  });
 }

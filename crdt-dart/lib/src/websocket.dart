@@ -145,29 +145,48 @@ final class _Pending {
 /// The transport connects at construction (a failure is swallowed and the
 /// next call retries) and, while a subscription is active, reconnects with
 /// `backoff` after the socket drops or a connect fails, sending `subscribe`
-/// again on each new socket. Subscribing to every table (no `tables`)
-/// reconnects too; crdt-js does not.
+/// again on each new socket. A subscription with no `tables` reconnects too
+/// (crdt-js does not), but note that over the Go WebSocket an empty table list
+/// streams nothing: the server waits for tables. Name the tables. One active
+/// subscription at a time is supported, as in crdt-js: a second `connect` on
+/// an already-subscribed socket does not send its tables.
 ///
-/// A request in flight when the socket closes fails with a [NetworkError].
+/// A socket never outlives its credentials. Auth headers are read from `auth`
+/// before every request ([pull], [push], [updatePresence]) and before
+/// [CrdtSubscription.connect] sends, and again for every connection attempt
+/// (so a reconnect resubscribes under the credentials of that moment):
+///
+///  * If the headers differ from the ones the open socket was opened with,
+///    that socket is closed and a new one is opened with the new headers, and
+///    the request goes out on the new socket. Requests in flight on the old
+///    socket fail with a [NetworkError] and are never replayed.
+///  * If `auth` throws a [CrdtError] with [CrdtErrorCode.cancelled] (the
+///    account was switched away), the request fails with it unwrapped, the
+///    open socket is closed, and the subscription ends: one [StreamError]
+///    carries the cancellation and nothing reconnects or is scheduled.
+///  * Any other error from `auth` fails that request with an [AuthError],
+///    which is not retryable, and leaves the socket alone. In the reconnect
+///    loop it is reported as a [StreamError] and retried with backoff like a
+///    failed connection.
+///
+/// A request in flight when its socket closes fails with a [NetworkError].
 /// Nothing is replayed on the next socket, so a request never reaches a
 /// server under credentials other than the ones it was issued with.
 ///
-/// Auth headers are read from `auth` again for every connection attempt. A
-/// [CrdtError] with [CrdtErrorCode.cancelled] from `auth` (the account was
-/// switched away) ends the subscription: one [StreamError] carries it and no
-/// connect is retried or scheduled. A request that needs a connection fails
-/// with the same error, unwrapped. Any other error from `auth` is wrapped in
-/// an [AuthError], reported as a [StreamError] and retried with backoff like a
-/// failed connection.
+/// `requestTimeout` also bounds the connect, so a handshake that never
+/// finishes fails the request instead of hanging it.
 ///
 /// A frame that does not decode is reported as a [StreamError] and skipped, and
 /// a frame of an unknown type is ignored. Neither closes the socket. A reported
-/// error never contains the frame text.
+/// error never contains the frame text. An `error` frame that names a request
+/// nobody waits for any more (it timed out) is dropped.
 ///
 /// Warning: on the web the auth headers are sent as URL query parameters (a
 /// browser handshake cannot carry headers), and a URL can be logged by a proxy
-/// or a server. Use short-lived tokens. No error message and no [toString]
-/// of this class shows a query value.
+/// or a server. Use short-lived tokens. No error message, no `cause` of one
+/// and no [toString] of this class shows a query value: every URL in an error
+/// text is rebuilt with each query value replaced by `REDACTED`, and the auth
+/// values are removed from the text whatever their case.
 final class WebSocketTransport implements StreamTransport, PresenceTransport {
   /// Creates a transport for the endpoint [url] (`ws://` or `wss://`).
   ///
@@ -219,6 +238,7 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
   var _closed = false;
   var _reconnecting = false;
   WsConnection? _socket;
+  Map<String, String>? _socketHeaders;
   StreamSubscription<String>? _socketSub;
   WsConnection? _announced;
   Completer<WsConnection>? _opening;
@@ -242,7 +262,7 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
   /// a server-side rejection cannot reach this call.
   @override
   Future<void> updatePresence(PresenceUpdate update) async {
-    final socket = await _ensureOpen();
+    final socket = await _ready();
     final sent = _send(
       socket,
       WebSocketMessage(WsMessageType.presenceUpdate, payload: update.toJson()),
@@ -361,7 +381,7 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
     Map<String, Object?> payload,
     T Function(Object? payload) decode,
   ) async {
-    final socket = await _ensureOpen();
+    final socket = await _ready();
     // The socket may have dropped while this call was resuming.
     if (!identical(_socket, socket)) {
       throw NetworkError('CRDT ws connection closed');
@@ -401,13 +421,58 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
     }
   }
 
+  /// An open socket bound to the credentials the provider returns right now.
+  ///
+  /// Reads the auth headers first. A socket opened with other headers is
+  /// closed (its in-flight requests fail, none is replayed) and a new one is
+  /// opened with these. A cancellation closes the socket and ends the
+  /// subscription before it is rethrown.
+  Future<WsConnection> _ready() async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      if (_closed) throw _closedError();
+      final Map<String, String> headers;
+      try {
+        headers = await _readAuth();
+      } on Object catch (error) {
+        if (_isCancellation(error)) _revoke(error);
+        rethrow;
+      }
+      if (_closed) throw _closedError();
+      final open = _socket;
+      if (open != null) {
+        if (_sameHeaders(headers, _socketHeaders)) return open;
+        _dropSocket(
+          open,
+          NetworkError('CRDT ws connection closed: credentials changed'),
+        );
+      }
+      // An opening already in flight may have read older headers: wait for it
+      // and check again. Otherwise open with the headers just read.
+      final opened = await _ensureOpen(_opening == null ? headers : null);
+      if (identical(_socket, opened) && _sameHeaders(headers, _socketHeaders)) {
+        return opened;
+      }
+    }
+    throw NetworkError('CRDT ws credentials kept changing while connecting');
+  }
+
+  static bool _sameHeaders(Map<String, String> a, Map<String, String>? b) {
+    if (b == null || a.length != b.length) return false;
+    final lower = {for (final e in b.entries) e.key.toLowerCase(): e.value};
+    for (final e in a.entries) {
+      if (lower[e.key.toLowerCase()] != e.value) return false;
+    }
+    return true;
+  }
+
   /// The open socket, opening one when there is none. Callers share one
-  /// opening in flight.
-  Future<WsConnection> _ensureOpen() async {
+  /// opening in flight. [headers], when given, are the credentials to open
+  /// with; otherwise the attempt reads them itself.
+  Future<WsConnection> _ensureOpen([Map<String, String>? headers]) async {
     if (_closed) throw _closedError();
     final open = _socket;
     if (open != null) return open;
-    final opening = _opening ??= _startOpening();
+    final opening = _opening ??= _startOpening(headers);
     final socket = await opening.future;
     // close() may have landed between the open completing and this
     // continuation running: do not hand a stale socket to a caller of a
@@ -416,9 +481,9 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
     return socket;
   }
 
-  Completer<WsConnection> _startOpening() {
+  Completer<WsConnection> _startOpening(Map<String, String>? headers) {
     final completer = Completer<WsConnection>();
-    unawaited(_attemptConnect(completer));
+    unawaited(_attemptConnect(completer, headers));
     return completer;
   }
 
@@ -429,12 +494,15 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
     if (_isCancellation(error)) _endForCancellation(error);
   }
 
-  Future<void> _attemptConnect(Completer<WsConnection> c) async {
+  Future<void> _attemptConnect(
+    Completer<WsConnection> c,
+    Map<String, String>? given,
+  ) async {
     // Read for every attempt: a cancellation thrown here ends the attempt and
     // nothing from an earlier one is reused.
     final Map<String, String> headers;
     try {
-      headers = await _readAuth();
+      headers = given ?? await _readAuth();
     } on Object catch (error, stack) {
       _openFailed(c, error, stack);
       return;
@@ -447,7 +515,23 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
     }
     final WsConnection socket;
     try {
-      socket = await _connector(url, headers, protocols);
+      final connecting = _connector(url, headers, protocols);
+      socket = requestTimeout > Duration.zero
+          ? await connecting.timeout(
+              requestTimeout,
+              onTimeout: () {
+                // A handshake that finishes late must not leave a socket open.
+                unawaited(
+                  connecting.then<void>(_closeQuietly, onError: (Object _) {}),
+                );
+                throw NetworkError(
+                  'CRDT ws connect timed out after '
+                  '${requestTimeout.inMilliseconds}ms',
+                  code: CrdtErrorCode.syncTimeout,
+                );
+              },
+            )
+          : await connecting;
     } on Object catch (error, stack) {
       _openFailed(c, _connectError(error, headers), stack);
       return;
@@ -457,7 +541,7 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
       if (!c.isCompleted) _openFailed(c, _closedError());
       return;
     }
-    _adopt(socket);
+    _adopt(socket, headers);
     if (identical(_opening, c)) _opening = null;
     c.complete(socket);
   }
@@ -482,37 +566,68 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
     }
   }
 
-  /// A connect failure, with the URL's query values and the auth values
-  /// scrubbed from the message. Only a cancellation passes through as it is:
-  /// any other error, whoever raised it, is reworded, because a connector's
-  /// message may name the URL.
+  /// A connect or socket failure as a [NetworkError] whose message and `cause`
+  /// show no secret. Only a cancellation passes through as it is: any other
+  /// error, whoever raised it, is reworded, because a connector's message may
+  /// name the URL. The cause is a redacted copy, never the raw error.
   Object _connectError(Object error, Map<String, String> headers) {
     if (_isCancellation(error)) return error;
-    final text = error is CrdtError ? error.message : '$error';
+    final text = _redact(
+      error is CrdtError ? error.message : '$error',
+      headers,
+    );
     return NetworkError(
-      'CRDT ws connection failed: ${_scrub(text, headers)}',
-      cause: error,
+      'CRDT ws connection failed: $text',
+      cause: _RedactedCause(
+        error is CrdtError ? 'CrdtError' : '${error.runtimeType}',
+        text,
+      ),
     );
   }
 
-  /// [text] with every secret this transport knows removed: the endpoint's
-  /// query values and the auth header values, raw and form-encoded.
-  String _scrub(String text, Map<String, String> headers) {
-    var out = text.replaceAll(url.toString(), _redactUrl(url));
-    final secrets = <String>{...url.queryParameters.values, ...headers.values};
-    for (final secret in secrets.where((s) => s.length >= 3)) {
-      out = out
-          .replaceAll(Uri.encodeQueryComponent(secret), '***')
-          .replaceAll(Uri.encodeComponent(secret), '***')
-          .replaceAll(secret, '***');
+  /// [text] with every secret removed.
+  ///
+  /// First by parsing: each URL in the text is rebuilt with every query value
+  /// replaced by `REDACTED` and its credentials dropped, so a URL the
+  /// transport has never seen (a web connect URL carrying the auth values, an
+  /// `http://` form of the endpoint) is covered. Then the known secrets, the
+  /// endpoint's query values and the auth header values, are removed wherever
+  /// they still appear, case-insensitively, raw and form-encoded, longest
+  /// first so that a secret that contains another is removed whole. Secrets
+  /// shorter than three characters are not removed from free text.
+  String _redact(String text, Map<String, String> headers) {
+    var out = text.replaceAllMapped(_urlPattern, (m) {
+      final raw = m[0]!;
+      final core = raw.replaceFirst(RegExp(r'[.,;:)\]}]+$'), '');
+      final uri = Uri.tryParse(core);
+      final redacted = uri == null ? '<url REDACTED>' : _redactUrl(uri);
+      return '$redacted${raw.substring(core.length)}';
+    });
+    final secrets = <String>{
+      for (final values in url.queryParametersAll.values) ...values,
+      ...headers.values,
+    }.where((s) => s.length >= 3);
+    final forms = <String>{
+      for (final s in secrets) ...{
+        s,
+        Uri.encodeQueryComponent(s),
+        Uri.encodeComponent(s),
+      },
+    }.toList()..sort((a, b) => b.length.compareTo(a.length));
+    for (final form in forms) {
+      out = out.replaceAll(
+        RegExp(RegExp.escape(form), caseSensitive: false),
+        'REDACTED',
+      );
     }
     return out;
   }
 
   /// The socket is open: listen to it, keep it alive and, if a subscription
   /// is waiting, subscribe on it.
-  void _adopt(WsConnection socket) {
+  void _adopt(WsConnection socket, Map<String, String> headers) {
     _socket = socket;
+    _socketHeaders = headers;
     _backoff.reset();
     _socketSub = socket.messages.listen(
       (raw) => _handleMessage(socket, raw),
@@ -553,10 +668,20 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
     });
   }
 
-  void _socketDropped(WsConnection socket, Object? error) {
+  /// Closes [socket] on purpose and forgets it. Requests in flight on it fail
+  /// with [pendingError] and are never sent again: whoever asked decides
+  /// whether to ask again, under whatever credentials are current by then.
+  /// Does not schedule a reconnect. [streamError], when given, is reported to
+  /// an active subscription.
+  void _dropSocket(
+    WsConnection socket,
+    Object pendingError, {
+    Object? streamError,
+  }) {
     // A socket this transport already replaced or closed is not news.
     if (!identical(_socket, socket)) return;
     _socket = null;
+    _socketHeaders = null;
     final sub = _socketSub;
     _socketSub = null;
     if (sub != null) _release(sub);
@@ -565,19 +690,31 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
     final wasAnnounced = identical(_announced, socket);
     _announced = null;
     unawaited(_closeQuietly(socket));
-    // Requests that were in flight on this socket fail here and are never sent
-    // again: whoever asked decides whether to ask again, under whatever
-    // credentials are current by then.
-    _failPending(
-      (p) => identical(p.socket, socket),
+    _failPending((p) => identical(p.socket, socket), pendingError);
+    if (_closed || _active.isEmpty) return;
+    if (streamError != null) _emit(StreamError(streamError));
+    if (wasAnnounced) _emit(const StreamDisconnected());
+  }
+
+  void _socketDropped(WsConnection socket, Object? error) {
+    if (!identical(_socket, socket)) return;
+    // Scrub with the headers this socket was opened with: on the web they are
+    // in the URL it connected to.
+    final headers = _socketHeaders ?? const <String, String>{};
+    _dropSocket(
+      socket,
       NetworkError('CRDT ws connection closed'),
+      streamError: error == null ? null : _connectError(error, headers),
     );
-    if (_closed) return;
-    if (error != null && _active.isNotEmpty) {
-      _emit(StreamError(_connectError(error, const {})));
-    }
-    if (wasAnnounced && _active.isNotEmpty) _emit(const StreamDisconnected());
     _scheduleReconnect();
+  }
+
+  /// The credentials' account was switched away while a socket was open: close
+  /// it, end the subscription for good and report [error] once.
+  void _revoke(Object error) {
+    final open = _socket;
+    if (open != null) _dropSocket(open, error);
+    _endForCancellation(error);
   }
 
   void _scheduleReconnect() {
@@ -656,6 +793,10 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
       }
     }
 
+    // An error reply for a request that timed out (or was failed) is not a
+    // stream error: nobody is waiting for it.
+    if (requestId.isNotEmpty && type == WsMessageType.error) return;
+
     // Decode before emitting: a bad payload is reported, never thrown, and
     // never ends the socket.
     CrdtStreamEvent? event;
@@ -718,7 +859,6 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
           'Failed to parse ws $what: $why',
           code: CrdtErrorCode.validationFailed,
           phase: SyncPhase.stream,
-          cause: error,
         ),
       ),
     );
@@ -730,13 +870,33 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
   }
 }
 
-/// [url] without credentials, with every query value hidden.
+/// Matches a URL in free text: a scheme, `://`, then anything up to a space or
+/// a quote.
+final _urlPattern = RegExp(r'''[A-Za-z][A-Za-z0-9+.\-]*://[^\s'"<>]+''');
+
+/// [url] without credentials or fragment, rebuilt with every query value
+/// replaced by `REDACTED`.
 String _redactUrl(Uri url) {
   final port = url.hasPort ? ':${url.port}' : '';
-  final query = url.hasQuery && url.query.isNotEmpty
-      ? '?${[for (final k in url.queryParametersAll.keys) '$k=***'].join('&')}'
-      : '';
+  final keys = url.hasQuery && url.query.isNotEmpty
+      ? url.queryParametersAll.keys
+      : const <String>[];
+  final query = keys.isEmpty
+      ? ''
+      : '?${[for (final k in keys) '${Uri.encodeQueryComponent(k)}=REDACTED'].join('&')}';
   return '${url.scheme}://${url.host}$port${url.path}$query';
+}
+
+/// A copy of an error that held a secret: its type and its redacted text.
+/// Stored as the `cause` of a [NetworkError] in place of the raw error.
+final class _RedactedCause {
+  const _RedactedCause(this.type, this.text);
+
+  final String type;
+  final String text;
+
+  @override
+  String toString() => '$type: $text';
 }
 
 /// The subscription [WebSocketTransport.subscribe] returns.
@@ -772,7 +932,7 @@ final class _WsSubscription implements CrdtSubscription {
     // The socket's opening is one owner of the subscribe frame and this is the
     // other (it will not open again if it is already open). _announce sends
     // at most once per socket, so the two never both fire.
-    t._ensureOpen().then<void>(
+    t._ready().then<void>(
       t._announce,
       onError: (Object error) {
         if (!t._active.contains(this)) return;

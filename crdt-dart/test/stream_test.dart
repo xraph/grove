@@ -775,10 +775,69 @@ void main() {
           expect(s.connected, isTrue);
           async.elapse(const Duration(seconds: 2));
           expect(calls.aborted[0], isTrue);
-          expect(_of<StreamError>(events), hasLength(1));
-          expect(_of<StreamDisconnected>(events), hasLength(1));
+          // An idle recycle is quiet: no StreamError, and the events say why.
+          expect(_of<StreamError>(events), isEmpty);
+          expect(
+            _of<StreamDisconnected>(events).single.reason,
+            ConnectionReason.idle,
+          );
           async.elapse(const Duration(seconds: 2));
           expect(calls.count, 2);
+          expect(_of<StreamConnected>(events).map((e) => e.reason), [
+            ConnectionReason.normal,
+            ConnectionReason.idle,
+          ]);
+          s.disconnect();
+          // A requested disconnect is a normal one.
+          expect(
+            _of<StreamDisconnected>(events).last.reason,
+            ConnectionReason.normal,
+          );
+        });
+      });
+
+      test('a quiet stream does not grow the reconnect wait', () {
+        fakeAsync((async) {
+          final calls = _Calls();
+          final s = CrdtStream(
+            baseUrl: _base,
+            config: const StreamConfig(
+              idleTimeout: Duration(seconds: 45),
+              reconnectDelay: Duration(seconds: 1),
+              maxReconnectDelay: Duration(seconds: 30),
+            ),
+            random: () => 1.0,
+            connect: _hanging(calls: calls),
+          );
+          s.connect();
+          // Each cycle is 45 s idle plus a 1 s wait. Without the reset the
+          // waits would be 1, 2, 4 and 8 s and the fourth connect later.
+          async.elapse(const Duration(seconds: 46 * 4));
+          expect(calls.count, 5);
+          s.disconnect();
+        });
+      });
+
+      test('a server that never answers is an error, not an idle recycle', () {
+        fakeAsync((async) {
+          final calls = _Calls();
+          final s = CrdtStream(
+            baseUrl: _base,
+            config: const StreamConfig(
+              idleTimeout: Duration(seconds: 45),
+              reconnectDelay: Duration(seconds: 1),
+            ),
+            connect: (u, h, a) {
+              calls.record(u, h, a);
+              return Completer<SseResponse>().future;
+            },
+          );
+          final events = _collect(s);
+          s.connect();
+          async.elapse(const Duration(seconds: 46));
+          expect(calls.aborted[0], isTrue);
+          expect(_of<StreamError>(events), hasLength(1));
+          expect(_of<StreamConnected>(events), isEmpty);
           s.disconnect();
         });
       });
@@ -997,6 +1056,73 @@ void main() {
         expect(e.toString(), isNot(contains('secret-token-value')));
         s.disconnect();
       });
+    });
+
+    test(
+      'events after a handler disconnects mid-chunk are not delivered',
+      () async {
+        final s = _stream(
+          _chunks([
+            _sseEvent('change', _sampleChange(10)) +
+                _sseEvent('change', _sampleChange(20)),
+          ]),
+        );
+        final events = <CrdtStreamEvent>[];
+        s.on((e) {
+          events.add(e);
+          if (e is StreamChange) s.disconnect();
+        });
+        s.connect();
+        await pumpEventQueue();
+        expect(_of<StreamChange>(events), hasLength(1));
+        expect(s.lastHlc!.ts, BigInt.from(10));
+      },
+    );
+
+    test(
+      'a query already on baseUrl is kept next to the stream parameters',
+      () {
+        final s = CrdtStream(
+          baseUrl: Uri.parse('http://x/sync?tenant=t1'),
+          config: const StreamConfig(tables: ['a']),
+        );
+        expect(
+          s.buildStreamUrl().toString(),
+          'http://x/sync/stream?tenant=t1&tables=a',
+        );
+        expect(
+          CrdtStream(baseUrl: Uri.parse('http://x/sync?tenant=t1'))
+              .buildStreamUrl()
+              .toString(),
+          'http://x/sync/stream?tenant=t1',
+        );
+      },
+    );
+
+    test('a server that answers 200 and hangs up keeps backing off', () async {
+      final sleeps = <Duration>[];
+      final s = CrdtStream(
+        baseUrl: _base,
+        config: const StreamConfig(
+          reconnectDelay: Duration(seconds: 1),
+          maxReconnectDelay: Duration(seconds: 4),
+        ),
+        random: () => 1.0,
+        connect: _chunks(const []),
+        sleep: (d) async {
+          sleeps.add(d);
+          if (sleeps.length > 3) await Completer<void>().future;
+        },
+      );
+      s.connect();
+      await pumpEventQueue();
+      expect(sleeps, const [
+        Duration(seconds: 1),
+        Duration(seconds: 2),
+        Duration(seconds: 4),
+        Duration(seconds: 4),
+      ]);
+      s.disconnect();
     });
 
     test('a stale loop stops touching state after disconnect', () {
