@@ -15,6 +15,7 @@ import 'envelope.dart';
 import 'errors.dart';
 import 'presence_types.dart';
 import 'retry.dart';
+import 'sse.dart';
 import 'sync_types.dart';
 import 'transport.dart';
 
@@ -371,6 +372,50 @@ base class HttpTransport implements Transport, PresenceTransport {
       return text;
     }
   }
+}
+
+/// HTTP pull and push plus the SSE change stream.
+final class HttpStreamTransport extends HttpTransport
+    implements StreamTransport {
+  /// Creates the transport. See [HttpTransport] for the shared parameters.
+  HttpStreamTransport({
+    required super.baseUrl,
+    super.client,
+    super.headers,
+    super.auth,
+    super.timeout,
+    super.retries,
+    super.backoff,
+    super.envelope,
+    super.pullPath,
+    super.pushPath,
+    super.presencePath,
+    super.onServerTime,
+    super.onUnauthorized,
+    super.sleep,
+    this.streamPath = '/stream',
+    this.sseConnect,
+  });
+
+  /// Path of the SSE endpoint, appended to [baseUrl].
+  final String streamPath;
+
+  /// Overrides how the SSE request is made (tests).
+  final SseConnect? sseConnect;
+
+  /// Opens a change stream with this transport's headers, auth and clock
+  /// callback. Auth is read again on every connection attempt of the stream.
+  @override
+  CrdtSubscription subscribe(StreamConfig config) => CrdtStream(
+    baseUrl: baseUrl,
+    streamPath: streamPath,
+    config: config,
+    headers: headers,
+    auth: auth,
+    client: client,
+    connect: sseConnect,
+    onServerTime: onServerTime,
+  );
 }
 
 Future<void> _defaultSleep(Duration d) => Future<void>.delayed(d);

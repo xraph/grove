@@ -18,6 +18,7 @@ export 'src/presence_types.dart';
 export 'src/protocol.dart';
 export 'src/rejection.dart';
 export 'src/retry.dart';
+export 'src/sse.dart';
 export 'src/storage.dart';
 export 'src/store.dart';
 export 'src/sync_types.dart';
