@@ -21,6 +21,7 @@ import 'retry.dart';
 import 'sse_io.dart' if (dart.library.js_interop) 'sse_web.dart';
 import 'transport.dart';
 import 'types.dart';
+import 'wait.dart';
 
 /// The answer to an SSE request: the status, the headers and the body bytes
 /// as they arrive.
@@ -102,12 +103,13 @@ final class CrdtStream implements CrdtSubscription {
     SseConnect? connect,
     this._onServerTime,
     double Function()? random,
-    this._sleep,
+    Future<void> Function(Duration)? sleep,
   }) : baseUrl = baseUrl.replace(
          path: baseUrl.path.replaceFirst(RegExp(r'/+$'), ''),
        ),
        _headers = _lowerKeys(headers),
        _connect = connect ?? defaultSseConnect(client: client),
+       _wait = CancellableWait(sleep),
        _backoff = Backoff(
          initialDelay: config.reconnectDelay,
          maxDelay: config.maxReconnectDelay,
@@ -127,7 +129,7 @@ final class CrdtStream implements CrdtSubscription {
   final CrdtAuthProvider? _auth;
   final SseConnect _connect;
   final void Function(DateTime serverTime)? _onServerTime;
-  final Future<void> Function(Duration)? _sleep;
+  final CancellableWait _wait;
   final Backoff _backoff;
 
   final Set<void Function(CrdtStreamEvent)> _handlers = {};
@@ -138,7 +140,6 @@ final class CrdtStream implements CrdtSubscription {
   bool _shouldReconnect = false;
   Timer? _idleTimer;
   int _idleTimerGen = -1;
-  void Function()? _cancelWait;
 
   // Identifies which _connectLoop/_connectOnce invocation is current. Bumped
   // by connect() and disconnect() so a loop still in flight (blocked on a read
@@ -183,7 +184,7 @@ final class CrdtStream implements CrdtSubscription {
     final abort = _abort;
     _abort = null;
     if (abort != null && !abort.isCompleted) abort.complete();
-    _cancelWait?.call();
+    _wait.cancel();
     if (_connected) {
       _connected = false;
       _emit(const StreamDisconnected());
@@ -301,7 +302,7 @@ final class CrdtStream implements CrdtSubscription {
       // Wait before reconnecting, with jittered exponential backoff, and at
       // least as long as a throttling server asked.
       final step = _backoff.next();
-      await _wait(failure == null ? step : retryDelay(step, failure));
+      await _wait.wait(failure == null ? step : retryDelay(step, failure));
     }
   }
 
@@ -316,36 +317,6 @@ final class CrdtStream implements CrdtSubscription {
       _connected = false;
       _emit(const StreamDisconnected());
     }
-  }
-
-  /// Waits [delay], or less when [disconnect] runs.
-  Future<void> _wait(Duration delay) {
-    final wake = Completer<void>();
-    Timer? timer;
-    final sleeper = _sleep;
-    if (sleeper == null) {
-      timer = Timer(delay, () {
-        if (!wake.isCompleted) wake.complete();
-      });
-    } else {
-      sleeper(delay).then<void>(
-        (_) {
-          if (!wake.isCompleted) wake.complete();
-        },
-        onError: (Object _) {
-          if (!wake.isCompleted) wake.complete();
-        },
-      );
-    }
-    void cancel() {
-      timer?.cancel();
-      if (!wake.isCompleted) wake.complete();
-    }
-
-    _cancelWait = cancel;
-    return wake.future.whenComplete(() {
-      if (_cancelWait == cancel) _cancelWait = null;
-    });
   }
 
   /// Reads the auth headers afresh. A cancellation passes through as thrown;

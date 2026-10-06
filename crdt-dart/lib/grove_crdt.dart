@@ -26,4 +26,11 @@ export 'src/text.dart';
 export 'src/transport.dart';
 export 'src/types.dart';
 export 'src/undo.dart';
+export 'src/websocket.dart'
+    show
+        WebSocketConnector,
+        WebSocketTransport,
+        WsConnection,
+        defaultWebSocketConnector,
+        webSocketUrl;
 export 'src/ws_types.dart';
