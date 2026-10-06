@@ -593,6 +593,21 @@ void main() {
       unsubGlobal();
     });
 
+    test('a stale unsubscribe does not remove a later subscription', () {
+      // crdt-js deletes the topic's current listener set from a closure that
+      // may belong to an older one. Subscribe, unsubscribe, subscribe again,
+      // then call the first unsubscribe once more: the new listener stays.
+      var first = 0;
+      var second = 0;
+      final unsubFirst = manager.subscribe('t', () => first++);
+      unsubFirst();
+      manager.subscribe('t', () => second++);
+      unsubFirst();
+      manager.applyEvent(_join('p', 't'));
+      expect(first, 0);
+      expect(second, 1);
+    });
+
     test('a throwing listener does not starve the others', () {
       final calls = <String>[];
       manager.subscribe('t', () => throw StateError('boom'));

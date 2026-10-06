@@ -146,7 +146,7 @@ final class RoomClient {
     String roomId,
     String nodeId, [
     ParticipantData? data,
-  ]) => _request(
+  ]) async => _request(
     'POST',
     '${_roomPath(roomId)}/join',
     body: {'node_id': nodeId, if (data != null) 'data': data.toJson()},
@@ -154,11 +154,12 @@ final class RoomClient {
   );
 
   /// Leaves [roomId]. The server destroys a room that becomes empty.
-  Future<void> leaveRoom(String roomId, String nodeId) => _request(
+  Future<void> leaveRoom(String roomId, String nodeId) async => _request(
     'POST',
     '${_roomPath(roomId)}/leave',
     body: {'node_id': nodeId},
     decode: _ignore,
+    ignoreBody: true,
   );
 
   /// Sets the cursor of [nodeId] in [roomId]. The server merges it into the
@@ -167,21 +168,26 @@ final class RoomClient {
     String roomId,
     String nodeId,
     CursorPosition cursor,
-  ) => _request(
+  ) async => _request(
     'POST',
     '${_roomPath(roomId)}/cursor',
     body: {'node_id': nodeId, 'cursor': cursor.toJson()},
     decode: _ignore,
+    ignoreBody: true,
   );
 
   /// Sets whether [nodeId] is typing in [roomId].
-  Future<void> updateTyping(String roomId, String nodeId, bool isTyping) =>
-      _request(
-        'POST',
-        '${_roomPath(roomId)}/typing',
-        body: {'node_id': nodeId, 'is_typing': isTyping},
-        decode: _ignore,
-      );
+  Future<void> updateTyping(
+    String roomId,
+    String nodeId,
+    bool isTyping,
+  ) async => _request(
+    'POST',
+    '${_roomPath(roomId)}/typing',
+    body: {'node_id': nodeId, 'is_typing': isTyping},
+    decode: _ignore,
+    ignoreBody: true,
+  );
 
   /// Replaces the metadata of [roomId]. A room the server does not know is a
   /// 404 [TransportError].
@@ -189,16 +195,18 @@ final class RoomClient {
   /// Go parity: `crdt.RoomHTTPHandler` serves `PUT /rooms/{id}/metadata` and
   /// reads the whole body as the metadata. crdt-js sends `POST` with
   /// `{"metadata": ...}`, which Go answers with a 405.
-  Future<void> updateMetadata(String roomId, Object? metadata) => _request(
-    'PUT',
-    '${_roomPath(roomId)}/metadata',
-    body: metadata,
-    hasBody: true,
-    decode: _ignore,
-  );
+  Future<void> updateMetadata(String roomId, Object? metadata) async =>
+      _request(
+        'PUT',
+        '${_roomPath(roomId)}/metadata',
+        body: metadata,
+        hasBody: true,
+        decode: _ignore,
+        ignoreBody: true,
+      );
 
   /// The presence states of everyone in [roomId].
-  Future<List<PresenceState>> getParticipants(String roomId) => _request(
+  Future<List<PresenceState>> getParticipants(String roomId) async => _request(
     'GET',
     '${_roomPath(roomId)}/participants',
     decode: (j) => wireList(j, PresenceState.fromJson),
@@ -215,6 +223,8 @@ final class RoomClient {
     String nodeId, [
     ParticipantData? data,
   ]) async {
+    _checkSegment(table, 'table');
+    _checkSegment(pk, 'pk');
     final roomId = documentRoomId(table, pk);
     try {
       await createRoom(
@@ -232,11 +242,27 @@ final class RoomClient {
   }
 
   /// Leaves the document room for [table] and [pk].
-  Future<void> leaveDocumentRoom(String table, String pk, String nodeId) =>
-      leaveRoom(documentRoomId(table, pk), nodeId);
+  Future<void> leaveDocumentRoom(String table, String pk, String nodeId) async {
+    _checkSegment(table, 'table');
+    _checkSegment(pk, 'pk');
+    return leaveRoom(documentRoomId(table, pk), nodeId);
+  }
 
-  String _roomPath(String roomId) =>
-      '$roomsPath/${Uri.encodeComponent(roomId)}';
+  /// The path of one room: [roomId] as a single percent-encoded segment.
+  ///
+  /// An id that is empty, `.` or `..` is refused: a client URL resolves dot
+  /// segments, so `..` would leave the rooms path.
+  String _roomPath(String roomId) {
+    _checkSegment(roomId, 'roomId');
+    return '$roomsPath/${Uri.encodeComponent(roomId)}';
+  }
+
+  /// Throws an [ArgumentError] when [value] cannot be one path segment.
+  static void _checkSegment(String value, String name) {
+    if (value.isEmpty || value == '.' || value == '..') {
+      throw ArgumentError.value(value, name, 'must not be empty, "." or ".."');
+    }
+  }
 
   static void _ignore(Object? _) {}
 
@@ -257,6 +283,7 @@ final class RoomClient {
     String path, {
     Object? body,
     bool hasBody = false,
+    bool ignoreBody = false,
     Map<String, String>? query,
     required T Function(Object? json) decode,
   }) async {
@@ -301,15 +328,18 @@ final class RoomClient {
     final status = response.statusCode;
     if (status < 200 || status >= 300) {
       final shown = clean(text);
-      final reason = response.reasonPhrase;
+      final reason = clean(response.reasonPhrase ?? '');
       throw TransportError(
-        'Room API error: $status${reason == null || reason.isEmpty ? '' : ' $reason'}'
+        'Room API error: $status${reason.isEmpty ? '' : ' $reason'}'
         '${shown.isEmpty ? '' : ': $shown'}',
         statusCode: status,
         body: _decodeBody(shown),
         headers: response.headers,
       );
     }
+    // A call that returns nothing does not read the body: a 2xx is a success
+    // whatever a proxy put in it.
+    if (ignoreBody) return decode(null);
     try {
       final empty = status == 204 || text.trim().isEmpty;
       return decode(empty ? null : jsonDecode(text));

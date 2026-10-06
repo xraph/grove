@@ -627,6 +627,213 @@ void main() {
     });
   });
 
+  group('a success whose body is not read', () {
+    final voidCalls = <String, Future<void> Function(RoomClient c)>{
+      'leaveRoom': (c) => c.leaveRoom('r', 'a'),
+      'updateCursor': (c) =>
+          c.updateCursor('r', 'a', const CursorPosition(line: 1)),
+      'updateTyping': (c) => c.updateTyping('r', 'a', true),
+      'updateMetadata': (c) => c.updateMetadata('r', {'a': 1}),
+      'leaveDocumentRoom': (c) => c.leaveDocumentRoom('t', 'p', 'a'),
+    };
+
+    for (final entry in voidCalls.entries) {
+      test('${entry.key} completes on a 2xx with a text, broken or empty '
+          'body', () async {
+        for (final body in ['ok', '{"half":', '', '<html>done</html>']) {
+          final c = client((r) => http.Response(body, 200));
+          await entry.value(c);
+          expect(requests, hasLength(1), reason: 'body "$body"');
+        }
+        final proxy = client(
+          (r) => http.Response(
+            'accepted',
+            202,
+            headers: {'content-type': 'text/plain'},
+          ),
+        );
+        await entry.value(proxy);
+      });
+    }
+
+    test('a call that returns data still rejects an unreadable body', () async {
+      final c = client((r) => http.Response('ok', 200));
+      await expectLater(c.getParticipants('r'), throwsA(isA<TransportError>()));
+    });
+  });
+
+  group('room ids and path segments', () {
+    final badIds = ['', '.', '..'];
+    final idCalls = <String, Future<Object?> Function(RoomClient c, String id)>{
+      'getRoom': (c, id) => c.getRoom(id),
+      'joinRoom': (c, id) => c.joinRoom(id, 'a'),
+      'leaveRoom': (c, id) => c.leaveRoom(id, 'a'),
+      'updateCursor': (c, id) =>
+          c.updateCursor(id, 'a', const CursorPosition()),
+      'updateTyping': (c, id) => c.updateTyping(id, 'a', true),
+      'updateMetadata': (c, id) => c.updateMetadata(id, 1),
+      'getParticipants': (c, id) => c.getParticipants(id),
+    };
+
+    for (final entry in idCalls.entries) {
+      test(
+        '${entry.key} rejects an empty, "." or ".." id before any request',
+        () async {
+          final c = client((r) => http.Response('{}', 200, headers: json));
+          for (final id in badIds) {
+            await expectLater(
+              entry.value(c, id),
+              throwsA(isA<ArgumentError>()),
+              reason: 'id "$id"',
+            );
+          }
+          expect(requests, isEmpty);
+        },
+      );
+    }
+
+    test('document rooms reject an empty, "." or ".." table or pk', () async {
+      final c = client((r) => http.Response('{}', 200, headers: json));
+      for (final bad in badIds) {
+        await expectLater(
+          c.joinDocumentRoom(bad, 'pk', 'a'),
+          throwsA(isA<ArgumentError>()),
+        );
+        await expectLater(
+          c.joinDocumentRoom('t', bad, 'a'),
+          throwsA(isA<ArgumentError>()),
+        );
+        await expectLater(
+          c.leaveDocumentRoom(bad, 'pk', 'a'),
+          throwsA(isA<ArgumentError>()),
+        );
+        await expectLater(
+          c.leaveDocumentRoom('t', bad, 'a'),
+          throwsA(isA<ArgumentError>()),
+        );
+      }
+      expect(requests, isEmpty);
+    });
+
+    test('an id cannot climb out of the rooms path', () async {
+      final c = client((r) => http.Response('', 204));
+      for (final id in [
+        'a/../b',
+        '../x',
+        'x/..',
+        '%2e%2e',
+        '..%2f..',
+        'a:..',
+        '...',
+        'a?b=c#d',
+      ]) {
+        await c.leaveRoom(id, 'n');
+        final url = requests.last.url;
+        expect(url.path, startsWith('/sync/rooms/'), reason: id);
+        expect(url.path, endsWith('/leave'), reason: id);
+        expect(url.hasQuery, isFalse, reason: id);
+        expect(url.hasFragment, isFalse, reason: id);
+        // One segment between the rooms path and `leave`.
+        expect(url.pathSegments, hasLength(4), reason: id);
+        expect(url.pathSegments[2], id);
+      }
+    });
+
+    test(
+      'a document room with "." inside its parts is still one segment',
+      () async {
+        final c = client((r) => http.Response('', 204));
+        await c.leaveDocumentRoom('a.b', 'c/..', 'n');
+        expect(requests.single.url.pathSegments, hasLength(4));
+      },
+    );
+  });
+
+  group('redaction of the URL, the cause and the reason phrase', () {
+    const token = 'qry-5c4b3a2918f7';
+
+    test(
+      'a secret in the failing URL query is hidden in message and cause',
+      () async {
+        final c = RoomClient(
+          baseUrl: Uri.parse('http://x/sync'),
+          client: MockClient(
+            (r) async => throw http.ClientException(
+              'Connection refused, uri=${r.url}',
+              r.url,
+            ),
+          ),
+        );
+        Object? caught;
+        try {
+          await c.listRooms(type: token);
+        } on NetworkError catch (e) {
+          caught = e;
+        }
+        final error = caught! as NetworkError;
+        expect(error.message, isNot(contains(token)));
+        expect(error.message, contains('type=REDACTED'));
+        expect(error.cause.toString(), isNot(contains(token)));
+        expect(error.cause.toString(), contains('type=REDACTED'));
+        expect(error.cause, isNot(isA<http.ClientException>()));
+        expect(error.toString(), isNot(contains(token)));
+      },
+    );
+
+    test(
+      'a secret in the cause of a CrdtError thrown by the client is hidden',
+      () async {
+        final c = RoomClient(
+          baseUrl: Uri.parse('http://x/sync'),
+          auth: StaticAuthProvider({'Authorization': 'Bearer $token'}),
+          client: MockClient(
+            (r) async => throw NetworkError('dial http://h/p?k=$token failed'),
+          ),
+        );
+        Object? caught;
+        try {
+          await c.listRooms();
+        } on NetworkError catch (e) {
+          caught = e;
+        }
+        final error = caught! as NetworkError;
+        expect(error.message, isNot(contains(token)));
+        expect(error.cause.toString(), isNot(contains(token)));
+        expect(error.cause.toString(), contains('k=REDACTED'));
+      },
+    );
+
+    test('the HTTP reason phrase is redacted', () async {
+      final c = client(
+        (r) => http.Response('', 500, reasonPhrase: 'Denied $token'),
+        auth: StaticAuthProvider({'Authorization': 'Bearer $token'}),
+      );
+      Object? caught;
+      try {
+        await c.listRooms();
+      } on TransportError catch (e) {
+        caught = e;
+      }
+      final error = caught! as TransportError;
+      expect(error.message, isNot(contains(token)));
+      expect(error.toString(), isNot(contains(token)));
+      expect(error.message, contains('500 Denied REDACTED'));
+    });
+
+    test('a reason phrase with a URL query value is redacted', () async {
+      final c = client(
+        (r) => http.Response('', 502, reasonPhrase: 'via http://h/p?k=$token'),
+      );
+      Object? caught;
+      try {
+        await c.listRooms();
+      } on TransportError catch (e) {
+        caught = e;
+      }
+      expect((caught! as TransportError).message, isNot(contains(token)));
+    });
+  });
+
   group('randomColor', () {
     test('answers a six digit hex colour', () {
       for (var i = 0; i < 50; i++) {

@@ -132,8 +132,9 @@ final class PresenceManager {
   ///
   /// Needed on join and after every stream reconnect: a stream only delivers
   /// changes, so peers that were idle when you subscribed stay invisible
-  /// until they move. The local node's state is kept, and [getPresence] still
-  /// leaves it out.
+  /// until they move. The topic's whole peer map is replaced: the local node's
+  /// state survives only if [states] includes it, and [getPresence] leaves it
+  /// out either way.
   ///
   /// A state's `updatedAt` is already a [DateTime], so a seeded peer ages the
   /// way an event-applied one does. A state whose time is Go's zero time (the
