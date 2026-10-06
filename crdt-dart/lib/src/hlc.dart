@@ -2,6 +2,9 @@ import 'package:meta/meta.dart';
 
 /// Compares two strings by Unicode code point, which is Go's byte order for
 /// UTF-8 strings. Returns -1, 0 or 1.
+///
+/// An unpaired surrogate compares as U+FFFD, because Go has already decoded it
+/// to that rune.
 int compareGoStrings(String a, String b) {
   final ai = a.runes.iterator;
   final bi = b.runes.iterator;
@@ -10,9 +13,42 @@ int compareGoStrings(String a, String b) {
     final bHas = bi.moveNext();
     if (!aHas) return bHas ? -1 : 0;
     if (!bHas) return 1;
-    final d = ai.current - bi.current;
+    final d = _goRune(ai.current) - _goRune(bi.current);
     if (d != 0) return d < 0 ? -1 : 1;
   }
+}
+
+int _goRune(int r) => r >= 0xD800 && r <= 0xDFFF ? 0xFFFD : r;
+
+final BigInt _int64Min = BigInt.parse('-9223372036854775808');
+final BigInt _int64Max = BigInt.parse('9223372036854775807');
+final RegExp _decimalInt = RegExp(r'^[+-]?[0-9]+$');
+const int _uint32Limit = 4294967296;
+
+BigInt _parseTs(String s) {
+  // Go parity: strconv.ParseInt(s, 10, 64) takes an optional sign and decimal
+  // digits only, and rejects anything outside int64.
+  if (!_decimalInt.hasMatch(s)) throw FormatException('crdt: hlc ts "$s"');
+  final v = BigInt.parse(s);
+  if (v < _int64Min || v > _int64Max) {
+    throw FormatException('crdt: hlc ts "$s" out of range');
+  }
+  return v;
+}
+
+int _parseCounter(Object? raw) {
+  // Go parity: the counter is a uint32, so it is an integer in [0, 2^32).
+  // The web parser yields a double for integral values.
+  final int? v = switch (raw) {
+    null => 0,
+    final int i => i,
+    final double d when d.isFinite && d == d.truncateToDouble() => d.toInt(),
+    _ => null,
+  };
+  if (v == null || v < 0 || v >= _uint32Limit) {
+    throw FormatException('crdt: hlc counter $raw');
+  }
+  return v;
 }
 
 /// A hybrid logical clock value. Mirrors Go `crdt.HLC`.
@@ -53,6 +89,10 @@ final class HLC implements Comparable<HLC> {
   Map<String, Object?> toJson() => {'ts': ts.toString(), 'c': c, 'node': node};
 
   /// Decodes the Go wire form, accepting a string, empty or numeric `ts`.
+  ///
+  /// Strict like Go: a string `ts` is a signed decimal integer that fits
+  /// int64, and `c` is an integer in [0, 2^32). Anything else throws a
+  /// [FormatException].
   static HLC fromJson(Object? json) {
     if (json == null) return zero;
     final m = json as Map<String, Object?>;
@@ -60,12 +100,12 @@ final class HLC implements Comparable<HLC> {
     final BigInt ts = switch (raw) {
       null => BigInt.zero,
       final String s when s.isEmpty => BigInt.zero,
-      final String s => BigInt.parse(s),
+      final String s => _parseTs(s),
       final int i => BigInt.from(i),
       final double d => BigInt.from(d),
       _ => throw FormatException('crdt: hlc ts $raw'),
     };
-    return HLC(ts, (m['c'] as num?)?.toInt() ?? 0, m['node'] as String? ?? '');
+    return HLC(ts, _parseCounter(m['c']), m['node'] as String? ?? '');
   }
 
   @override

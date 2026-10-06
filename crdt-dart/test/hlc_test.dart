@@ -145,6 +145,9 @@ void main() {
         clock.update(remote);
         expect(clock.now().isAfter(remote), isTrue);
       });
+      // Differs from the TS case, which fixes nowFn at 1000, calls now() once
+      // and merges a remote at 2000 ms. This one advances the wall clock to the
+      // remote's timestamp first; it reaches the same adopt-remote branch.
       test('adopts remote timestamp when remote is ahead', () {
         var time = 1000;
         final clock = HybridClock('node-1', nowMs: () => time);
@@ -195,9 +198,45 @@ void main() {
       expect(HLC.fromJson(jsonDecode('{"ts":"","c":0,"node":""}')).isZero, isTrue);
     });
     test('compares node ids by code point like Go', () {
-      // U+FFFD sorts after U+1F600 by UTF-16 units but before it by code point.
+      // Go parity: HLC.Compare compares NodeID by UTF-8 bytes, so U+FFFD sorts
+      // before U+1F600. TS compares UTF-16 units, which puts it after.
       expect(compareGoStrings('\u{FFFD}', '\u{1F600}'), -1);
       expect(h(1, 0, '\u{FFFD}').compareTo(h(1, 0, '\u{1F600}')), -1);
+    });
+    test('orders an unpaired surrogate as U+FFFD', () {
+      // Go parity: Go has decoded the surrogate to U+FFFD before comparing.
+      expect(compareGoStrings('\uD800', '\u{FFFD}'), 0);
+      expect(compareGoStrings('\uD800', '\uE000'), 1);
+      expect(compareGoStrings('\uDC00', '\u{1F600}'), -1);
+    });
+    test('accepts a signed decimal ts within int64', () {
+      HLC ts(String s) => HLC.fromJson(jsonDecode('{"ts":"$s","c":0,"node":""}'));
+      expect(ts('+5').ts, BigInt.from(5));
+      expect(ts('-7').ts, BigInt.from(-7));
+      expect(ts('9223372036854775807').ts, BigInt.parse('9223372036854775807'));
+      expect(ts('-9223372036854775808').ts, BigInt.parse('-9223372036854775808'));
+    });
+    test('rejects a ts string Go rejects', () {
+      // Go parity: strconv.ParseInt(s, 10, 64).
+      for (final bad in ['0x10', ' 12 ', '1_0', '1.5', '+', '-', '9223372036854775808', '99999999999999999999']) {
+        expect(
+          () => HLC.fromJson(jsonDecode('{"ts":"$bad","c":0,"node":""}')),
+          throwsFormatException,
+          reason: bad,
+        );
+      }
+    });
+    test('accepts a counter in [0, 2^32) and rejects the rest', () {
+      // Go parity: HLC.Counter is a uint32.
+      HLC counter(String c) => HLC.fromJson(jsonDecode('{"ts":"1","c":$c,"node":""}'));
+      expect(counter('0').c, 0);
+      expect(counter('4294967295').c, 4294967295);
+      for (final bad in ['-3', '2.7', '4294967296', '"3"', 'true']) {
+        expect(() => counter(bad), throwsFormatException, reason: bad);
+      }
+    });
+    test('treats a missing counter as zero', () {
+      expect(HLC.fromJson(jsonDecode('{"ts":"1","node":"n"}')).c, 0);
     });
     test('toString is the Go HLC.String form', () {
       expect(h(9, 2, 'x').toString(), 'HLC{ts:9 c:2 node:x}');
