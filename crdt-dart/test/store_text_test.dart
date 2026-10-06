@@ -17,12 +17,15 @@ void main() {
       expect(store.getText('notes', '1', 'body'), 'hello');
 
       store.formatText('notes', '1', 'body', 0, 5, {'bold': true});
-      expect([for (final s in store.getTextDelta('notes', '1', 'body')) s.toJson()], [
-        {
-          'insert': 'hello',
-          'attributes': {'bold': true},
-        },
-      ]);
+      expect(
+        [for (final s in store.getTextDelta('notes', '1', 'body')) s.toJson()],
+        [
+          {
+            'insert': 'hello',
+            'attributes': {'bold': true},
+          },
+        ],
+      );
 
       // Undo the format, then the delete.
       expect(store.undo(), isTrue);
@@ -62,8 +65,12 @@ void main() {
       b.applyChanges(a.getPendingChanges());
       expect(a.getText('n', '1', 'body'), 'hello world');
       expect(b.getText('n', '1', 'body'), 'hello world');
-      final delta = [for (final s in b.getTextDelta('n', '1', 'body')) s.toJson()];
-      expect(delta, [for (final s in a.getTextDelta('n', '1', 'body')) s.toJson()]);
+      final delta = [
+        for (final s in b.getTextDelta('n', '1', 'body')) s.toJson(),
+      ];
+      expect(delta, [
+        for (final s in a.getTextDelta('n', '1', 'body')) s.toJson(),
+      ]);
       expect(delta.first, {
         'insert': 'hello',
         'attributes': {'bold': true},
@@ -76,7 +83,9 @@ void main() {
       store.formatText('n', '1', 'body', 0, 2, {'color': 'red'});
       store.formatText('n', '1', 'body', 0, 2, {'color': 'blue'});
       expect(store.undo(), isTrue);
-      expect(store.getTextDelta('n', '1', 'body').single.attributes, {'color': 'red'});
+      expect(store.getTextDelta('n', '1', 'body').single.attributes, {
+        'color': 'red',
+      });
     });
 
     test('setText reconciles with a delete and an insert, each pushed', () {
@@ -84,7 +93,10 @@ void main() {
       final b = newStore('b');
       a.setText('n', '1', 'body', 'hello world');
       final changes = a.setText('n', '1', 'body', 'hello there');
-      expect(changes.map((c) => c.textOp!.op), [TextOpType.delete, TextOpType.insert]);
+      expect(changes.map((c) => c.textOp!.op), [
+        TextOpType.delete,
+        TextOpType.insert,
+      ]);
       b.applyChanges(a.getPendingChanges());
       expect(b.getText('n', '1', 'body'), 'hello there');
       expect(a.setText('n', '1', 'body', 'hello there'), isEmpty);
@@ -93,9 +105,18 @@ void main() {
     test('text edits out of range throw and change nothing', () {
       final store = newStore('n1');
       store.insertText('n', '1', 'body', 0, 'hi');
-      expect(() => store.insertText('n', '1', 'body', 5, 'x'), throwsRangeError);
-      expect(() => store.insertText('n', '1', 'body', -1, 'x'), throwsRangeError);
-      expect(() => store.insertText('n', '1', 'body', 0, ''), throwsArgumentError);
+      expect(
+        () => store.insertText('n', '1', 'body', 5, 'x'),
+        throwsRangeError,
+      );
+      expect(
+        () => store.insertText('n', '1', 'body', -1, 'x'),
+        throwsRangeError,
+      );
+      expect(
+        () => store.insertText('n', '1', 'body', 0, ''),
+        throwsArgumentError,
+      );
       expect(() => store.deleteText('n', '1', 'body', 2, 1), throwsRangeError);
       expect(store.getText('n', '1', 'body'), 'hi');
       expect(store.pendingCount, 1);
@@ -104,7 +125,10 @@ void main() {
     test('a text edit onto a field of another type throws CrdtApplyError', () {
       final store = newStore('n1');
       store.setField('n', '1', 'body', 'plain');
-      expect(() => store.insertText('n', '1', 'body', 0, 'x'), throwsA(isA<CrdtApplyError>()));
+      expect(
+        () => store.insertText('n', '1', 'body', 0, 'x'),
+        throwsA(isA<CrdtApplyError>()),
+      );
       expect(store.getDocument('n', '1')!['body'], 'plain');
       expect(store.pendingCount, 1);
     });

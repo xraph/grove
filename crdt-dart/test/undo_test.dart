@@ -2,9 +2,21 @@ import 'package:grove_crdt/grove_crdt.dart';
 import 'package:test/test.dart';
 
 ChangeRecord change(int ts) => ChangeRecord(
-    table: 't', pk: '1', field: 'f', crdtType: CrdtType.lww, hlc: HLC(BigInt.from(ts), 0, 'a'), nodeId: 'a', value: JsonValue(ts));
+  table: 't',
+  pk: '1',
+  field: 'f',
+  crdtType: CrdtType.lww,
+  hlc: HLC(BigInt.from(ts), 0, 'a'),
+  nodeId: 'a',
+  value: JsonValue(ts),
+);
 
-FieldState field(int ts) => FieldState(type: CrdtType.lww, hlc: HLC(BigInt.from(ts), 0, 'a'), nodeId: 'a', value: JsonValue(ts));
+FieldState field(int ts) => FieldState(
+  type: CrdtType.lww,
+  hlc: HLC(BigInt.from(ts), 0, 'a'),
+  nodeId: 'a',
+  value: JsonValue(ts),
+);
 
 void main() {
   test('undo returns the last recorded entry and enables redo', () {
@@ -82,7 +94,10 @@ void main() {
       expect(e.change, same(c));
       expect(e.previousState, same(prev));
       expect(e.previousDocument, isNull);
-      expect(e.timestamp, inInclusiveRange(before, DateTime.now().millisecondsSinceEpoch));
+      expect(
+        e.timestamp,
+        inInclusiveRange(before, DateTime.now().millisecondsSinceEpoch),
+      );
     });
 
     test('a null previous state is kept as null', () {
@@ -128,7 +143,12 @@ void main() {
 
     test('popUndo keeps the entry previousDocument for the caller', () {
       final d = DocumentState(table: 't', pk: '1');
-      final u = UndoManager()..record(change(1).copyWith(tombstone: true), null, previousDocument: d);
+      final u = UndoManager()
+        ..record(
+          change(1).copyWith(tombstone: true),
+          null,
+          previousDocument: d,
+        );
       expect(u.popUndo()!.previousDocument, same(d));
       expect(u.canUndo, isFalse);
     });
@@ -138,7 +158,11 @@ void main() {
         ..record(change(1), null)
         ..record(change(2), null);
       final popped = u.popUndo()!;
-      final compensated = UndoEntry(change: change(9), previousState: field(2), timestamp: popped.timestamp);
+      final compensated = UndoEntry(
+        change: change(9),
+        previousState: field(2),
+        timestamp: popped.timestamp,
+      );
       u.pushRedo(compensated);
       expect((u.undoCount, u.redoCount), (1, 1));
       expect(u.redo(), same(compensated));
@@ -151,7 +175,9 @@ void main() {
         ..record(change(1), null)
         ..record(change(2), null);
       for (var i = 3; i <= 4; i++) {
-        u.pushRedo(UndoEntry(change: change(i), previousState: null, timestamp: 0));
+        u.pushRedo(
+          UndoEntry(change: change(i), previousState: null, timestamp: 0),
+        );
       }
       u.redo();
       u.redo();
@@ -160,7 +186,9 @@ void main() {
 
     test('pushRedo enables redo on its own and a later record clears it', () {
       final u = UndoManager();
-      u.pushRedo(UndoEntry(change: change(1), previousState: null, timestamp: 0));
+      u.pushRedo(
+        UndoEntry(change: change(1), previousState: null, timestamp: 0),
+      );
       expect(u.canRedo, isTrue);
       u.record(change(2), null);
       expect(u.canRedo, isFalse);
@@ -169,7 +197,9 @@ void main() {
     test('pushRedo trims the oldest redo entries to maxHistory', () {
       final u = UndoManager(maxHistory: 2);
       for (var i = 1; i <= 3; i++) {
-        u.pushRedo(UndoEntry(change: change(i), previousState: null, timestamp: 0));
+        u.pushRedo(
+          UndoEntry(change: change(i), previousState: null, timestamp: 0),
+        );
       }
       expect(u.redoCount, 2);
       expect(u.redo()!.change.hlc.ts, BigInt.from(3));
@@ -178,18 +208,23 @@ void main() {
     });
   });
 
-  test('pushUndo adds an entry without clearing redo, and trims to maxHistory', () {
-    final u = UndoManager(maxHistory: 2)
-      ..record(change(1), null)
-      ..record(change(2), null);
-    final e = u.undo()!;
-    u.pushUndo(UndoEntry(change: change(3), previousState: null, timestamp: 0));
-    expect(u.canRedo, isTrue);
-    expect(u.redoCount, 1);
-    expect(u.undoCount, 2);
-    expect(u.undo()!.change.hlc.ts, BigInt.from(3));
-    expect(u.undo()!.change.hlc.ts, BigInt.one);
-    expect(u.redo(), isNotNull);
-    expect(e.change.hlc.ts, BigInt.two);
-  });
+  test(
+    'pushUndo adds an entry without clearing redo, and trims to maxHistory',
+    () {
+      final u = UndoManager(maxHistory: 2)
+        ..record(change(1), null)
+        ..record(change(2), null);
+      final e = u.undo()!;
+      u.pushUndo(
+        UndoEntry(change: change(3), previousState: null, timestamp: 0),
+      );
+      expect(u.canRedo, isTrue);
+      expect(u.redoCount, 1);
+      expect(u.undoCount, 2);
+      expect(u.undo()!.change.hlc.ts, BigInt.from(3));
+      expect(u.undo()!.change.hlc.ts, BigInt.one);
+      expect(u.redo(), isNotNull);
+      expect(e.change.hlc.ts, BigInt.two);
+    },
+  );
 }

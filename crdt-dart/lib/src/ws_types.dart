@@ -81,16 +81,22 @@ final class WebSocketMessage {
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        'type': type.wire,
-        'payload': payload,
-        if (requestId.isNotEmpty) 'request_id': requestId,
-      };
+    'type': type.wire,
+    'payload': payload,
+    if (requestId.isNotEmpty) 'request_id': requestId,
+  };
 
   /// Decodes the Go wire form. Throws [FormatException] for an unknown type.
   static WebSocketMessage fromJson(Object? j) {
     final m = wireObj(j);
     final raw = wireStr(m, 'type');
-    final type = WsMessageType.fromWire(raw) ?? (throw FormatException('crdt: unknown ws message type $raw'));
-    return WebSocketMessage(type, payload: m['payload'], requestId: wireStr(m, 'request_id'));
+    final type =
+        WsMessageType.fromWire(raw) ??
+        (throw FormatException('crdt: unknown ws message type $raw'));
+    return WebSocketMessage(
+      type,
+      payload: m['payload'],
+      requestId: wireStr(m, 'request_id'),
+    );
   }
 }

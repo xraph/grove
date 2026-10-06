@@ -18,27 +18,37 @@ import 'support/store_fakes.dart';
 
 HLC hlc(int ts, String node) => HLC(BigInt.from(ts), 0, node);
 
-ChangeRecord remote(String field, Object? value, {int ts = 500, String pk = '1'}) => ChangeRecord(
-      table: 'users',
-      pk: pk,
-      field: field,
-      crdtType: CrdtType.lww,
-      hlc: hlc(ts, 'remote'),
-      nodeId: 'remote',
-      value: JsonValue(value),
-    );
+ChangeRecord remote(
+  String field,
+  Object? value, {
+  int ts = 500,
+  String pk = '1',
+}) => ChangeRecord(
+  table: 'users',
+  pk: pk,
+  field: field,
+  crdtType: CrdtType.lww,
+  hlc: hlc(ts, 'remote'),
+  nodeId: 'remote',
+  value: JsonValue(value),
+);
 
 WriteEvent withValue(WriteEvent ev, Object? value) => WriteEvent(
-      table: ev.table,
-      pk: ev.pk,
-      field: ev.field,
-      crdtType: ev.crdtType,
-      value: value,
-      change: ev.change.copyWith(value: JsonValue(value)),
-      previousState: ev.previousState,
-    );
+  table: ev.table,
+  pk: ev.pk,
+  field: ev.field,
+  crdtType: ev.crdtType,
+  value: value,
+  change: ev.change.copyWith(value: JsonValue(value)),
+  previousState: ev.previousState,
+);
 
-({CrdtStore store, List<(Object, String)> pluginErrors, List<Object> storageErrors}) mk({ReplicaStorage? storage}) {
+({
+  CrdtStore store,
+  List<(Object, String)> pluginErrors,
+  List<Object> storageErrors,
+})
+mk({ReplicaStorage? storage}) {
   final pluginErrors = <(Object, String)>[];
   final storageErrors = <Object>[];
   final store = CrdtStore(
@@ -49,7 +59,11 @@ WriteEvent withValue(WriteEvent ev, Object? value) => WriteEvent(
     onPluginError: (e, name) => pluginErrors.add((e, name)),
     onStorageError: storageErrors.add,
   );
-  return (store: store, pluginErrors: pluginErrors, storageErrors: storageErrors);
+  return (
+    store: store,
+    pluginErrors: pluginErrors,
+    storageErrors: storageErrors,
+  );
 }
 
 void main() {
@@ -57,10 +71,15 @@ void main() {
     test('calls beforeWrite on registered plugins', () {
       final (:store, pluginErrors: _, storageErrors: _) = mk();
       final events = <WriteEvent>[];
-      store.use(FnPlugin('w', onBeforeWrite: (ev) {
-        events.add(ev);
-        return ev;
-      }));
+      store.use(
+        FnPlugin(
+          'w',
+          onBeforeWrite: (ev) {
+            events.add(ev);
+            return ev;
+          },
+        ),
+      );
       final c = store.setField('users', '1', 'name', 'Alice')!;
       expect(events, hasLength(1));
       expect(events[0].table, 'users');
@@ -74,7 +93,9 @@ void main() {
 
     test('allows plugins to transform write events', () {
       final (:store, pluginErrors: _, storageErrors: _) = mk();
-      store.use(FnPlugin('w', onBeforeWrite: (ev) => withValue(ev, 'transformed')));
+      store.use(
+        FnPlugin('w', onBeforeWrite: (ev) => withValue(ev, 'transformed')),
+      );
       final c = store.setField('users', '1', 'name', 'Alice')!;
       expect(c.value!.value, 'transformed');
       expect(store.getDocument('users', '1')!['name'], 'transformed');
@@ -97,10 +118,15 @@ void main() {
       final (:store, pluginErrors: _, storageErrors: _) = mk();
       final events = <WriteEvent>[];
       Object? seenInHook;
-      store.use(FnPlugin('w', onAfterWrite: (ev) {
-        events.add(ev);
-        seenInHook = store.getDocument('users', '1')?['name'];
-      }));
+      store.use(
+        FnPlugin(
+          'w',
+          onAfterWrite: (ev) {
+            events.add(ev);
+            seenInHook = store.getDocument('users', '1')?['name'];
+          },
+        ),
+      );
       store.setField('users', '1', 'name', 'Alice');
       expect(events, hasLength(1));
       expect(events[0].field, 'name');
@@ -110,15 +136,25 @@ void main() {
     test('chains multiple write hooks in order', () {
       final (:store, pluginErrors: _, storageErrors: _) = mk();
       final order = <int>[];
-      store.use(FnPlugin('w1', onBeforeWrite: (ev) {
-        order.add(1);
-        return withValue(ev, 'from-1');
-      }));
-      store.use(FnPlugin('w2', onBeforeWrite: (ev) {
-        order.add(2);
-        expect(ev.value, 'from-1');
-        return withValue(ev, 'from-2');
-      }));
+      store.use(
+        FnPlugin(
+          'w1',
+          onBeforeWrite: (ev) {
+            order.add(1);
+            return withValue(ev, 'from-1');
+          },
+        ),
+      );
+      store.use(
+        FnPlugin(
+          'w2',
+          onBeforeWrite: (ev) {
+            order.add(2);
+            expect(ev.value, 'from-1');
+            return withValue(ev, 'from-2');
+          },
+        ),
+      );
       store.setField('users', '1', 'name', 'Alice');
       expect(order, [1, 2]);
       expect(store.getDocument('users', '1')!['name'], 'from-2');
@@ -129,10 +165,15 @@ void main() {
     test('calls beforeMerge on incoming changes', () {
       final (:store, pluginErrors: _, storageErrors: _) = mk();
       final events = <MergeEvent>[];
-      store.use(FnPlugin('m', onBeforeMerge: (ev) {
-        events.add(ev);
-        return ev.remote;
-      }));
+      store.use(
+        FnPlugin(
+          'm',
+          onBeforeMerge: (ev) {
+            events.add(ev);
+            return ev.remote;
+          },
+        ),
+      );
       final change = remote('name', 'Alice');
       store.applyChanges([change]);
       expect(events, hasLength(1));
@@ -143,8 +184,16 @@ void main() {
 
     test('allows plugins to reject changes by returning null', () {
       final (:store, pluginErrors: _, storageErrors: _) = mk();
-      store.use(FnPlugin('m', onBeforeMerge: (ev) => ev.remote.field == 'secret' ? null : ev.remote));
-      final affected = store.applyChanges([remote('secret', 'x'), remote('name', 'Alice', pk: '2')]);
+      store.use(
+        FnPlugin(
+          'm',
+          onBeforeMerge: (ev) => ev.remote.field == 'secret' ? null : ev.remote,
+        ),
+      );
+      final affected = store.applyChanges([
+        remote('secret', 'x'),
+        remote('name', 'Alice', pk: '2'),
+      ]);
       expect(affected, {(table: 'users', pk: '2')});
       expect(store.getDocumentState('users', '1'), isNull);
       expect(store.getDocument('users', '2')!['name'], 'Alice');
@@ -177,14 +226,29 @@ void main() {
   group('ReadHook', () {
     test('transforms documents via transformDocument', () {
       final (:store, pluginErrors: _, storageErrors: _) = mk();
-      store.use(FnPlugin('r', onTransformDocument: (t, p, doc) => {...doc, 'extra': true}));
+      store.use(
+        FnPlugin(
+          'r',
+          onTransformDocument: (t, p, doc) => {...doc, 'extra': true},
+        ),
+      );
       store.setField('t', '1', 'name', 'Alice');
-      expect(store.getDocument('t', '1'), {'_table': 't', '_pk': '1', 'name': 'Alice', 'extra': true});
+      expect(store.getDocument('t', '1'), {
+        '_table': 't',
+        '_pk': '1',
+        'name': 'Alice',
+        'extra': true,
+      });
     });
 
     test('filters documents returning null', () {
       final (:store, pluginErrors: _, storageErrors: _) = mk();
-      store.use(FnPlugin('r', onTransformDocument: (t, p, doc) => p == 'hidden' ? null : doc));
+      store.use(
+        FnPlugin(
+          'r',
+          onTransformDocument: (t, p, doc) => p == 'hidden' ? null : doc,
+        ),
+      );
       store.setField('t', 'hidden', 'name', 'Alice');
       store.setField('t', 'shown', 'name', 'Bob');
       expect(store.getDocument('t', 'hidden'), isNull);
@@ -193,7 +257,9 @@ void main() {
 
     test('transforms collections via transformCollection', () {
       final (:store, pluginErrors: _, storageErrors: _) = mk();
-      store.use(FnPlugin('r', onTransformCollection: (t, docs) => docs.sublist(0, 1)));
+      store.use(
+        FnPlugin('r', onTransformCollection: (t, docs) => docs.sublist(0, 1)),
+      );
       for (final id in ['1', '2', '3']) {
         store.setField('t', id, 'id', int.parse(id));
       }
@@ -208,7 +274,12 @@ void main() {
       final storage = RecordingStorage();
       final (:store, pluginErrors: _, storageErrors: _) = mk(storage: storage);
       await store.ready;
-      store.use(FnPlugin('st', onBeforePersist: (t, p, doc) => doc.copyWith(tombstone: true))); // e.g., encrypt
+      store.use(
+        FnPlugin(
+          'st',
+          onBeforePersist: (t, p, doc) => doc.copyWith(tombstone: true),
+        ),
+      ); // e.g., encrypt
       store.setField('t', '1', 'name', 'Alice');
       await store.flushPersistence();
       expect(storage.saved.single.doc.tombstone, isTrue);
@@ -222,12 +293,24 @@ void main() {
           't': {'1': DocumentState(table: 't', pk: '1')},
         };
       final store = CrdtStore('n1', HybridClock('n1'), storage: storage);
-      store.use(FnPlugin('st', onAfterHydrate: (t, p, doc) {
-        return doc.copyWith(fields: {
-          ...doc.fields,
-          'injected': FieldState(type: CrdtType.lww, hlc: hlc(1, 'n'), nodeId: 'n', value: const JsonValue('hydrated')),
-        });
-      }));
+      store.use(
+        FnPlugin(
+          'st',
+          onAfterHydrate: (t, p, doc) {
+            return doc.copyWith(
+              fields: {
+                ...doc.fields,
+                'injected': FieldState(
+                  type: CrdtType.lww,
+                  hlc: hlc(1, 'n'),
+                  nodeId: 'n',
+                  value: const JsonValue('hydrated'),
+                ),
+              },
+            );
+          },
+        ),
+      );
       await store.ready;
       expect(store.getDocument('t', '1')!['injected'], 'hydrated');
     });
@@ -236,7 +319,9 @@ void main() {
   group('fail-closed hooks at the store level', () {
     test('a throwing beforeWrite cancels the write and is reported', () {
       final (:store, :pluginErrors, storageErrors: _) = mk();
-      store.use(FnPlugin('broken', onBeforeWrite: (_) => throw StateError('boom')));
+      store.use(
+        FnPlugin('broken', onBeforeWrite: (_) => throw StateError('boom')),
+      );
       expect(store.setField('t', '1', 'f', 1), isNull);
       expect(store.addToSet('t', '1', 's', ['x']), isNull);
       expect(store.getDocumentState('t', '1'), isNull);
@@ -247,9 +332,22 @@ void main() {
 
     test('a throwing beforeMerge skips that change and the rest of the batch applies', () {
       final (:store, :pluginErrors, storageErrors: _) = mk();
-      store.use(FnPlugin('broken', onBeforeMerge: (ev) => ev.remote.pk == 'bad' ? throw StateError('boom') : ev.remote));
-      final affected = store.applyChanges([remote('a', 1, pk: 'ok1'), remote('a', 1, pk: 'bad'), remote('a', 1, pk: 'ok2')]);
-      expect(affected, {(table: 'users', pk: 'ok1'), (table: 'users', pk: 'ok2')});
+      store.use(
+        FnPlugin(
+          'broken',
+          onBeforeMerge: (ev) =>
+              ev.remote.pk == 'bad' ? throw StateError('boom') : ev.remote,
+        ),
+      );
+      final affected = store.applyChanges([
+        remote('a', 1, pk: 'ok1'),
+        remote('a', 1, pk: 'bad'),
+        remote('a', 1, pk: 'ok2'),
+      ]);
+      expect(affected, {
+        (table: 'users', pk: 'ok1'),
+        (table: 'users', pk: 'ok2'),
+      });
       expect(store.getDocumentState('users', 'bad'), isNull);
       expect(pluginErrors.single.$2, 'broken');
     });
@@ -257,7 +355,12 @@ void main() {
     test('a throwing transformDocument hides the document', () {
       final (:store, :pluginErrors, storageErrors: _) = mk();
       store.setField('t', '1', 'secret', 'x');
-      store.use(FnPlugin('broken', onTransformDocument: (t, p, doc) => throw StateError('boom')));
+      store.use(
+        FnPlugin(
+          'broken',
+          onTransformDocument: (t, p, doc) => throw StateError('boom'),
+        ),
+      );
       expect(store.getDocument('t', '1'), isNull);
       expect(store.getCollection('t'), isEmpty);
       expect(pluginErrors, isNotEmpty);
@@ -266,7 +369,12 @@ void main() {
     test('a throwing transformCollection hides the whole collection', () {
       final (:store, :pluginErrors, storageErrors: _) = mk();
       store.setField('t', '1', 'f', 1);
-      store.use(FnPlugin('broken', onTransformCollection: (t, docs) => throw StateError('boom')));
+      store.use(
+        FnPlugin(
+          'broken',
+          onTransformCollection: (t, docs) => throw StateError('boom'),
+        ),
+      );
       expect(store.getCollection('t'), isEmpty);
       expect(store.getDocument('t', '1'), isNotNull);
       expect(pluginErrors.single.$2, 'broken');
@@ -278,12 +386,20 @@ void main() {
         final (:store, :pluginErrors, :storageErrors) = mk(storage: storage);
         await store.ready;
         var broken = true;
-        store.use(FnPlugin('encryptor', onBeforePersist: (t, p, doc) {
-          if (broken) throw StateError('no key');
-          return doc.copyWith(fields: const {});
-        }));
+        store.use(
+          FnPlugin(
+            'encryptor',
+            onBeforePersist: (t, p, doc) {
+              if (broken) throw StateError('no key');
+              return doc.copyWith(fields: const {});
+            },
+          ),
+        );
         store.setField('t', '1', 'secret', 'plaintext');
-        await expectLater(store.flushPersistence(), throwsA(isA<ReplicaPersistFailed>()));
+        await expectLater(
+          store.flushPersistence(),
+          throwsA(isA<ReplicaPersistFailed>()),
+        );
         expect(storage.saved, isEmpty, reason: 'atomic: $atomic');
         expect(storage.savedPending, isEmpty);
         if (storage is RecordingAtomicStorage) expect(storage.commits, isEmpty);
@@ -310,12 +426,30 @@ void main() {
       final storage = RecordingStorage()
         ..preloaded = {
           't': {
-            'locked': DocumentState(table: 't', pk: 'locked', fields: {
-              'secret': FieldState(type: CrdtType.lww, hlc: hlc(1, 'n'), nodeId: 'n', value: const JsonValue('ciphertext')),
-            }),
-            'open': DocumentState(table: 't', pk: 'open', fields: {
-              'a': FieldState(type: CrdtType.lww, hlc: hlc(1, 'n'), nodeId: 'n', value: const JsonValue(1)),
-            }),
+            'locked': DocumentState(
+              table: 't',
+              pk: 'locked',
+              fields: {
+                'secret': FieldState(
+                  type: CrdtType.lww,
+                  hlc: hlc(1, 'n'),
+                  nodeId: 'n',
+                  value: const JsonValue('ciphertext'),
+                ),
+              },
+            ),
+            'open': DocumentState(
+              table: 't',
+              pk: 'open',
+              fields: {
+                'a': FieldState(
+                  type: CrdtType.lww,
+                  hlc: hlc(1, 'n'),
+                  nodeId: 'n',
+                  value: const JsonValue(1),
+                ),
+              },
+            ),
           },
         };
       final pluginErrors = <(Object, String)>[];
@@ -327,7 +461,13 @@ void main() {
         onPluginError: (e, n) => pluginErrors.add((e, n)),
         onStorageError: storageErrors.add,
       );
-      store.use(FnPlugin('decryptor', onAfterHydrate: (t, p, doc) => p == 'locked' ? throw StateError('bad key') : doc));
+      store.use(
+        FnPlugin(
+          'decryptor',
+          onAfterHydrate: (t, p, doc) =>
+              p == 'locked' ? throw StateError('bad key') : doc,
+        ),
+      );
       await expectLater(store.ready, completes);
       expect(store.getDocument('t', 'locked'), isNull);
       expect(store.getDocumentState('t', 'locked'), isNull);
@@ -336,18 +476,25 @@ void main() {
       expect(storageErrors.single, isA<StateError>());
     });
 
-    test('a throwing notification hook is reported and the write still stands', () {
-      final (:store, :pluginErrors, storageErrors: _) = mk();
-      store.use(FnPlugin(
-        'noisy',
-        onAfterWrite: (_) => throw StateError('after write'),
-        onAfterMerge: (_) => throw StateError('after merge'),
-      ));
-      expect(store.setField('t', '1', 'a', 1), isNotNull);
-      expect(store.applyChanges([remote('b', 2)]), {(table: 'users', pk: '1')});
-      expect(store.getDocument('t', '1')!['a'], 1);
-      expect(store.getDocument('users', '1')!['b'], 2);
-      expect(pluginErrors.map((e) => e.$2), ['noisy', 'noisy']);
-    });
+    test(
+      'a throwing notification hook is reported and the write still stands',
+      () {
+        final (:store, :pluginErrors, storageErrors: _) = mk();
+        store.use(
+          FnPlugin(
+            'noisy',
+            onAfterWrite: (_) => throw StateError('after write'),
+            onAfterMerge: (_) => throw StateError('after merge'),
+          ),
+        );
+        expect(store.setField('t', '1', 'a', 1), isNotNull);
+        expect(store.applyChanges([remote('b', 2)]), {
+          (table: 'users', pk: '1'),
+        });
+        expect(store.getDocument('t', '1')!['a'], 1);
+        expect(store.getDocument('users', '1')!['b'], 2);
+        expect(pluginErrors.map((e) => e.$2), ['noisy', 'noisy']);
+      },
+    );
   });
 }

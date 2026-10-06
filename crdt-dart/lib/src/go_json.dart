@@ -39,7 +39,9 @@ String goString(String s) {
         continue;
       }
     }
-    return String.fromCharCodes([for (final r in s.runes) r >= 0xD800 && r <= 0xDFFF ? 0xFFFD : r]);
+    return String.fromCharCodes([
+      for (final r in s.runes) r >= 0xD800 && r <= 0xDFFF ? 0xFFFD : r,
+    ]);
   }
   return s;
 }
@@ -53,18 +55,30 @@ String goString(String s) {
 /// a value that is not JSON (a non-finite number, a non-string key, or any
 /// other object). A [BigInt] and a [RawJson] are kept as they are.
 Object? goJsonCopy(Object? v) => switch (v) {
-      null || bool() || BigInt() || RawJson() => v,
-      final num n => n.isFinite ? n : throw ArgumentError.value(v, 'value', 'not JSON: a non-finite number'),
-      final String s => goString(s),
-      final List<Object?> l => <Object?>[for (final e in l) goJsonCopy(e)],
-      final Map<Object?, Object?> m => <String, Object?>{
-          for (final e in m.entries) _jsonKey(e.key): goJsonCopy(e.value),
-        },
-      _ => throw ArgumentError.value(v, 'value', 'not a JSON value (${v.runtimeType})'),
-    };
+  null || bool() || BigInt() || RawJson() => v,
+  final num n =>
+    n.isFinite
+        ? n
+        : throw ArgumentError.value(
+            v,
+            'value',
+            'not JSON: a non-finite number',
+          ),
+  final String s => goString(s),
+  final List<Object?> l => <Object?>[for (final e in l) goJsonCopy(e)],
+  final Map<Object?, Object?> m => <String, Object?>{
+    for (final e in m.entries) _jsonKey(e.key): goJsonCopy(e.value),
+  },
+  _ => throw ArgumentError.value(
+    v,
+    'value',
+    'not a JSON value (${v.runtimeType})',
+  ),
+};
 
-String _jsonKey(Object? k) =>
-    k is String ? goString(k) : throw ArgumentError.value(k, 'key', 'a JSON object key must be a string');
+String _jsonKey(Object? k) => k is String
+    ? goString(k)
+    : throw ArgumentError.value(k, 'key', 'a JSON object key must be a string');
 
 /// Deep JSON equality where `1` and `1.0` are equal.
 bool jsonDeepEquals(Object? a, Object? b) => jsonDeepEquality.equals(a, b);
@@ -98,16 +112,16 @@ final class _JsonEquality implements Equality<Object?> {
 
   @override
   int hash(Object? e) => switch (e) {
-        // equals treats 1, 1.0 and -0.0 as the numbers they equal, so hash by
-        // double value, and fold -0.0 into 0.0.
-        final num n => n == 0 ? 0.0.hashCode : n.toDouble().hashCode,
-        final List<Object?> l => Object.hashAll(l.map(hash)),
-        final Map<String, Object?> m => m.entries.fold<int>(
-            0,
-            (acc, en) => acc + Object.hash(en.key, hash(en.value)),
-          ),
-        _ => e.hashCode,
-      };
+    // equals treats 1, 1.0 and -0.0 as the numbers they equal, so hash by
+    // double value, and fold -0.0 into 0.0.
+    final num n => n == 0 ? 0.0.hashCode : n.toDouble().hashCode,
+    final List<Object?> l => Object.hashAll(l.map(hash)),
+    final Map<String, Object?> m => m.entries.fold<int>(
+      0,
+      (acc, en) => acc + Object.hash(en.key, hash(en.value)),
+    ),
+    _ => e.hashCode,
+  };
 
   @override
   bool isValidKey(Object? o) => true;
@@ -118,11 +132,15 @@ final class _JsonEquality implements Equality<Object?> {
 String formatRfc3339Nano(DateTime t) {
   final u = t.toUtc();
   String two(int v) => v.toString().padLeft(2, '0');
-  final base = '${u.year.toString().padLeft(4, '0')}-${two(u.month)}-${two(u.day)}'
+  final base =
+      '${u.year.toString().padLeft(4, '0')}-${two(u.month)}-${two(u.day)}'
       'T${two(u.hour)}:${two(u.minute)}:${two(u.second)}';
   final micros = u.millisecond * 1000 + u.microsecond;
   if (micros == 0) return '${base}Z';
-  final frac = micros.toString().padLeft(6, '0').replaceFirst(RegExp(r'0+$'), '');
+  final frac = micros
+      .toString()
+      .padLeft(6, '0')
+      .replaceFirst(RegExp(r'0+$'), '');
   return '$base.${frac}Z';
 }
 
@@ -224,7 +242,11 @@ void _writeString(StringBuffer out, String s) {
   final units = s.codeUnits;
   for (var i = 0; i < units.length; i++) {
     final u = units[i];
-    if (u >= 0xD800 && u <= 0xDBFF && i + 1 < units.length && units[i + 1] >= 0xDC00 && units[i + 1] <= 0xDFFF) {
+    if (u >= 0xD800 &&
+        u <= 0xDBFF &&
+        i + 1 < units.length &&
+        units[i + 1] >= 0xDC00 &&
+        units[i + 1] <= 0xDFFF) {
       out.writeCharCode(u);
       out.writeCharCode(units[++i]);
       continue;

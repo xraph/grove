@@ -54,19 +54,27 @@ final class UndoManager {
   /// Records [change] and the state it replaced. Clears the redo stack.
   ///
   /// Pass [previousDocument] for a `deleteDocument`.
-  void record(ChangeRecord change, FieldState? previousState, {DocumentState? previousDocument}) {
-    _undo.add(UndoEntry(
-      change: change,
-      previousState: previousState,
-      previousDocument: previousDocument,
-      timestamp: DateTime.now().millisecondsSinceEpoch,
-    ));
+  void record(
+    ChangeRecord change,
+    FieldState? previousState, {
+    DocumentState? previousDocument,
+  }) {
+    _undo.add(
+      UndoEntry(
+        change: change,
+        previousState: previousState,
+        previousDocument: previousDocument,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
     _trim(_undo);
     _redo.clear();
   }
 
   void _trim(List<UndoEntry> stack) {
-    if (stack.length > maxHistory) stack.removeRange(0, stack.length - maxHistory);
+    if (stack.length > maxHistory) {
+      stack.removeRange(0, stack.length - maxHistory);
+    }
   }
 
   /// Whether [undo] has an entry.

@@ -46,13 +46,17 @@ PnCounterState mergeCounter(PnCounterState local, PnCounterState remote) {
     return out;
   }
 
-  return PnCounterState(inc: maxed(local.inc, remote.inc), dec: maxed(local.dec, remote.dec));
+  return PnCounterState(
+    inc: maxed(local.inc, remote.inc),
+    dec: maxed(local.dec, remote.dec),
+  );
 }
 
 /// Sum of increments minus sum of decrements. Port of Go
 /// `PNCounterState.Value`.
 int counterValue(PnCounterState s) =>
-    s.inc.values.fold(0, (a, b) => a + b) - s.dec.values.fold(0, (a, b) => a + b);
+    s.inc.values.fold(0, (a, b) => a + b) -
+    s.dec.values.fold(0, (a, b) => a + b);
 
 // --- OR-set ---
 
@@ -67,7 +71,8 @@ String removedKey(String elem, OrSetTag t) => '$elem|${tagKey(t)}';
 /// Whether [t] is removed for [elem], honouring both the element-scoped key
 /// and the legacy tag-only key. Port of Go `tagRemoved`.
 bool tagRemoved(OrSetState s, String elem, OrSetTag t) =>
-    (s.removed[removedKey(elem, t)] ?? false) || (s.removed[tagKey(t)] ?? false);
+    (s.removed[removedKey(elem, t)] ?? false) ||
+    (s.removed[tagKey(t)] ?? false);
 
 List<OrSetTag> _dedupe(List<OrSetTag> tags) {
   final seen = <String>{};
@@ -104,9 +109,9 @@ OrSetState mergeSet(OrSetState local, OrSetState remote) {
 /// The keys of the live elements (those with a tag that is not removed), in
 /// Go byte order. Port of Go `ORSetState.Elements`.
 List<String> setElementKeys(OrSetState s) => [
-      for (final e in s.entries.entries)
-        if (e.value.any((t) => !tagRemoved(s, e.key, t))) e.key,
-    ]..sort(compareGoStrings);
+  for (final e in s.entries.entries)
+    if (e.value.any((t) => !tagRemoved(s, e.key, t))) e.key,
+]..sort(compareGoStrings);
 
 Object? _decodeKey(String key) {
   try {
@@ -119,16 +124,18 @@ Object? _decodeKey(String key) {
 /// The live element values in Go byte order of their keys. A key that is not
 /// JSON stands for itself (Go keys are always JSON; another engine's may not
 /// be).
-List<Object?> setElements(OrSetState s) => [for (final k in setElementKeys(s)) _decodeKey(k)];
+List<Object?> setElements(OrSetState s) => [
+  for (final k in setElementKeys(s)) _decodeKey(k),
+];
 
 /// Every entry key whose decoded value deep-equals [element].
 ///
 /// A remove built by the store names these keys, so it reaches entries that
 /// another engine wrote under a non-canonical spelling of the same value.
 List<String> keysForElement(OrSetState s, Object? element) => [
-      for (final k in s.entries.keys)
-        if (jsonDeepEquals(_decodeKey(k), element)) k,
-    ];
+  for (final k in s.entries.keys)
+    if (jsonDeepEquals(_decodeKey(k), element)) k,
+];
 
 // --- RGA list ---
 
@@ -169,7 +176,9 @@ List<RgaNode> _walkList(RgaListState s) {
   // a node its own descendant. Go's walk would never return; visit each node
   // once.
   final visited = HashSet<RgaNode>.identity();
-  final stack = <RgaNode>[...(children[hlcString(HLC.zero)] ?? const <RgaNode>[]).reversed];
+  final stack = <RgaNode>[
+    ...(children[hlcString(HLC.zero)] ?? const <RgaNode>[]).reversed,
+  ];
   while (stack.isNotEmpty) {
     final node = stack.removeLast();
     if (!visited.add(node)) continue;
@@ -183,14 +192,18 @@ List<RgaNode> _walkList(RgaListState s) {
 /// A deep copy of a decoded JSON value. Maps and lists are rebuilt, so the
 /// copy shares nothing mutable with [v].
 Object? _deepCopy(Object? v) => switch (v) {
-      final Map<String, Object?> m => <String, Object?>{for (final e in m.entries) e.key: _deepCopy(e.value)},
-      final List<Object?> l => <Object?>[for (final e in l) _deepCopy(e)],
-      _ => v,
-    };
+  final Map<String, Object?> m => <String, Object?>{
+    for (final e in m.entries) e.key: _deepCopy(e.value),
+  },
+  final List<Object?> l => <Object?>[for (final e in l) _deepCopy(e)],
+  _ => v,
+};
 
 /// The visible values in RGA order. Each value is a deep copy, so changing a
 /// returned map or list never changes the list state.
-List<Object?> listElements(RgaListState s) => [for (final n in _walkList(s)) _deepCopy(n.value.value)];
+List<Object?> listElements(RgaListState s) => [
+  for (final n in _walkList(s)) _deepCopy(n.value.value),
+];
 
 /// The visible node ids in RGA order.
 List<HLC> listNodeIds(RgaListState s) => [for (final n in _walkList(s)) n.id];
@@ -200,7 +213,10 @@ List<HLC> listNodeIds(RgaListState s) => [for (final n in _walkList(s)) n.id];
 /// Path-wise merge. A type mismatch at a path resolves by the higher clock,
 /// which discards a merge of the two sides, so regrouping three states can
 /// give a different result (see [mergeState]). Port of Go `MergeDocument`.
-DocumentCrdtState mergeDocument(DocumentCrdtState local, DocumentCrdtState remote) {
+DocumentCrdtState mergeDocument(
+  DocumentCrdtState local,
+  DocumentCrdtState remote,
+) {
   final out = <String, FieldState>{};
   for (final path in <String>{...local.fields.keys, ...remote.fields.keys}) {
     final l = local.fields[path];
@@ -243,7 +259,9 @@ Map<String, Object?> documentResolve(DocumentCrdtState s) {
       if (sub is Map<String, Object?> && owned.contains(sub)) {
         next = sub;
       } else {
-        next = sub is Map<String, Object?> ? <String, Object?>{...sub} : <String, Object?>{};
+        next = sub is Map<String, Object?>
+            ? <String, Object?>{...sub}
+            : <String, Object?>{};
         owned.add(next);
         m[parts[i]] = next;
       }
@@ -263,34 +281,63 @@ Map<String, Object?> documentResolve(DocumentCrdtState s) {
 /// which `applyChange` deliberately leaves unset for text), and a document
 /// from its [DocumentCrdtState] when present.
 Object? resolveFieldValue(FieldState fs) => switch (fs.type) {
-      CrdtType.lww => _deepCopy(fs.value?.value),
-      CrdtType.counter => fs.counterState == null ? 0 : counterValue(fs.counterState!),
-      CrdtType.set => fs.setState == null ? <Object?>[] : setElements(fs.setState!),
-      CrdtType.list => fs.listState == null ? <Object?>[] : listElements(fs.listState!),
-      CrdtType.text => fs.textState != null ? textValue(fs.textState!) : _deepCopy(fs.value?.value),
-      CrdtType.document => fs.docState != null ? documentResolve(fs.docState!) : _deepCopy(fs.value?.value),
-      CrdtType.none => _deepCopy(fs.value?.value),
-    };
+  CrdtType.lww => _deepCopy(fs.value?.value),
+  CrdtType.counter =>
+    fs.counterState == null ? 0 : counterValue(fs.counterState!),
+  CrdtType.set => fs.setState == null ? <Object?>[] : setElements(fs.setState!),
+  CrdtType.list =>
+    fs.listState == null ? <Object?>[] : listElements(fs.listState!),
+  CrdtType.text =>
+    fs.textState != null
+        ? textValue(fs.textState!)
+        : _deepCopy(fs.value?.value),
+  CrdtType.document =>
+    fs.docState != null
+        ? documentResolve(fs.docState!)
+        : _deepCopy(fs.value?.value),
+  CrdtType.none => _deepCopy(fs.value?.value),
+};
 
 // --- Field states ---
 
 /// Port of Go `ORSetState.ToFieldState`. An empty set has `value` `[]` where
 /// Go writes `null` (its nil slice); readers treat both as empty.
-FieldState setFieldState(OrSetState s, HLC hlc, String node) =>
-    FieldState(type: CrdtType.set, hlc: hlc, nodeId: node, value: JsonValue(setElements(s)), setState: s);
+FieldState setFieldState(OrSetState s, HLC hlc, String node) => FieldState(
+  type: CrdtType.set,
+  hlc: hlc,
+  nodeId: node,
+  value: JsonValue(setElements(s)),
+  setState: s,
+);
 
 /// Port of Go `RGAListState.ToFieldState`. An empty list has `value` `[]`
 /// where Go writes `null`.
-FieldState listFieldState(RgaListState s, HLC hlc, String node) =>
-    FieldState(type: CrdtType.list, hlc: hlc, nodeId: node, value: JsonValue(listElements(s)), listState: s);
+FieldState listFieldState(RgaListState s, HLC hlc, String node) => FieldState(
+  type: CrdtType.list,
+  hlc: hlc,
+  nodeId: node,
+  value: JsonValue(listElements(s)),
+  listState: s,
+);
 
 /// Port of Go `DocumentCRDTState.ToFieldState`.
 FieldState documentFieldState(DocumentCrdtState s, HLC hlc, String node) =>
-    FieldState(type: CrdtType.document, hlc: hlc, nodeId: node, value: JsonValue(documentResolve(s)), docState: s);
+    FieldState(
+      type: CrdtType.document,
+      hlc: hlc,
+      nodeId: node,
+      value: JsonValue(documentResolve(s)),
+      docState: s,
+    );
 
 /// Port of Go `TextState.ToFieldState`.
-FieldState textFieldState(TextState s, HLC hlc, String node) =>
-    FieldState(type: CrdtType.text, hlc: hlc, nodeId: node, value: JsonValue(textValue(s)), textState: s);
+FieldState textFieldState(TextState s, HLC hlc, String node) => FieldState(
+  type: CrdtType.text,
+  hlc: hlc,
+  nodeId: node,
+  value: JsonValue(textValue(s)),
+  textState: s,
+);
 
 /// Merges two states of one field. Port of Go `MergeEngine.MergeField`.
 ///
@@ -298,11 +345,15 @@ FieldState textFieldState(TextState s, HLC hlc, String node) =>
 /// the types differ (or are both [CrdtType.none]) and an [ArgumentError] when
 /// both sides are `null`.
 FieldState mergeField(FieldState? local, FieldState? remote) {
-  if (local == null && remote == null) throw ArgumentError('mergeField: both sides are null');
+  if (local == null && remote == null) {
+    throw ArgumentError('mergeField: both sides are null');
+  }
   if (local == null) return remote!;
   if (remote == null) return local;
   if (local.type != remote.type) {
-    throw CrdtMergeError('crdt: cannot merge different types: ${local.type.wire} vs ${remote.type.wire}');
+    throw CrdtMergeError(
+      'crdt: cannot merge different types: ${local.type.wire} vs ${remote.type.wire}',
+    );
   }
   final newer = remote.hlc.isAfter(local.hlc);
   final hlc = newer ? remote.hlc : local.hlc;
@@ -310,23 +361,37 @@ FieldState mergeField(FieldState? local, FieldState? remote) {
   switch (local.type) {
     case CrdtType.lww:
       final w = newer ? remote : local;
-      return FieldState(type: CrdtType.lww, hlc: w.hlc, nodeId: w.nodeId, value: w.value);
+      return FieldState(
+        type: CrdtType.lww,
+        hlc: w.hlc,
+        nodeId: w.nodeId,
+        value: w.value,
+      );
     case CrdtType.counter:
       return FieldState(
         type: CrdtType.counter,
         hlc: hlc,
         nodeId: node,
-        counterState: mergeCounter(local.counterState ?? const PnCounterState(), remote.counterState ?? const PnCounterState()),
+        counterState: mergeCounter(
+          local.counterState ?? const PnCounterState(),
+          remote.counterState ?? const PnCounterState(),
+        ),
       );
     case CrdtType.set:
       return setFieldState(
-        mergeSet(local.setState ?? const OrSetState(), remote.setState ?? const OrSetState()),
+        mergeSet(
+          local.setState ?? const OrSetState(),
+          remote.setState ?? const OrSetState(),
+        ),
         hlc,
         node,
       );
     case CrdtType.list:
       return listFieldState(
-        mergeList(local.listState ?? const RgaListState(), remote.listState ?? const RgaListState()),
+        mergeList(
+          local.listState ?? const RgaListState(),
+          remote.listState ?? const RgaListState(),
+        ),
         hlc,
         node,
       );
@@ -334,13 +399,19 @@ FieldState mergeField(FieldState? local, FieldState? remote) {
       // Go merges an absent text state as an empty one, which also copies the
       // other side, so the result never aliases an input's mutable state.
       return textFieldState(
-        mergeText(local.textState ?? newTextState(), remote.textState ?? newTextState()),
+        mergeText(
+          local.textState ?? newTextState(),
+          remote.textState ?? newTextState(),
+        ),
         hlc,
         node,
       );
     case CrdtType.document:
       return documentFieldState(
-        mergeDocument(local.docState ?? const DocumentCrdtState(), remote.docState ?? const DocumentCrdtState()),
+        mergeDocument(
+          local.docState ?? const DocumentCrdtState(),
+          remote.docState ?? const DocumentCrdtState(),
+        ),
         hlc,
         node,
       );
@@ -374,7 +445,9 @@ HLC _latest(DocumentState s) {
 /// Legacy set removes and document path deletes also depend on delivery order
 /// (see [applyChange]).
 DocumentState mergeState(DocumentState? local, DocumentState? remote) {
-  if (local == null && remote == null) throw ArgumentError('mergeState: both sides are null');
+  if (local == null && remote == null) {
+    throw ArgumentError('mergeState: both sides are null');
+  }
   if (local == null) return remote!;
   if (remote == null) return local;
   final fields = <String, FieldState>{};
@@ -389,7 +462,9 @@ DocumentState mergeState(DocumentState? local, DocumentState? remote) {
   var tombstoneHlc = HLC.zero;
   if (local.tombstone && remote.tombstone) {
     tombstone = true;
-    tombstoneHlc = remote.tombstoneHlc.isAfter(local.tombstoneHlc) ? remote.tombstoneHlc : local.tombstoneHlc;
+    tombstoneHlc = remote.tombstoneHlc.isAfter(local.tombstoneHlc)
+        ? remote.tombstoneHlc
+        : local.tombstoneHlc;
   } else if (remote.tombstone) {
     if (remote.tombstoneHlc.isAfter(_latest(local))) {
       tombstone = true;

@@ -11,9 +11,11 @@ typedef Json = Map<String, Object?>;
 void main() {
   // Go-generated (tool/conformance_server/cmd/golden). The node platform has no
   // dart:io, so the file is read through readFixture.
-  final golden = jsonDecode(readFixture('test/fixtures/apply_golden.json')) as Json;
+  final golden =
+      jsonDecode(readFixture('test/fixtures/apply_golden.json')) as Json;
   final applyCases = (golden['apply']! as List<Object?>).cast<Json>();
-  final mergeStateCases = (golden['merge_state']! as List<Object?>).cast<Json>();
+  final mergeStateCases = (golden['merge_state']! as List<Object?>)
+      .cast<Json>();
 
   test('has fixtures', () {
     expect(applyCases.length, greaterThanOrEqualTo(10));
@@ -32,11 +34,19 @@ void main() {
           final change = ChangeRecord.fromJson(step['change']);
           final changeBefore = encodeWire(change.toJson());
           final previous = local;
-          final before = previous == null ? null : encodeWire(previous.toJson());
+          final before = previous == null
+              ? null
+              : encodeWire(previous.toJson());
           if (step['error'] != null) {
             expect(
               () => applyChange(previous, change),
-              throwsA(isA<CrdtApplyError>().having((e) => e.message, 'message', step['error'])),
+              throwsA(
+                isA<CrdtApplyError>().having(
+                  (e) => e.message,
+                  'message',
+                  step['error'],
+                ),
+              ),
               reason: 'step $i',
             );
           } else {
@@ -48,15 +58,24 @@ void main() {
             expect(
               jsonEquivalent(step['result'], got),
               isTrue,
-              reason: 'step $i\ngo:   ${jsonEncode(step['result'])}\ndart: ${jsonEncode(got)}',
+              reason:
+                  'step $i\ngo:   ${jsonEncode(step['result'])}\ndart: ${jsonEncode(got)}',
             );
           }
           // Copy-on-write: applying a change mutates neither its inputs nor
           // the change, whether it succeeds or throws.
           if (previous != null) {
-            expect(encodeWire(previous.toJson()), before, reason: 'step $i mutated its input');
+            expect(
+              encodeWire(previous.toJson()),
+              before,
+              reason: 'step $i mutated its input',
+            );
           }
-          expect(encodeWire(change.toJson()), changeBefore, reason: 'step $i mutated the change');
+          expect(
+            encodeWire(change.toJson()),
+            changeBefore,
+            reason: 'step $i mutated the change',
+          );
           i++;
         }
       });
@@ -71,7 +90,13 @@ void main() {
         if (c['error'] != null) {
           expect(
             () => mergeState(local, remote),
-            throwsA(isA<CrdtMergeError>().having((e) => e.message, 'message', c['error'])),
+            throwsA(
+              isA<CrdtMergeError>().having(
+                (e) => e.message,
+                'message',
+                c['error'],
+              ),
+            ),
           );
           return;
         }
@@ -83,8 +108,14 @@ void main() {
           reason: 'go:   ${jsonEncode(c['result'])}\ndart: ${jsonEncode(got)}',
         );
         // Inputs are untouched.
-        expect(jsonEquivalent(c['local'], jsonDecode(encodeWire(local.toJson()))), isTrue);
-        expect(jsonEquivalent(c['remote'], jsonDecode(encodeWire(remote.toJson()))), isTrue);
+        expect(
+          jsonEquivalent(c['local'], jsonDecode(encodeWire(local.toJson()))),
+          isTrue,
+        );
+        expect(
+          jsonEquivalent(c['remote'], jsonDecode(encodeWire(remote.toJson()))),
+          isTrue,
+        );
       });
     }
   });

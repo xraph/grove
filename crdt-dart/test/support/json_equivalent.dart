@@ -8,7 +8,9 @@ import 'package:grove_crdt/grove_crdt.dart';
 bool jsonEquivalent(Object? go, Object? dart) {
   if (go == null || dart == null) {
     final other = go ?? dart;
-    return other == null || (other is List && other.isEmpty) || (other is Map && other.isEmpty);
+    return other == null ||
+        (other is List && other.isEmpty) ||
+        (other is Map && other.isEmpty);
   }
   if (go is Map<String, Object?> && dart is Map<String, Object?>) {
     final keys = {...go.keys, ...dart.keys};

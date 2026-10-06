@@ -4,7 +4,8 @@ import 'go_json.dart';
 import 'types.dart';
 import 'wire_helpers.dart';
 
-JsonValue? _present(Map<String, Object?> m, String k) => m.containsKey(k) ? JsonValue(m[k]) : null;
+JsonValue? _present(Map<String, Object?> m, String k) =>
+    m.containsKey(k) ? JsonValue(m[k]) : null;
 
 String _time(DateTime? t) => formatRfc3339Nano(t ?? goZeroTime);
 
@@ -37,12 +38,12 @@ final class PresenceState {
 
   /// Go wire form. `expires_at` is Go's zero time when [expiresAt] is `null`.
   Map<String, Object?> toJson() => {
-        'node_id': nodeId,
-        'topic': topic,
-        'data': data,
-        'updated_at': _time(updatedAt),
-        'expires_at': _time(expiresAt),
-      };
+    'node_id': nodeId,
+    'topic': topic,
+    'data': data,
+    'updated_at': _time(updatedAt),
+    'expires_at': _time(expiresAt),
+  };
 
   /// Decodes the Go wire form. Go's zero `expires_at` decodes as `null`.
   static PresenceState fromJson(Object? j) {
@@ -74,12 +75,20 @@ final class PresenceUpdate {
   final Object? data;
 
   /// Go wire form. `data` is always emitted.
-  Map<String, Object?> toJson() => {'node_id': nodeId, 'topic': topic, 'data': data};
+  Map<String, Object?> toJson() => {
+    'node_id': nodeId,
+    'topic': topic,
+    'data': data,
+  };
 
   /// Decodes the Go wire form.
   static PresenceUpdate fromJson(Object? j) {
     final m = wireObj(j);
-    return PresenceUpdate(nodeId: wireStr(m, 'node_id'), topic: wireStr(m, 'topic'), data: m['data']);
+    return PresenceUpdate(
+      nodeId: wireStr(m, 'node_id'),
+      topic: wireStr(m, 'topic'),
+      data: m['data'],
+    );
   }
 }
 
@@ -87,7 +96,12 @@ final class PresenceUpdate {
 @immutable
 final class PresenceEvent {
   /// Creates an event.
-  const PresenceEvent({required this.type, required this.nodeId, required this.topic, this.data});
+  const PresenceEvent({
+    required this.type,
+    required this.nodeId,
+    required this.topic,
+    this.data,
+  });
 
   /// `join`, `update` or `leave`.
   final String type;
@@ -103,11 +117,11 @@ final class PresenceEvent {
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        'type': type,
-        'node_id': nodeId,
-        'topic': topic,
-        if (data != null) 'data': data!.value,
-      };
+    'type': type,
+    'node_id': nodeId,
+    'topic': topic,
+    if (data != null) 'data': data!.value,
+  };
 
   /// Decodes the Go wire form.
   static PresenceEvent fromJson(Object? j) {
@@ -135,14 +149,17 @@ final class PresenceSnapshot {
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        'topic': topic,
-        'states': [for (final s in states) s.toJson()],
-      };
+    'topic': topic,
+    'states': [for (final s in states) s.toJson()],
+  };
 
   /// Decodes the Go wire form.
   static PresenceSnapshot fromJson(Object? j) {
     final m = wireObj(j);
-    return PresenceSnapshot(topic: wireStr(m, 'topic'), states: wireList(m['states'], PresenceState.fromJson));
+    return PresenceSnapshot(
+      topic: wireStr(m, 'topic'),
+      states: wireList(m['states'], PresenceState.fromJson),
+    );
   }
 }
 
@@ -179,13 +196,13 @@ final class Room {
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        'id': id,
-        if (type.isNotEmpty) 'type': type,
-        if (metadata != null) 'metadata': metadata!.value,
-        if (maxParticipants != 0) 'max_participants': maxParticipants,
-        'created_at': formatRfc3339Nano(createdAt),
-        if (createdBy.isNotEmpty) 'created_by': createdBy,
-      };
+    'id': id,
+    if (type.isNotEmpty) 'type': type,
+    if (metadata != null) 'metadata': metadata!.value,
+    if (maxParticipants != 0) 'max_participants': maxParticipants,
+    'created_at': formatRfc3339Nano(createdAt),
+    if (createdBy.isNotEmpty) 'created_by': createdBy,
+  };
 
   /// Decodes the Go wire form.
   static Room fromJson(Object? j) {
@@ -206,7 +223,11 @@ final class Room {
 @immutable
 final class RoomInfo {
   /// Creates room info.
-  const RoomInfo({required this.room, required this.participantCount, this.participants = const []});
+  const RoomInfo({
+    required this.room,
+    required this.participantCount,
+    this.participants = const [],
+  });
 
   /// The room.
   final Room room;
@@ -219,10 +240,10 @@ final class RoomInfo {
 
   /// Go wire form: the [Room] keys flattened, then the participant keys.
   Map<String, Object?> toJson() => {
-        ...room.toJson(),
-        'participant_count': participantCount,
-        'participants': [for (final p in participants) p.toJson()],
-      };
+    ...room.toJson(),
+    'participant_count': participantCount,
+    'participants': [for (final p in participants) p.toJson()],
+  };
 
   /// Decodes the Go wire form.
   static RoomInfo fromJson(Object? j) {
@@ -276,15 +297,15 @@ final class CursorPosition {
 
   /// Go wire form: each key only when non-zero.
   Map<String, Object?> toJson() => {
-        if (x != 0) 'x': x,
-        if (y != 0) 'y': y,
-        if (offset != 0) 'offset': offset,
-        if (line != 0) 'line': line,
-        if (column != 0) 'column': column,
-        if (selectionStart != 0) 'selection_start': selectionStart,
-        if (selectionEnd != 0) 'selection_end': selectionEnd,
-        if (field.isNotEmpty) 'field': field,
-      };
+    if (x != 0) 'x': x,
+    if (y != 0) 'y': y,
+    if (offset != 0) 'offset': offset,
+    if (line != 0) 'line': line,
+    if (column != 0) 'column': column,
+    if (selectionStart != 0) 'selection_start': selectionStart,
+    if (selectionEnd != 0) 'selection_end': selectionEnd,
+    if (field.isNotEmpty) 'field': field,
+  };
 
   /// Decodes the Go wire form.
   static CursorPosition fromJson(Object? j) {
@@ -343,15 +364,15 @@ final class ParticipantData {
 
   /// Go wire form: each key only when set.
   Map<String, Object?> toJson() => {
-        if (name.isNotEmpty) 'name': name,
-        if (color.isNotEmpty) 'color': color,
-        if (avatar.isNotEmpty) 'avatar': avatar,
-        if (cursor != null) 'cursor': cursor!.toJson(),
-        if (isTyping) 'is_typing': true,
-        if (activeField.isNotEmpty) 'active_field': activeField,
-        if (status.isNotEmpty) 'status': status,
-        if (extra.isNotEmpty) 'extra': extra,
-      };
+    if (name.isNotEmpty) 'name': name,
+    if (color.isNotEmpty) 'color': color,
+    if (avatar.isNotEmpty) 'avatar': avatar,
+    if (cursor != null) 'cursor': cursor!.toJson(),
+    if (isTyping) 'is_typing': true,
+    if (activeField.isNotEmpty) 'active_field': activeField,
+    if (status.isNotEmpty) 'status': status,
+    if (extra.isNotEmpty) 'extra': extra,
+  };
 
   /// Decodes the Go wire form.
   static ParticipantData fromJson(Object? j) {

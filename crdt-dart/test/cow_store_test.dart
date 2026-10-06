@@ -53,59 +53,76 @@ void main() {
       expect(first.fields['f']!.value!.value, 1);
     });
 
-    test('installs a new DocumentState object rather than mutating in place', () async {
-      // persistDebounce: zero: this test asserts one beforePersist call per
-      // setField; the default debounce coalesces same-document writes into a
-      // single call, which is what the debounce is for but not what this
-      // identity check is testing.
-      final store = CrdtStore('n1', HybridClock('n1'), persistDebounce: Duration.zero);
-      // Dart: nothing persists until hydration completes.
-      await store.ready;
-      final seen = <DocumentState>[];
-      store.use(FnPlugin('identity-watcher', onBeforePersist: (t, p, doc) {
-        seen.add(doc);
-        return doc;
-      }));
+    test(
+      'installs a new DocumentState object rather than mutating in place',
+      () async {
+        // persistDebounce: zero: this test asserts one beforePersist call per
+        // setField; the default debounce coalesces same-document writes into a
+        // single call, which is what the debounce is for but not what this
+        // identity check is testing.
+        final store = CrdtStore(
+          'n1',
+          HybridClock('n1'),
+          persistDebounce: Duration.zero,
+        );
+        // Dart: nothing persists until hydration completes.
+        await store.ready;
+        final seen = <DocumentState>[];
+        store.use(
+          FnPlugin(
+            'identity-watcher',
+            onBeforePersist: (t, p, doc) {
+              seen.add(doc);
+              return doc;
+            },
+          ),
+        );
 
-      store.setField('t', 'p', 'f', 1);
-      store.setField('t', 'p', 'f', 2);
+        store.setField('t', 'p', 'f', 1);
+        store.setField('t', 'p', 'f', 2);
 
-      expect(seen, hasLength(2));
-      // Different objects, and the first snapshot still reads as it did.
-      expect(seen[0], isNot(same(seen[1])));
-      expect(seen[0].fields, isNot(same(seen[1].fields)));
-      expect(seen[0].fields['f']!.value!.value, 1);
-      expect(seen[1].fields['f']!.value!.value, 2);
-    });
+        expect(seen, hasLength(2));
+        // Different objects, and the first snapshot still reads as it did.
+        expect(seen[0], isNot(same(seen[1])));
+        expect(seen[0].fields, isNot(same(seen[1].fields)));
+        expect(seen[0].fields['f']!.value!.value, 1);
+        expect(seen[1].fields['f']!.value!.value, 2);
+      },
+    );
 
-    test('invalidates the version of every table an imported snapshot omits', () {
-      final (:store, clock: _) = mk();
-      store.setField('users', 'u1', 'name', 'Alice');
-      store.setField('posts', 'p1', 'title', 'Hello');
+    test(
+      'invalidates the version of every table an imported snapshot omits',
+      () {
+        final (:store, clock: _) = mk();
+        store.setField('users', 'u1', 'name', 'Alice');
+        store.setField('posts', 'p1', 'title', 'Hello');
 
-      // Warm the collection cache before the import. importState clears the
-      // state directly rather than going through setDocument, so a table the
-      // snapshot omits is wiped without its version moving. If importState's
-      // version bump were removed, getCollection's cache would keep serving
-      // this stale, pre-import resolution.
-      final usersBefore = store.getCollection('users');
-      expect(usersBefore, hasLength(1));
+        // Warm the collection cache before the import. importState clears the
+        // state directly rather than going through setDocument, so a table the
+        // snapshot omits is wiped without its version moving. If importState's
+        // version bump were removed, getCollection's cache would keep serving
+        // this stale, pre-import resolution.
+        final usersBefore = store.getCollection('users');
+        expect(usersBefore, hasLength(1));
 
-      store.importState(StateSnapshot(
-        version: 1,
-        nodeId: 'n1',
-        timestamp: DateTime.now().millisecondsSinceEpoch,
-        tables: {
-          'posts': {'p1': DocumentState(table: 'posts', pk: 'p1')},
-        },
-        pending: [],
-      ));
+        store.importState(
+          StateSnapshot(
+            version: 1,
+            nodeId: 'n1',
+            timestamp: DateTime.now().millisecondsSinceEpoch,
+            tables: {
+              'posts': {'p1': DocumentState(table: 'posts', pk: 'p1')},
+            },
+            pending: [],
+          ),
+        );
 
-      expect(store.getCollection('users'), isNot(same(usersBefore)));
-      expect(store.getCollection('users'), isEmpty);
-      expect(store.getDocument('users', 'u1'), isNull);
-      expect(store.getCollection('posts'), hasLength(1));
-    });
+        expect(store.getCollection('users'), isNot(same(usersBefore)));
+        expect(store.getCollection('users'), isEmpty);
+        expect(store.getDocument('users', 'u1'), isNull);
+        expect(store.getCollection('posts'), hasLength(1));
+      },
+    );
 
     test('undo restores a text field that did not exist before', () {
       final (:store, clock: _) = mk();
@@ -160,22 +177,30 @@ void main() {
     // structural, not temporal: undo's previousState must be the SAME OBJECT
     // that was in the document, not a copy of it.
     test('undo captures the previous field state by reference, not by clone (D8)', () async {
-      final store = CrdtStore('n1', HybridClock('n1'), persistDebounce: Duration.zero);
+      final store = CrdtStore(
+        'n1',
+        HybridClock('n1'),
+        persistDebounce: Duration.zero,
+      );
       // Dart: nothing persists until hydration completes.
       await store.ready;
       FieldState? liveAfterFirstWrite;
       FieldState? previousSeenBySecondWrite;
-      store.use(FnPlugin(
-        'identity-probe',
-        onBeforePersist: (t, p, doc) {
-          liveAfterFirstWrite ??= doc.fields['f'];
-          return doc;
-        },
-        onBeforeWrite: (ev) {
-          if (ev.previousState != null) previousSeenBySecondWrite = ev.previousState;
-          return ev;
-        },
-      ));
+      store.use(
+        FnPlugin(
+          'identity-probe',
+          onBeforePersist: (t, p, doc) {
+            liveAfterFirstWrite ??= doc.fields['f'];
+            return doc;
+          },
+          onBeforeWrite: (ev) {
+            if (ev.previousState != null) {
+              previousSeenBySecondWrite = ev.previousState;
+            }
+            return ev;
+          },
+        ),
+      );
 
       store.setField('t', 'p', 'f', 1);
       store.setField('t', 'p', 'f', 2);

@@ -36,36 +36,56 @@ final class FnPlugin extends StorePlugin {
   final void Function(MergeEvent e)? onAfterMerge;
 
   /// `transformDocument`.
-  final Map<String, Object?>? Function(String table, String pk, Map<String, Object?> doc)? onTransformDocument;
+  final Map<String, Object?>? Function(
+    String table,
+    String pk,
+    Map<String, Object?> doc,
+  )?
+  onTransformDocument;
 
   /// `transformCollection`.
-  final List<Map<String, Object?>> Function(String table, List<Map<String, Object?>> docs)? onTransformCollection;
+  final List<Map<String, Object?>> Function(
+    String table,
+    List<Map<String, Object?>> docs,
+  )?
+  onTransformCollection;
 
   /// `beforePersist`.
-  final DocumentState Function(String table, String pk, DocumentState doc)? onBeforePersist;
+  final DocumentState Function(String table, String pk, DocumentState doc)?
+  onBeforePersist;
 
   /// `afterHydrate`.
-  final DocumentState Function(String table, String pk, DocumentState doc)? onAfterHydrate;
+  final DocumentState Function(String table, String pk, DocumentState doc)?
+  onAfterHydrate;
 
   @override
-  WriteEvent? beforeWrite(WriteEvent e) => onBeforeWrite == null ? e : onBeforeWrite!(e);
+  WriteEvent? beforeWrite(WriteEvent e) =>
+      onBeforeWrite == null ? e : onBeforeWrite!(e);
 
   @override
   void afterWrite(WriteEvent e) => onAfterWrite?.call(e);
 
   @override
-  ChangeRecord? beforeMerge(MergeEvent e) => onBeforeMerge == null ? e.remote : onBeforeMerge!(e);
+  ChangeRecord? beforeMerge(MergeEvent e) =>
+      onBeforeMerge == null ? e.remote : onBeforeMerge!(e);
 
   @override
   void afterMerge(MergeEvent e) => onAfterMerge?.call(e);
 
   @override
-  Map<String, Object?>? transformDocument(String table, String pk, Map<String, Object?> doc) =>
-      onTransformDocument == null ? doc : onTransformDocument!(table, pk, doc);
+  Map<String, Object?>? transformDocument(
+    String table,
+    String pk,
+    Map<String, Object?> doc,
+  ) => onTransformDocument == null ? doc : onTransformDocument!(table, pk, doc);
 
   @override
-  List<Map<String, Object?>> transformCollection(String table, List<Map<String, Object?>> docs) =>
-      onTransformCollection == null ? docs : onTransformCollection!(table, docs);
+  List<Map<String, Object?>> transformCollection(
+    String table,
+    List<Map<String, Object?>> docs,
+  ) => onTransformCollection == null
+      ? docs
+      : onTransformCollection!(table, docs);
 
   @override
   DocumentState beforePersist(String table, String pk, DocumentState doc) =>
@@ -119,7 +139,8 @@ class RecordingStorage implements ReplicaStorage {
   /// failed future.
   bool throwSynchronously = false;
 
-  Future<void> _fail(Object error) => throwSynchronously ? throw error : Future<void>.error(error);
+  Future<void> _fail(Object error) =>
+      throwSynchronously ? throw error : Future<void>.error(error);
 
   @override
   Future<Map<String, Map<String, DocumentState>>> loadState({
@@ -171,11 +192,15 @@ class RecordingStorage implements ReplicaStorage {
 }
 
 /// One recorded `commit`.
-typedef Commit = ({Map<(String, String), DocumentState?> documents, List<PendingChange>? pending});
+typedef Commit = ({
+  Map<(String, String), DocumentState?> documents,
+  List<PendingChange>? pending,
+});
 
 /// A [RecordingStorage] that is also an [AtomicReplicaStorage], recording
 /// each [commit].
-class RecordingAtomicStorage extends RecordingStorage implements AtomicReplicaStorage {
+class RecordingAtomicStorage extends RecordingStorage
+    implements AtomicReplicaStorage {
   /// Every `commit`, in order.
   final List<Commit> commits = [];
 
@@ -189,7 +214,10 @@ class RecordingAtomicStorage extends RecordingStorage implements AtomicReplicaSt
   }) {
     final f = failCommit;
     if (f != null) return _fail(f);
-    commits.add((documents: Map.of(documents), pending: pending == null ? null : List.of(pending)));
+    commits.add((
+      documents: Map.of(documents),
+      pending: pending == null ? null : List.of(pending),
+    ));
     return Future.value();
   }
 }

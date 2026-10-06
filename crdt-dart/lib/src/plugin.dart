@@ -185,11 +185,18 @@ abstract class StorePlugin {
 
   /// Called when a document is resolved for reading. Return a transformed
   /// document, or null to hide it. A throw hides it.
-  Map<String, Object?>? transformDocument(String table, String pk, Map<String, Object?> doc) => doc;
+  Map<String, Object?>? transformDocument(
+    String table,
+    String pk,
+    Map<String, Object?> doc,
+  ) => doc;
 
   /// Called when a collection is resolved for reading. Return a filtered or
   /// transformed list. A throw hides the whole collection (an empty list).
-  List<Map<String, Object?>> transformCollection(String table, List<Map<String, Object?>> docs) => docs;
+  List<Map<String, Object?>> transformCollection(
+    String table,
+    List<Map<String, Object?>> docs,
+  ) => docs;
 
   /// Called before a presence update is sent. Return [data], modified data
   /// (null is a valid payload), or [presenceRejected] to cancel the update. A
@@ -202,7 +209,8 @@ abstract class StorePlugin {
   /// Called before a document is persisted. Return the state to store, for
   /// example an encrypted one. A throw is rethrown to the caller after it is
   /// reported, so nothing is persisted.
-  DocumentState beforePersist(String table, String pk, DocumentState doc) => doc;
+  DocumentState beforePersist(String table, String pk, DocumentState doc) =>
+      doc;
 
   /// Called after a document is loaded from storage. Return the state to hold
   /// in memory. A throw is rethrown to the caller after it is reported, so the
@@ -393,7 +401,11 @@ final class PluginManager {
       if (current == null) break;
       final input = current;
       // Differs from crdt-js: a throw cancels (fails closed) instead of propagating.
-      current = _failClosed<List<ChangeRecord>?>(p, null, () => p.beforePush(input));
+      current = _failClosed<List<ChangeRecord>?>(
+        p,
+        null,
+        () => p.beforePush(input),
+      );
     }
     return current;
   }
@@ -408,24 +420,39 @@ final class PluginManager {
 
   /// Runs `transformDocument` through every plugin. Null: a plugin hid the
   /// document.
-  Map<String, Object?>? dispatchTransformDocument(String table, String pk, Map<String, Object?> doc) {
+  Map<String, Object?>? dispatchTransformDocument(
+    String table,
+    String pk,
+    Map<String, Object?> doc,
+  ) {
     Map<String, Object?>? current = doc;
     for (final p in _snapshot) {
       if (current == null) break;
       final input = current;
       // Differs from crdt-js: a throw cancels (fails closed) instead of propagating.
-      current = _failClosed<Map<String, Object?>?>(p, null, () => p.transformDocument(table, pk, input));
+      current = _failClosed<Map<String, Object?>?>(
+        p,
+        null,
+        () => p.transformDocument(table, pk, input),
+      );
     }
     return current;
   }
 
   /// Runs `transformCollection` through every plugin.
-  List<Map<String, Object?>> dispatchTransformCollection(String table, List<Map<String, Object?>> docs) {
+  List<Map<String, Object?>> dispatchTransformCollection(
+    String table,
+    List<Map<String, Object?>> docs,
+  ) {
     var current = docs;
     for (final p in _snapshot) {
       final input = current;
       // Differs from crdt-js: a throw cancels (fails closed) instead of propagating.
-      current = _failClosed<List<Map<String, Object?>>>(p, const [], () => p.transformCollection(table, input));
+      current = _failClosed<List<Map<String, Object?>>>(
+        p,
+        const [],
+        () => p.transformCollection(table, input),
+      );
     }
     return current;
   }
@@ -439,7 +466,11 @@ final class PluginManager {
       if (identical(current, presenceRejected)) break;
       final input = current;
       // Differs from crdt-js: a throw cancels (fails closed) instead of propagating.
-      current = _failClosed<Object?>(p, presenceRejected, () => p.beforePresenceUpdate(topic, input));
+      current = _failClosed<Object?>(
+        p,
+        presenceRejected,
+        () => p.beforePresenceUpdate(topic, input),
+      );
     }
     return current;
   }
@@ -453,7 +484,11 @@ final class PluginManager {
   }
 
   /// Runs `beforePersist` through every plugin.
-  DocumentState dispatchBeforePersist(String table, String pk, DocumentState doc) {
+  DocumentState dispatchBeforePersist(
+    String table,
+    String pk,
+    DocumentState doc,
+  ) {
     var current = doc;
     for (final p in _snapshot) {
       final input = current;
@@ -464,7 +499,11 @@ final class PluginManager {
   }
 
   /// Runs `afterHydrate` through every plugin.
-  DocumentState dispatchAfterHydrate(String table, String pk, DocumentState doc) {
+  DocumentState dispatchAfterHydrate(
+    String table,
+    String pk,
+    DocumentState doc,
+  ) {
     var current = doc;
     for (final p in _snapshot) {
       final input = current;

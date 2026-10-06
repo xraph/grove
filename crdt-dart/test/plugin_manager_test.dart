@@ -2,36 +2,37 @@ import 'package:grove_crdt/grove_crdt.dart';
 import 'package:test/test.dart';
 
 ChangeRecord makeChange({String table = 't'}) => ChangeRecord(
-      table: table,
-      pk: '1',
-      field: 'f',
-      crdtType: CrdtType.lww,
-      hlc: HLC(BigInt.from(100), 0, 'n'),
-      nodeId: 'n',
-      value: const JsonValue('v'),
-    );
+  table: table,
+  pk: '1',
+  field: 'f',
+  crdtType: CrdtType.lww,
+  hlc: HLC(BigInt.from(100), 0, 'n'),
+  nodeId: 'n',
+  value: const JsonValue('v'),
+);
 
 WriteEvent makeWriteEvent({Object? value = 'v'}) => WriteEvent(
-      table: 't',
-      pk: '1',
-      field: 'f',
-      crdtType: CrdtType.lww,
-      value: value,
-      change: makeChange(),
-      previousState: null,
-    );
+  table: 't',
+  pk: '1',
+  field: 'f',
+  crdtType: CrdtType.lww,
+  value: value,
+  change: makeChange(),
+  previousState: null,
+);
 
 WriteEvent withValue(WriteEvent e, Object? value) => WriteEvent(
-      table: e.table,
-      pk: e.pk,
-      field: e.field,
-      crdtType: e.crdtType,
-      value: value,
-      change: e.change,
-      previousState: e.previousState,
-    );
+  table: e.table,
+  pk: e.pk,
+  field: e.field,
+  crdtType: e.crdtType,
+  value: value,
+  change: e.change,
+  previousState: e.previousState,
+);
 
-MergeEvent makeMergeEvent({FieldState? local, bool conflictDetected = false}) => MergeEvent(
+MergeEvent makeMergeEvent({FieldState? local, bool conflictDetected = false}) =>
+    MergeEvent(
       table: 't',
       pk: '1',
       field: 'f',
@@ -78,12 +79,23 @@ final class _Plugin extends StorePlugin {
   final void Function(PullEvent e, List<ChangeRecord> changes)? onAfterPull;
   final List<ChangeRecord>? Function(List<ChangeRecord> changes)? onBeforePush;
   final void Function(int pushed, List<ChangeRecord> changes)? onAfterPush;
-  final Map<String, Object?>? Function(String table, String pk, Map<String, Object?> doc)? onTransformDocument;
-  final List<Map<String, Object?>> Function(String table, List<Map<String, Object?>> docs)? onTransformCollection;
+  final Map<String, Object?>? Function(
+    String table,
+    String pk,
+    Map<String, Object?> doc,
+  )?
+  onTransformDocument;
+  final List<Map<String, Object?>> Function(
+    String table,
+    List<Map<String, Object?>> docs,
+  )?
+  onTransformCollection;
   final Object? Function(String topic, Object? data)? onBeforePresenceUpdate;
   final void Function(PresenceEvent e)? onOnPresenceEvent;
-  final DocumentState Function(String table, String pk, DocumentState doc)? onBeforePersist;
-  final DocumentState Function(String table, String pk, DocumentState doc)? onAfterHydrate;
+  final DocumentState Function(String table, String pk, DocumentState doc)?
+  onBeforePersist;
+  final DocumentState Function(String table, String pk, DocumentState doc)?
+  onAfterHydrate;
 
   @override
   void init() => onInit != null ? onInit!() : super.init();
@@ -92,54 +104,78 @@ final class _Plugin extends StorePlugin {
   void destroy() => onDestroy != null ? onDestroy!() : super.destroy();
 
   @override
-  WriteEvent? beforeWrite(WriteEvent e) => onBeforeWrite != null ? onBeforeWrite!(e) : super.beforeWrite(e);
+  WriteEvent? beforeWrite(WriteEvent e) =>
+      onBeforeWrite != null ? onBeforeWrite!(e) : super.beforeWrite(e);
 
   @override
-  void afterWrite(WriteEvent e) => onAfterWrite != null ? onAfterWrite!(e) : super.afterWrite(e);
+  void afterWrite(WriteEvent e) =>
+      onAfterWrite != null ? onAfterWrite!(e) : super.afterWrite(e);
 
   @override
-  ChangeRecord? beforeMerge(MergeEvent e) => onBeforeMerge != null ? onBeforeMerge!(e) : super.beforeMerge(e);
+  ChangeRecord? beforeMerge(MergeEvent e) =>
+      onBeforeMerge != null ? onBeforeMerge!(e) : super.beforeMerge(e);
 
   @override
-  void afterMerge(MergeEvent e) => onAfterMerge != null ? onAfterMerge!(e) : super.afterMerge(e);
+  void afterMerge(MergeEvent e) =>
+      onAfterMerge != null ? onAfterMerge!(e) : super.afterMerge(e);
 
   @override
-  PullEvent? beforePull(PullEvent e) => onBeforePull != null ? onBeforePull!(e) : super.beforePull(e);
+  PullEvent? beforePull(PullEvent e) =>
+      onBeforePull != null ? onBeforePull!(e) : super.beforePull(e);
 
   @override
-  void afterPull(PullEvent e, List<ChangeRecord> changes) =>
-      onAfterPull != null ? onAfterPull!(e, changes) : super.afterPull(e, changes);
+  void afterPull(PullEvent e, List<ChangeRecord> changes) => onAfterPull != null
+      ? onAfterPull!(e, changes)
+      : super.afterPull(e, changes);
 
   @override
   List<ChangeRecord>? beforePush(List<ChangeRecord> changes) =>
       onBeforePush != null ? onBeforePush!(changes) : super.beforePush(changes);
 
   @override
-  void afterPush(int pushed, List<ChangeRecord> changes) =>
-      onAfterPush != null ? onAfterPush!(pushed, changes) : super.afterPush(pushed, changes);
+  void afterPush(int pushed, List<ChangeRecord> changes) => onAfterPush != null
+      ? onAfterPush!(pushed, changes)
+      : super.afterPush(pushed, changes);
 
   @override
-  Map<String, Object?>? transformDocument(String table, String pk, Map<String, Object?> doc) =>
-      onTransformDocument != null ? onTransformDocument!(table, pk, doc) : super.transformDocument(table, pk, doc);
+  Map<String, Object?>? transformDocument(
+    String table,
+    String pk,
+    Map<String, Object?> doc,
+  ) => onTransformDocument != null
+      ? onTransformDocument!(table, pk, doc)
+      : super.transformDocument(table, pk, doc);
 
   @override
-  List<Map<String, Object?>> transformCollection(String table, List<Map<String, Object?>> docs) =>
-      onTransformCollection != null ? onTransformCollection!(table, docs) : super.transformCollection(table, docs);
+  List<Map<String, Object?>> transformCollection(
+    String table,
+    List<Map<String, Object?>> docs,
+  ) => onTransformCollection != null
+      ? onTransformCollection!(table, docs)
+      : super.transformCollection(table, docs);
 
   @override
   Object? beforePresenceUpdate(String topic, Object? data) =>
-      onBeforePresenceUpdate != null ? onBeforePresenceUpdate!(topic, data) : super.beforePresenceUpdate(topic, data);
+      onBeforePresenceUpdate != null
+      ? onBeforePresenceUpdate!(topic, data)
+      : super.beforePresenceUpdate(topic, data);
 
   @override
-  void onPresenceEvent(PresenceEvent e) => onOnPresenceEvent != null ? onOnPresenceEvent!(e) : super.onPresenceEvent(e);
+  void onPresenceEvent(PresenceEvent e) => onOnPresenceEvent != null
+      ? onOnPresenceEvent!(e)
+      : super.onPresenceEvent(e);
 
   @override
   DocumentState beforePersist(String table, String pk, DocumentState doc) =>
-      onBeforePersist != null ? onBeforePersist!(table, pk, doc) : super.beforePersist(table, pk, doc);
+      onBeforePersist != null
+      ? onBeforePersist!(table, pk, doc)
+      : super.beforePersist(table, pk, doc);
 
   @override
   DocumentState afterHydrate(String table, String pk, DocumentState doc) =>
-      onAfterHydrate != null ? onAfterHydrate!(table, pk, doc) : super.afterHydrate(table, pk, doc);
+      onAfterHydrate != null
+      ? onAfterHydrate!(table, pk, doc)
+      : super.afterHydrate(table, pk, doc);
 }
 
 final class _Throwing extends StorePlugin {
@@ -147,7 +183,8 @@ final class _Throwing extends StorePlugin {
   String get name => 'throwing';
 
   @override
-  List<ChangeRecord>? beforePush(List<ChangeRecord> changes) => throw StateError('boom');
+  List<ChangeRecord>? beforePush(List<ChangeRecord> changes) =>
+      throw StateError('boom');
 }
 
 /// Throws from every hook, init and destroy.
@@ -177,33 +214,44 @@ final class _ThrowsEverywhere extends StorePlugin {
   PullEvent? beforePull(PullEvent e) => throw StateError('beforePull');
 
   @override
-  void afterPull(PullEvent e, List<ChangeRecord> changes) => throw StateError('afterPull');
+  void afterPull(PullEvent e, List<ChangeRecord> changes) =>
+      throw StateError('afterPull');
 
   @override
-  List<ChangeRecord>? beforePush(List<ChangeRecord> changes) => throw StateError('beforePush');
+  List<ChangeRecord>? beforePush(List<ChangeRecord> changes) =>
+      throw StateError('beforePush');
 
   @override
-  void afterPush(int pushed, List<ChangeRecord> changes) => throw StateError('afterPush');
+  void afterPush(int pushed, List<ChangeRecord> changes) =>
+      throw StateError('afterPush');
 
   @override
-  Map<String, Object?>? transformDocument(String table, String pk, Map<String, Object?> doc) =>
-      throw StateError('transformDocument');
+  Map<String, Object?>? transformDocument(
+    String table,
+    String pk,
+    Map<String, Object?> doc,
+  ) => throw StateError('transformDocument');
 
   @override
-  List<Map<String, Object?>> transformCollection(String table, List<Map<String, Object?>> docs) =>
-      throw StateError('transformCollection');
+  List<Map<String, Object?>> transformCollection(
+    String table,
+    List<Map<String, Object?>> docs,
+  ) => throw StateError('transformCollection');
 
   @override
-  Object? beforePresenceUpdate(String topic, Object? data) => throw StateError('beforePresenceUpdate');
+  Object? beforePresenceUpdate(String topic, Object? data) =>
+      throw StateError('beforePresenceUpdate');
 
   @override
   void onPresenceEvent(PresenceEvent e) => throw StateError('onPresenceEvent');
 
   @override
-  DocumentState beforePersist(String table, String pk, DocumentState doc) => throw StateError('beforePersist');
+  DocumentState beforePersist(String table, String pk, DocumentState doc) =>
+      throw StateError('beforePersist');
 
   @override
-  DocumentState afterHydrate(String table, String pk, DocumentState doc) => throw StateError('afterHydrate');
+  DocumentState afterHydrate(String table, String pk, DocumentState doc) =>
+      throw StateError('afterHydrate');
 }
 
 void main() {
@@ -240,10 +288,15 @@ void main() {
       test('calls beforeWrite on registered plugins', () {
         final pm = PluginManager();
         final calls = <WriteEvent>[];
-        pm.use(_Plugin('w', onBeforeWrite: (e) {
-          calls.add(e);
-          return e;
-        }));
+        pm.use(
+          _Plugin(
+            'w',
+            onBeforeWrite: (e) {
+              calls.add(e);
+              return e;
+            },
+          ),
+        );
 
         final event = makeWriteEvent();
         pm.dispatchBeforeWrite(event);
@@ -285,14 +338,24 @@ void main() {
         final pm = PluginManager();
         final order = <int>[];
 
-        pm.use(_Plugin('w1', onBeforeWrite: (e) {
-          order.add(1);
-          return withValue(e, 'from-1');
-        }));
-        pm.use(_Plugin('w2', onBeforeWrite: (e) {
-          order.add(2);
-          return withValue(e, 'from-2');
-        }));
+        pm.use(
+          _Plugin(
+            'w1',
+            onBeforeWrite: (e) {
+              order.add(1);
+              return withValue(e, 'from-1');
+            },
+          ),
+        );
+        pm.use(
+          _Plugin(
+            'w2',
+            onBeforeWrite: (e) {
+              order.add(2);
+              return withValue(e, 'from-2');
+            },
+          ),
+        );
 
         final result = pm.dispatchBeforeWrite(makeWriteEvent());
 
@@ -305,10 +368,15 @@ void main() {
       test('calls beforeMerge on incoming changes', () {
         final pm = PluginManager();
         var calls = 0;
-        pm.use(_Plugin('m', onBeforeMerge: (e) {
-          calls++;
-          return e.remote;
-        }));
+        pm.use(
+          _Plugin(
+            'm',
+            onBeforeMerge: (e) {
+              calls++;
+              return e.remote;
+            },
+          ),
+        );
 
         pm.dispatchBeforeMerge(makeMergeEvent());
 
@@ -357,9 +425,16 @@ void main() {
     group('ReadHook', () {
       test('transforms documents via transformDocument', () {
         final pm = PluginManager();
-        pm.use(_Plugin('r', onTransformDocument: (table, pk, doc) => {...doc, 'extra': true}));
+        pm.use(
+          _Plugin(
+            'r',
+            onTransformDocument: (table, pk, doc) => {...doc, 'extra': true},
+          ),
+        );
 
-        final result = pm.dispatchTransformDocument('t', '1', {'name': 'Alice'});
+        final result = pm.dispatchTransformDocument('t', '1', {
+          'name': 'Alice',
+        });
         expect(result, {'name': 'Alice', 'extra': true});
       });
 
@@ -367,13 +442,20 @@ void main() {
         final pm = PluginManager();
         pm.use(_Plugin('r', onTransformDocument: (table, pk, doc) => null));
 
-        final result = pm.dispatchTransformDocument('t', '1', {'name': 'Alice'});
+        final result = pm.dispatchTransformDocument('t', '1', {
+          'name': 'Alice',
+        });
         expect(result, isNull);
       });
 
       test('transforms collections via transformCollection', () {
         final pm = PluginManager();
-        pm.use(_Plugin('r', onTransformCollection: (table, docs) => docs.sublist(0, 1)));
+        pm.use(
+          _Plugin(
+            'r',
+            onTransformCollection: (table, docs) => docs.sublist(0, 1),
+          ),
+        );
 
         final docs = <Map<String, Object?>>[
           {'id': 1},
@@ -391,10 +473,16 @@ void main() {
         final pm = PluginManager();
         var before = 0;
         var after = 0;
-        pm.use(_Plugin('s', onBeforePull: (e) {
-          before++;
-          return e;
-        }, onAfterPull: (e, changes) => after++));
+        pm.use(
+          _Plugin(
+            's',
+            onBeforePull: (e) {
+              before++;
+              return e;
+            },
+            onAfterPull: (e, changes) => after++,
+          ),
+        );
 
         const pullEvent = PullEvent(tables: ['users']);
         pm.dispatchBeforePull(pullEvent);
@@ -408,10 +496,16 @@ void main() {
         final pm = PluginManager();
         var before = 0;
         var after = 0;
-        pm.use(_Plugin('s', onBeforePush: (changes) {
-          before++;
-          return changes;
-        }, onAfterPush: (pushed, changes) => after++));
+        pm.use(
+          _Plugin(
+            's',
+            onBeforePush: (changes) {
+              before++;
+              return changes;
+            },
+            onAfterPush: (pushed, changes) => after++,
+          ),
+        );
 
         final changes = [makeChange()];
         pm.dispatchBeforePush(changes);
@@ -425,7 +519,9 @@ void main() {
         final pm = PluginManager();
         pm.use(_Plugin('s', onBeforePull: (_) => null));
 
-        final result = pm.dispatchBeforePull(const PullEvent(tables: ['users']));
+        final result = pm.dispatchBeforePull(
+          const PullEvent(tables: ['users']),
+        );
         expect(result, isNull);
       });
 
@@ -434,9 +530,20 @@ void main() {
         // does. The class docs on StorePlugin.beforePush say a plugin must not
         // do it, because the sync engine would drop the withheld records.
         final pm = PluginManager();
-        pm.use(_Plugin('s', onBeforePush: (changes) => [for (final c in changes) if (c.table != 'secret') c]));
+        pm.use(
+          _Plugin(
+            's',
+            onBeforePush: (changes) => [
+              for (final c in changes)
+                if (c.table != 'secret') c,
+            ],
+          ),
+        );
 
-        final changes = [makeChange(table: 'users'), makeChange(table: 'secret')];
+        final changes = [
+          makeChange(table: 'users'),
+          makeChange(table: 'secret'),
+        ];
         final result = pm.dispatchBeforePush(changes);
         expect(result, hasLength(1));
         expect(result![0].table, 'users');
@@ -447,10 +554,15 @@ void main() {
       test('calls beforePresenceUpdate', () {
         final pm = PluginManager();
         final calls = <(String, Object?)>[];
-        pm.use(_Plugin('p', onBeforePresenceUpdate: (topic, data) {
-          calls.add((topic, data));
-          return data;
-        }));
+        pm.use(
+          _Plugin(
+            'p',
+            onBeforePresenceUpdate: (topic, data) {
+              calls.add((topic, data));
+              return data;
+            },
+          ),
+        );
 
         pm.dispatchBeforePresenceUpdate('room', {
           'cursor': {'x': 10, 'y': 20},
@@ -477,7 +589,12 @@ void main() {
         final pm = PluginManager();
         // Differs from crdt-js, which rejects with null: Dart uses presenceRejected,
         // because null is also a legitimate leave payload.
-        pm.use(_Plugin('p', onBeforePresenceUpdate: (topic, data) => presenceRejected));
+        pm.use(
+          _Plugin(
+            'p',
+            onBeforePresenceUpdate: (topic, data) => presenceRejected,
+          ),
+        );
 
         final result = pm.dispatchBeforePresenceUpdate('room', {
           'cursor': {'x': 0, 'y': 0},
@@ -489,7 +606,12 @@ void main() {
     group('StorageHook', () {
       test('transforms documents before persist', () {
         final pm = PluginManager();
-        pm.use(_Plugin('st', onBeforePersist: (table, pk, doc) => doc.copyWith(tombstone: true))); // e.g. encrypt
+        pm.use(
+          _Plugin(
+            'st',
+            onBeforePersist: (table, pk, doc) => doc.copyWith(tombstone: true),
+          ),
+        ); // e.g. encrypt
 
         final doc = makeDocState();
         final result = pm.dispatchBeforePersist('t', '1', doc);
@@ -498,17 +620,24 @@ void main() {
 
       test('transforms documents after hydrate', () {
         final pm = PluginManager();
-        pm.use(_Plugin('st', onAfterHydrate: (table, pk, doc) {
-          return doc.copyWith(fields: {
-            ...doc.fields,
-            'injected': FieldState(
-              type: CrdtType.lww,
-              hlc: HLC(BigInt.one, 0, 'n'),
-              nodeId: 'n',
-              value: const JsonValue('hydrated'),
-            ),
-          });
-        }));
+        pm.use(
+          _Plugin(
+            'st',
+            onAfterHydrate: (table, pk, doc) {
+              return doc.copyWith(
+                fields: {
+                  ...doc.fields,
+                  'injected': FieldState(
+                    type: CrdtType.lww,
+                    hlc: HLC(BigInt.one, 0, 'n'),
+                    nodeId: 'n',
+                    value: const JsonValue('hydrated'),
+                  ),
+                },
+              );
+            },
+          ),
+        );
 
         final doc = makeDocState();
         final result = pm.dispatchAfterHydrate('t', '1', doc);
@@ -524,7 +653,14 @@ void main() {
     final errors = <Object>[];
     final m = PluginManager(onPluginError: (e, name) => errors.add(e));
     m.use(_Throwing());
-    final c = ChangeRecord(table: 't', pk: '1', field: 'f', crdtType: CrdtType.lww, hlc: HLC.zero, nodeId: 'a');
+    final c = ChangeRecord(
+      table: 't',
+      pk: '1',
+      field: 'f',
+      crdtType: CrdtType.lww,
+      hlc: HLC.zero,
+      nodeId: 'a',
+    );
     expect(m.dispatchBeforePush([c]), isNull);
     expect(errors, hasLength(1));
   });
@@ -533,17 +669,31 @@ void main() {
     test('the first null from a before hook stops the later plugins', () {
       final pm = PluginManager();
       var later = 0;
-      pm.use(_Plugin('a', onBeforeWrite: (_) => null, onBeforePull: (_) => null, onBeforePush: (_) => null));
-      pm.use(_Plugin('b', onBeforeWrite: (e) {
-        later++;
-        return e;
-      }, onBeforePull: (e) {
-        later++;
-        return e;
-      }, onBeforePush: (c) {
-        later++;
-        return c;
-      }));
+      pm.use(
+        _Plugin(
+          'a',
+          onBeforeWrite: (_) => null,
+          onBeforePull: (_) => null,
+          onBeforePush: (_) => null,
+        ),
+      );
+      pm.use(
+        _Plugin(
+          'b',
+          onBeforeWrite: (e) {
+            later++;
+            return e;
+          },
+          onBeforePull: (e) {
+            later++;
+            return e;
+          },
+          onBeforePush: (c) {
+            later++;
+            return c;
+          },
+        ),
+      );
       expect(pm.dispatchBeforeWrite(makeWriteEvent()), isNull);
       expect(pm.dispatchBeforePull(const PullEvent(tables: [])), isNull);
       expect(pm.dispatchBeforePush([makeChange()]), isNull);
@@ -562,14 +712,24 @@ void main() {
     test('beforeMerge sees the change the previous hook returned', () {
       final pm = PluginManager();
       final seen = <String>[];
-      pm.use(_Plugin('a', onBeforeMerge: (e) {
-        seen.add(e.remote.table);
-        return e.remote.copyWith(table: 'rewritten');
-      }));
-      pm.use(_Plugin('b', onBeforeMerge: (e) {
-        seen.add(e.remote.table);
-        return e.remote;
-      }));
+      pm.use(
+        _Plugin(
+          'a',
+          onBeforeMerge: (e) {
+            seen.add(e.remote.table);
+            return e.remote.copyWith(table: 'rewritten');
+          },
+        ),
+      );
+      pm.use(
+        _Plugin(
+          'b',
+          onBeforeMerge: (e) {
+            seen.add(e.remote.table);
+            return e.remote;
+          },
+        ),
+      );
       final event = makeMergeEvent();
       final result = pm.dispatchBeforeMerge(event);
       expect(seen, ['t', 'rewritten']);
@@ -594,7 +754,13 @@ void main() {
       final pm = PluginManager();
       List<ChangeRecord>? pulled;
       (int, List<ChangeRecord>)? pushed;
-      pm.use(_Plugin('s', onAfterPull: (e, changes) => pulled = changes, onAfterPush: (n, changes) => pushed = (n, changes)));
+      pm.use(
+        _Plugin(
+          's',
+          onAfterPull: (e, changes) => pulled = changes,
+          onAfterPush: (n, changes) => pushed = (n, changes),
+        ),
+      );
       final changes = [makeChange()];
       pm.dispatchAfterPull(const PullEvent(tables: []), changes);
       pm.dispatchAfterPush(1, changes);
@@ -603,21 +769,34 @@ void main() {
       expect(pushed!.$2, same(changes));
     });
 
-    test('a null transformDocument stops the chain and read hooks chain otherwise', () {
-      final pm = PluginManager();
-      var later = 0;
-      pm.use(_Plugin('a', onTransformDocument: (t, pk, d) => {...d, 'a': 1}));
-      pm.use(_Plugin('b', onTransformDocument: (t, pk, d) {
-        expect(d['a'], 1);
-        return null;
-      }));
-      pm.use(_Plugin('c', onTransformDocument: (t, pk, d) {
-        later++;
-        return d;
-      }));
-      expect(pm.dispatchTransformDocument('t', '1', {}), isNull);
-      expect(later, 0);
-    });
+    test(
+      'a null transformDocument stops the chain and read hooks chain otherwise',
+      () {
+        final pm = PluginManager();
+        var later = 0;
+        pm.use(_Plugin('a', onTransformDocument: (t, pk, d) => {...d, 'a': 1}));
+        pm.use(
+          _Plugin(
+            'b',
+            onTransformDocument: (t, pk, d) {
+              expect(d['a'], 1);
+              return null;
+            },
+          ),
+        );
+        pm.use(
+          _Plugin(
+            'c',
+            onTransformDocument: (t, pk, d) {
+              later++;
+              return d;
+            },
+          ),
+        );
+        expect(pm.dispatchTransformDocument('t', '1', {}), isNull);
+        expect(later, 0);
+      },
+    );
 
     test('transformCollection chains each hook over the previous result', () {
       final pm = PluginManager();
@@ -635,22 +814,36 @@ void main() {
 
     test('persist and hydrate hooks chain', () {
       final pm = PluginManager();
-      pm.use(_Plugin('a', onBeforePersist: (t, pk, d) => d.copyWith(pk: '${d.pk}a')));
-      pm.use(_Plugin('b', onBeforePersist: (t, pk, d) => d.copyWith(pk: '${d.pk}b')));
+      pm.use(
+        _Plugin('a', onBeforePersist: (t, pk, d) => d.copyWith(pk: '${d.pk}a')),
+      );
+      pm.use(
+        _Plugin('b', onBeforePersist: (t, pk, d) => d.copyWith(pk: '${d.pk}b')),
+      );
       expect(pm.dispatchBeforePersist('t', '1', makeDocState()).pk, '1ab');
     });
 
     test('presence: null is a payload, not a cancel, and the sentinel stops the chain', () {
       final pm = PluginManager();
       final seen = <Object?>[];
-      pm.use(_Plugin('a', onBeforePresenceUpdate: (t, d) {
-        seen.add(d);
-        return null;
-      }));
-      pm.use(_Plugin('b', onBeforePresenceUpdate: (t, d) {
-        seen.add(d);
-        return d;
-      }));
+      pm.use(
+        _Plugin(
+          'a',
+          onBeforePresenceUpdate: (t, d) {
+            seen.add(d);
+            return null;
+          },
+        ),
+      );
+      pm.use(
+        _Plugin(
+          'b',
+          onBeforePresenceUpdate: (t, d) {
+            seen.add(d);
+            return d;
+          },
+        ),
+      );
       expect(pm.dispatchBeforePresenceUpdate('room', {'x': 1}), isNull);
       expect(seen, [
         {'x': 1},
@@ -660,17 +853,31 @@ void main() {
       var later = 0;
       final pm2 = PluginManager();
       pm2.use(_Plugin('a', onBeforePresenceUpdate: (t, d) => presenceRejected));
-      pm2.use(_Plugin('b', onBeforePresenceUpdate: (t, d) {
-        later++;
-        return d;
-      }));
-      expect(pm2.dispatchBeforePresenceUpdate('room', 1), same(presenceRejected));
+      pm2.use(
+        _Plugin(
+          'b',
+          onBeforePresenceUpdate: (t, d) {
+            later++;
+            return d;
+          },
+        ),
+      );
+      expect(
+        pm2.dispatchBeforePresenceUpdate('room', 1),
+        same(presenceRejected),
+      );
       expect(later, 0);
     });
 
-    test('presence: a null payload passes through a manager with no plugins', () {
-      expect(PluginManager().dispatchBeforePresenceUpdate('room', null), isNull);
-    });
+    test(
+      'presence: a null payload passes through a manager with no plugins',
+      () {
+        expect(
+          PluginManager().dispatchBeforePresenceUpdate('room', null),
+          isNull,
+        );
+      },
+    );
 
     test('a plugin that overrides nothing passes everything through', () {
       final pm = PluginManager();
@@ -736,23 +943,37 @@ void main() {
 
     test('a throwing encryptor rethrows after reporting, so the caller persists nothing', () {
       final doc = makeDocState();
-      expect(() => pm.dispatchBeforePersist('t', '1', doc), throwsA(isA<StateError>()));
+      expect(
+        () => pm.dispatchBeforePersist('t', '1', doc),
+        throwsA(isA<StateError>()),
+      );
       expect(errors.single, ('bad', 'Bad state: beforePersist'));
     });
 
     test('a throwing decryptor rethrows after reporting, so nothing undecrypted is served', () {
       final doc = makeDocState();
-      expect(() => pm.dispatchAfterHydrate('t', '1', doc), throwsA(isA<StateError>()));
+      expect(
+        () => pm.dispatchAfterHydrate('t', '1', doc),
+        throwsA(isA<StateError>()),
+      );
       expect(errors.single, ('bad', 'Bad state: afterHydrate'));
     });
 
     test('a throwing encryptor stops the chain: the later plugin never sees the document', () {
       var later = 0;
-      pm.use(_Plugin('after', onBeforePersist: (t, pk, d) {
-        later++;
-        return d;
-      }));
-      expect(() => pm.dispatchBeforePersist('t', '1', makeDocState()), throwsStateError);
+      pm.use(
+        _Plugin(
+          'after',
+          onBeforePersist: (t, pk, d) {
+            later++;
+            return d;
+          },
+        ),
+      );
+      expect(
+        () => pm.dispatchBeforePersist('t', '1', makeDocState()),
+        throwsStateError,
+      );
       expect(later, 0);
     });
 
@@ -766,19 +987,33 @@ void main() {
       pm.dispatchAfterMerge(merge);
       pm.dispatchAfterPull(const PullEvent(tables: []), []);
       pm.dispatchAfterPush(1, [makeChange()]);
-      pm.dispatchOnPresenceEvent(const PresenceEvent(type: 'join', nodeId: 'n', topic: 'r'));
+      pm.dispatchOnPresenceEvent(
+        const PresenceEvent(type: 'join', nodeId: 'n', topic: 'r'),
+      );
       expect(order, ['c', 'd']);
       expect(errors.map((e) => e.$2), [
-        for (final hook in ['afterWrite', 'afterMerge', 'afterPull', 'afterPush', 'onPresenceEvent']) 'Bad state: $hook',
+        for (final hook in [
+          'afterWrite',
+          'afterMerge',
+          'afterPull',
+          'afterPush',
+          'onPresenceEvent',
+        ])
+          'Bad state: $hook',
       ]);
     });
 
     test('a failing validator means a later plugin never sees the write', () {
       var later = 0;
-      pm.use(_Plugin('b', onBeforeWrite: (e) {
-        later++;
-        return e;
-      }));
+      pm.use(
+        _Plugin(
+          'b',
+          onBeforeWrite: (e) {
+            later++;
+            return e;
+          },
+        ),
+      );
       expect(pm.dispatchBeforeWrite(makeWriteEvent()), isNull);
       expect(later, 0);
     });
@@ -795,16 +1030,24 @@ void main() {
       final quiet = PluginManager();
       quiet.use(_ThrowsEverywhere());
       expect(quiet.dispatchBeforePush([makeChange()]), isNull);
-      expect(() => quiet.dispatchBeforePersist('t', '1', makeDocState()), throwsStateError);
+      expect(
+        () => quiet.dispatchBeforePersist('t', '1', makeDocState()),
+        throwsStateError,
+      );
       quiet.remove('bad');
     });
 
     test('a handler that throws does not break the policy', () {
-      final loud = PluginManager(onPluginError: (e, name) => throw StateError('handler'));
+      final loud = PluginManager(
+        onPluginError: (e, name) => throw StateError('handler'),
+      );
       loud.use(_Throwing());
       expect(loud.dispatchBeforePush([makeChange()]), isNull);
       loud.use(_ThrowsEverywhere());
-      expect(() => loud.dispatchBeforePersist('t', '1', makeDocState()), throwsA(predicate((e) => '$e' == 'Bad state: beforePersist')));
+      expect(
+        () => loud.dispatchBeforePersist('t', '1', makeDocState()),
+        throwsA(predicate((e) => '$e' == 'Bad state: beforePersist')),
+      );
     });
 
     test('an init that throws is reported and the plugin stays registered', () {
@@ -816,11 +1059,14 @@ void main() {
       expect(pm2.get<StorePlugin>('bad'), same(p));
     });
 
-    test('a destroy that throws is reported and the plugin is still removed', () {
-      pm.remove('bad');
-      expect(errors.single.$1, 'bad');
-      expect(pm.get<StorePlugin>('bad'), isNull);
-    });
+    test(
+      'a destroy that throws is reported and the plugin is still removed',
+      () {
+        pm.remove('bad');
+        expect(errors.single.$1, 'bad');
+        expect(pm.get<StorePlugin>('bad'), isNull);
+      },
+    );
 
     test('destroy calls every plugin, survives one that throws, and empties the manager', () {
       var destroyed = 0;
@@ -844,17 +1090,20 @@ void main() {
       expect(pm.get<_Throwing>('x'), isNull);
     });
 
-    test('remove takes out one plugin of a name and ignores an unknown name', () {
-      final pm = PluginManager();
-      var destroyed = 0;
-      pm.use(_Plugin('x', onDestroy: () => destroyed++));
-      pm.use(_Plugin('x', onDestroy: () => destroyed++));
-      pm.remove('nope');
-      expect(destroyed, 0);
-      pm.remove('x');
-      expect(destroyed, 1);
-      expect(pm.all(), hasLength(1));
-    });
+    test(
+      'remove takes out one plugin of a name and ignores an unknown name',
+      () {
+        final pm = PluginManager();
+        var destroyed = 0;
+        pm.use(_Plugin('x', onDestroy: () => destroyed++));
+        pm.use(_Plugin('x', onDestroy: () => destroyed++));
+        pm.remove('nope');
+        expect(destroyed, 0);
+        pm.remove('x');
+        expect(destroyed, 1);
+        expect(pm.all(), hasLength(1));
+      },
+    );
 
     test('all lists plugins in registration order, as a copy', () {
       final pm = PluginManager();
@@ -873,10 +1122,15 @@ void main() {
     test('a hook that removes its own plugin during dispatch does not break the loop', () {
       final pm = PluginManager();
       final order = <String>[];
-      pm.use(_Plugin('a', onAfterWrite: (_) {
-        order.add('a');
-        pm.remove('a');
-      }));
+      pm.use(
+        _Plugin(
+          'a',
+          onAfterWrite: (_) {
+            order.add('a');
+            pm.remove('a');
+          },
+        ),
+      );
       pm.use(_Plugin('b', onAfterWrite: (_) => order.add('b')));
       pm.dispatchAfterWrite(makeWriteEvent());
       expect(order, ['a', 'b']);

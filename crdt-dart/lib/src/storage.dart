@@ -13,7 +13,9 @@ abstract interface class ReplicaStorage {
   /// A document that cannot be decoded throws a [FormatException] naming its
   /// key. When [onUnreadable] is given, that exception goes to it instead and
   /// the document is skipped, so one corrupt document does not hide the rest.
-  Future<Map<String, Map<String, DocumentState>>> loadState({void Function(FormatException error)? onUnreadable});
+  Future<Map<String, Map<String, DocumentState>>> loadState({
+    void Function(FormatException error)? onUnreadable,
+  });
 
   /// Persists one document.
   Future<void> saveDocument(String table, String pk, DocumentState doc);
@@ -69,8 +71,9 @@ final class MemoryReplicaStorage implements ReplicaStorage {
   const MemoryReplicaStorage();
 
   @override
-  Future<Map<String, Map<String, DocumentState>>> loadState({void Function(FormatException error)? onUnreadable}) async =>
-      {};
+  Future<Map<String, Map<String, DocumentState>>> loadState({
+    void Function(FormatException error)? onUnreadable,
+  }) async => {};
 
   @override
   Future<void> saveDocument(String table, String pk, DocumentState doc) async {}
@@ -165,7 +168,11 @@ final class _MapBatch implements ReplicaKeyValueBatch {
   bool closed = false;
 
   void _check() {
-    if (closed) throw StateError('the batch is closed: build runs synchronously and must not await');
+    if (closed) {
+      throw StateError(
+        'the batch is closed: build runs synchronously and must not await',
+      );
+    }
   }
 
   @override
@@ -186,7 +193,9 @@ final class _MapBatch implements ReplicaKeyValueBatch {
 String _enc(String s) {
   var clean = s;
   if (s.runes.any((r) => r >= 0xD800 && r <= 0xDFFF)) {
-    clean = String.fromCharCodes([for (final r in s.runes) r >= 0xD800 && r <= 0xDFFF ? 0xFFFD : r]);
+    clean = String.fromCharCodes([
+      for (final r in s.runes) r >= 0xD800 && r <= 0xDFFF ? 0xFFFD : r,
+    ]);
   }
   return Uri.encodeComponent(clean);
 }
@@ -215,7 +224,8 @@ String _enc(String s) {
 /// Meta keys and values are stored raw. A real store may refuse a key that
 /// holds an unpaired surrogate (forge's SQLite store throws an
 /// [ArgumentError]), so keep them ASCII.
-final class KeyValueReplicaStorage implements AtomicReplicaStorage, SyncCursorStore {
+final class KeyValueReplicaStorage
+    implements AtomicReplicaStorage, SyncCursorStore {
   /// Stores everything under [prefix] in [kv].
   KeyValueReplicaStorage(this.kv, {this.prefix = ''});
 
@@ -229,14 +239,18 @@ final class KeyValueReplicaStorage implements AtomicReplicaStorage, SyncCursorSt
 
   String get _pendingKey => '${prefix}pending';
 
-  String _docKey(String table, String pk) => '$_docPrefix${_enc(table)}/${_enc(pk)}';
+  String _docKey(String table, String pk) =>
+      '$_docPrefix${_enc(table)}/${_enc(pk)}';
 
   String _cursorKey(String table) => '${prefix}cursor/${_enc(table)}';
 
-  String _encodePending(List<PendingChange> changes) => encodeWire([for (final c in changes) c.toJson()]);
+  String _encodePending(List<PendingChange> changes) =>
+      encodeWire([for (final c in changes) c.toJson()]);
 
   @override
-  Future<Map<String, Map<String, DocumentState>>> loadState({void Function(FormatException error)? onUnreadable}) async {
+  Future<Map<String, Map<String, DocumentState>>> loadState({
+    void Function(FormatException error)? onUnreadable,
+  }) async {
     final out = <String, Map<String, DocumentState>>{};
     void unreadable(FormatException error) {
       if (onUnreadable == null) throw error;
@@ -257,11 +271,19 @@ final class KeyValueReplicaStorage implements AtomicReplicaStorage, SyncCursorSt
         pk = Uri.decodeComponent(parts[1]);
         doc = DocumentState.fromJson(jsonDecode(e.value));
       } on FormatException catch (err) {
-        unreadable(FormatException('crdt: stored document "${e.key}" is unreadable: ${err.message}'));
+        unreadable(
+          FormatException(
+            'crdt: stored document "${e.key}" is unreadable: ${err.message}',
+          ),
+        );
         continue;
       } on ArgumentError catch (err) {
         // Uri.decodeComponent throws an ArgumentError for a bad percent-escape.
-        unreadable(FormatException('crdt: stored document "${e.key}" is unreadable: ${err.message}'));
+        unreadable(
+          FormatException(
+            'crdt: stored document "${e.key}" is unreadable: ${err.message}',
+          ),
+        );
         continue;
       }
       (out[table] ??= {})[pk] = doc;
@@ -274,19 +296,25 @@ final class KeyValueReplicaStorage implements AtomicReplicaStorage, SyncCursorSt
       kv.put(_docKey(table, pk), encodeWire(doc.toJson()));
 
   @override
-  Future<void> deleteDocument(String table, String pk) async => kv.delete(_docKey(table, pk));
+  Future<void> deleteDocument(String table, String pk) async =>
+      kv.delete(_docKey(table, pk));
 
   @override
   Future<List<PendingChange>> loadPendingChanges() async {
     final raw = await kv.get(_pendingKey);
     if (raw == null) return [];
     final decoded = jsonDecode(raw);
-    if (decoded is! List<Object?>) throw const FormatException('crdt: stored pending queue is not a JSON array');
+    if (decoded is! List<Object?>) {
+      throw const FormatException(
+        'crdt: stored pending queue is not a JSON array',
+      );
+    }
     return [for (final j in decoded) PendingChange.fromJson(j)];
   }
 
   @override
-  Future<void> savePendingChanges(List<PendingChange> changes) async => kv.put(_pendingKey, _encodePending(changes));
+  Future<void> savePendingChanges(List<PendingChange> changes) async =>
+      kv.put(_pendingKey, _encodePending(changes));
 
   @override
   Future<void> commit({
@@ -297,7 +325,9 @@ final class KeyValueReplicaStorage implements AtomicReplicaStorage, SyncCursorSt
     // when it returns, and cannot read.
     final writes = <String, String?>{
       for (final e in documents.entries)
-        _docKey(e.key.$1, e.key.$2): e.value == null ? null : encodeWire(e.value!.toJson()),
+        _docKey(e.key.$1, e.key.$2): e.value == null
+            ? null
+            : encodeWire(e.value!.toJson()),
       if (pending != null) _pendingKey: _encodePending(pending),
     };
     if (writes.isEmpty) return;
@@ -320,13 +350,15 @@ final class KeyValueReplicaStorage implements AtomicReplicaStorage, SyncCursorSt
   }
 
   @override
-  Future<void> writeCursor(String table, HLC cursor) async => kv.put(_cursorKey(table), encodeWire(cursor.toJson()));
+  Future<void> writeCursor(String table, HLC cursor) async =>
+      kv.put(_cursorKey(table), encodeWire(cursor.toJson()));
 
   @override
   Future<String?> readMeta(String key) async => kv.get('${prefix}meta/$key');
 
   @override
-  Future<void> writeMeta(String key, String value) async => kv.put('${prefix}meta/$key', value);
+  Future<void> writeMeta(String key, String value) async =>
+      kv.put('${prefix}meta/$key', value);
 
   @override
   Future<void> clearAll() async {

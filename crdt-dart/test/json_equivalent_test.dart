@@ -20,11 +20,22 @@ void main() {
     });
     test('an empty list does not equal an empty map', () {
       expect(jsonEquivalent(<Object?>[], <String, Object?>{}), isFalse);
-      expect(jsonEquivalent({'v': <Object?>[]}, {'v': <String, Object?>{}}), isFalse);
+      expect(
+        jsonEquivalent({'v': <Object?>[]}, {'v': <String, Object?>{}}),
+        isFalse,
+      );
     });
     test('the null rule applies at depth', () {
       expect(jsonEquivalent({'a': null}, {'a': <Object?>[]}), isTrue);
-      expect(jsonEquivalent({'a': null}, {'a': [1]}), isFalse);
+      expect(
+        jsonEquivalent(
+          {'a': null},
+          {
+            'a': [1],
+          },
+        ),
+        isFalse,
+      );
     });
     test('key presence is exact', () {
       expect(jsonEquivalent({'a': 1}, {'a': 1, 'b': null}), isFalse);

@@ -40,7 +40,12 @@ void main() {
     });
 
     test('saveDocument called after setField', () async {
-      final store = CrdtStore('test-node', clock, storage: storage, persistDebounce: Duration.zero);
+      final store = CrdtStore(
+        'test-node',
+        clock,
+        storage: storage,
+        persistDebounce: Duration.zero,
+      );
       await store.ready;
       store.setField('users', '1', 'name', 'Alice');
       // Allow the fire-and-forget persistence to complete.
@@ -51,7 +56,12 @@ void main() {
     });
 
     test('savePendingChanges called after setField', () async {
-      final store = CrdtStore('test-node', clock, storage: storage, persistDebounce: Duration.zero);
+      final store = CrdtStore(
+        'test-node',
+        clock,
+        storage: storage,
+        persistDebounce: Duration.zero,
+      );
       await store.ready;
       store.setField('users', '1', 'name', 'Alice');
       await pumpEventQueue();
@@ -60,7 +70,12 @@ void main() {
     });
 
     test('savePendingChanges called after incrementCounter', () async {
-      final store = CrdtStore('test-node', clock, storage: storage, persistDebounce: Duration.zero);
+      final store = CrdtStore(
+        'test-node',
+        clock,
+        storage: storage,
+        persistDebounce: Duration.zero,
+      );
       await store.ready;
       store.incrementCounter('items', '1', 'views', 1);
       await pumpEventQueue();
@@ -68,7 +83,12 @@ void main() {
     });
 
     test('savePendingChanges called after decrementCounter', () async {
-      final store = CrdtStore('test-node', clock, storage: storage, persistDebounce: Duration.zero);
+      final store = CrdtStore(
+        'test-node',
+        clock,
+        storage: storage,
+        persistDebounce: Duration.zero,
+      );
       await store.ready;
       store.decrementCounter('items', '1', 'stock', 1);
       await pumpEventQueue();
@@ -76,7 +96,12 @@ void main() {
     });
 
     test('saveDocument called after addToSet', () async {
-      final store = CrdtStore('test-node', clock, storage: storage, persistDebounce: Duration.zero);
+      final store = CrdtStore(
+        'test-node',
+        clock,
+        storage: storage,
+        persistDebounce: Duration.zero,
+      );
       await store.ready;
       store.addToSet('items', '1', 'tags', ['cool']);
       await pumpEventQueue();
@@ -84,7 +109,12 @@ void main() {
     });
 
     test('saveDocument called after removeFromSet', () async {
-      final store = CrdtStore('test-node', clock, storage: storage, persistDebounce: Duration.zero);
+      final store = CrdtStore(
+        'test-node',
+        clock,
+        storage: storage,
+        persistDebounce: Duration.zero,
+      );
       await store.ready;
       store.addToSet('items', '1', 'tags', ['cool']);
       store.removeFromSet('items', '1', 'tags', ['cool']);
@@ -93,7 +123,12 @@ void main() {
     });
 
     test('saveDocument called after deleteDocument', () async {
-      final store = CrdtStore('test-node', clock, storage: storage, persistDebounce: Duration.zero);
+      final store = CrdtStore(
+        'test-node',
+        clock,
+        storage: storage,
+        persistDebounce: Duration.zero,
+      );
       await store.ready;
       store.setField('users', '1', 'name', 'Alice');
       store.deleteDocument('users', '1');
@@ -103,7 +138,12 @@ void main() {
     });
 
     test('saveDocument called after applyChanges', () async {
-      final store = CrdtStore('test-node', clock, storage: storage, persistDebounce: Duration.zero);
+      final store = CrdtStore(
+        'test-node',
+        clock,
+        storage: storage,
+        persistDebounce: Duration.zero,
+      );
       await store.ready;
       store.applyChanges([
         ChangeRecord(
@@ -121,7 +161,12 @@ void main() {
     });
 
     test('clearPendingChanges persists empty array', () async {
-      final store = CrdtStore('test-node', clock, storage: storage, persistDebounce: Duration.zero);
+      final store = CrdtStore(
+        'test-node',
+        clock,
+        storage: storage,
+        persistDebounce: Duration.zero,
+      );
       await store.ready;
       store.setField('users', '1', 'name', 'Alice');
       store.clearPendingChanges();
@@ -133,9 +178,18 @@ void main() {
     test('hydrates persisted state on init', () async {
       storage.preloaded = {
         'users': {
-          '1': DocumentState(table: 'users', pk: '1', fields: {
-            'name': FieldState(type: CrdtType.lww, hlc: hlc(100, 'other'), nodeId: 'other', value: const JsonValue('Persisted')),
-          }),
+          '1': DocumentState(
+            table: 'users',
+            pk: '1',
+            fields: {
+              'name': FieldState(
+                type: CrdtType.lww,
+                hlc: hlc(100, 'other'),
+                nodeId: 'other',
+                value: const JsonValue('Persisted'),
+              ),
+            },
+          ),
         },
       };
       final store = CrdtStore('test-node', clock, storage: storage);
@@ -147,15 +201,17 @@ void main() {
 
     test('hydrates persisted pending changes on init', () async {
       storage.preloadedPending = [
-        PendingChange(ChangeRecord(
-          table: 'users',
-          pk: '2',
-          field: 'name',
-          crdtType: CrdtType.lww,
-          hlc: hlc(200, 'test-node'),
-          nodeId: 'test-node',
-          value: const JsonValue('Pending'),
-        )),
+        PendingChange(
+          ChangeRecord(
+            table: 'users',
+            pk: '2',
+            field: 'name',
+            crdtType: CrdtType.lww,
+            hlc: hlc(200, 'test-node'),
+            nodeId: 'test-node',
+            value: const JsonValue('Pending'),
+          ),
+        ),
       ];
       final store = CrdtStore('test-node', clock, storage: storage);
       await store.ready;
@@ -170,10 +226,16 @@ void main() {
       final store = CrdtStore('test-node', clock, storage: storage);
       await store.ready;
       // Should not throw: persistence is fire-and-forget.
-      expect(() => store.setField('users', '1', 'name', 'Alice'), returnsNormally);
+      expect(
+        () => store.setField('users', '1', 'name', 'Alice'),
+        returnsNormally,
+      );
       expect(store.getDocument('users', '1'), isNotNull);
       // Dart: a flush reports that the write did not reach storage.
-      await expectLater(store.flushPersistence(), throwsA(isA<ReplicaPersistFailed>()));
+      await expectLater(
+        store.flushPersistence(),
+        throwsA(isA<ReplicaPersistFailed>()),
+      );
       await expectLater(store.dispose(), throwsA(isA<ReplicaPersistFailed>()));
     });
   });
@@ -181,7 +243,12 @@ void main() {
   group('atomic commits, storage failures, hydration and durability', () {
     test('with an atomic storage a document and its pending entry are written in one commit', () async {
       final storage = RecordingAtomicStorage();
-      final store = CrdtStore('n1', HybridClock('n1'), storage: storage, persistDebounce: Duration.zero);
+      final store = CrdtStore(
+        'n1',
+        HybridClock('n1'),
+        storage: storage,
+        persistDebounce: Duration.zero,
+      );
       await store.ready;
       final c = store.setField('t', '1', 'title', 'x')!;
       await store.flushPersistence();
@@ -204,16 +271,32 @@ void main() {
       store.deleteDocument('t', '1');
       await store.flushPersistence();
       expect(storage.commits, hasLength(1));
-      expect(storage.commits.single.documents.keys, unorderedEquals([('t', '1'), ('t', '2')]));
+      expect(
+        storage.commits.single.documents.keys,
+        unorderedEquals([('t', '1'), ('t', '2')]),
+      );
       expect(storage.commits.single.pending, hasLength(3));
     });
 
     test('a document-only flush commits without the pending queue', () async {
       final storage = RecordingAtomicStorage();
-      final store = CrdtStore('n1', HybridClock('n1'), storage: storage, persistDebounce: Duration.zero);
+      final store = CrdtStore(
+        'n1',
+        HybridClock('n1'),
+        storage: storage,
+        persistDebounce: Duration.zero,
+      );
       await store.ready;
       store.applyChanges([
-        ChangeRecord(table: 't', pk: '1', field: 'f', crdtType: CrdtType.lww, hlc: hlc(5, 'srv'), nodeId: 'srv', value: const JsonValue(1)),
+        ChangeRecord(
+          table: 't',
+          pk: '1',
+          field: 'f',
+          crdtType: CrdtType.lww,
+          hlc: hlc(5, 'srv'),
+          nodeId: 'srv',
+          value: const JsonValue(1),
+        ),
       ]);
       await store.flushPersistence();
       expect(storage.commits.single.pending, isNull);
@@ -221,7 +304,11 @@ void main() {
 
     test('a flush over KeyValueReplicaStorage is one kv batch and reads nothing inside it', () async {
       final kv = _WatchingKv();
-      final store = CrdtStore('n1', HybridClock('n1'), storage: KeyValueReplicaStorage(kv));
+      final store = CrdtStore(
+        'n1',
+        HybridClock('n1'),
+        storage: KeyValueReplicaStorage(kv),
+      );
       await store.ready;
       kv.reset();
       store.setField('t', '1', 'a', 1);
@@ -240,26 +327,47 @@ void main() {
           ..failWrites = StateError('put failed')
           ..failPending = StateError('put failed')
           ..throwSynchronously = sync;
-        final store = CrdtStore('n1', HybridClock('n1'), storage: storage, onStorageError: errors.add);
+        final store = CrdtStore(
+          'n1',
+          HybridClock('n1'),
+          storage: storage,
+          onStorageError: errors.add,
+        );
         await store.ready;
         store.setField('t', '1', 'a', 1);
         await expectLater(
           store.flushPersistence(),
-          throwsA(isA<ReplicaPersistFailed>().having((e) => e.cause, 'cause', isA<StateError>())),
+          throwsA(
+            isA<ReplicaPersistFailed>().having(
+              (e) => e.cause,
+              'cause',
+              isA<StateError>(),
+            ),
+          ),
           reason: 'sync: $sync',
         );
         // The queue is written first and failed, so the document was not tried.
         expect(errors, [isA<StateError>()], reason: 'sync: $sync');
         expect(storage.saved, isEmpty);
         expect(store.getDocument('t', '1')!['a'], 1);
-        await expectLater(store.dispose(), throwsA(isA<ReplicaPersistFailed>()));
+        await expectLater(
+          store.dispose(),
+          throwsA(isA<ReplicaPersistFailed>()),
+        );
       }
     });
     test('an atomic commit that fails once succeeds on the retry tick, with no further write', () {
       fakeAsync((async) {
         final errors = <Object>[];
-        final storage = RecordingAtomicStorage()..failCommit = StateError('busy');
-        final store = CrdtStore('n1', HybridClock('n1'), storage: storage, persistDebounce: Duration.zero, onStorageError: errors.add);
+        final storage = RecordingAtomicStorage()
+          ..failCommit = StateError('busy');
+        final store = CrdtStore(
+          'n1',
+          HybridClock('n1'),
+          storage: storage,
+          persistDebounce: Duration.zero,
+          onStorageError: errors.add,
+        );
         async.flushMicrotasks();
         store.setField('t', '1', 'a', 1);
         async.flushMicrotasks();
@@ -282,7 +390,12 @@ void main() {
       fakeAsync((async) {
         var attempts = 0;
         final storage = _CountingFailingAtomic(() => attempts++);
-        final store = CrdtStore('n1', HybridClock('n1'), storage: storage, persistDebounce: Duration.zero);
+        final store = CrdtStore(
+          'n1',
+          HybridClock('n1'),
+          storage: storage,
+          persistDebounce: Duration.zero,
+        );
         async.flushMicrotasks();
         store.setField('t', '1', 'a', 1);
         async.elapse(const Duration(seconds: 10));
@@ -305,10 +418,21 @@ void main() {
           } else {
             storage.failLoad = StateError('closed');
           }
-          final store = CrdtStore('n1', HybridClock('n1'), storage: storage, onStorageError: errors.add);
+          final store = CrdtStore(
+            'n1',
+            HybridClock('n1'),
+            storage: storage,
+            onStorageError: errors.add,
+          );
           await expectLater(
             store.ready,
-            throwsA(isA<ReplicaUnavailable>().having((e) => e.cause, 'cause', isA<StateError>())),
+            throwsA(
+              isA<ReplicaUnavailable>().having(
+                (e) => e.cause,
+                'cause',
+                isA<StateError>(),
+              ),
+            ),
             reason: '$which sync: $sync',
           );
           expect(errors.single, isA<StateError>());
@@ -327,8 +451,16 @@ void main() {
       final kv = _GatedKv(gate.future);
       kv.entries['pending'] = 'stored queue bytes';
       final storage = KeyValueReplicaStorage(kv);
-      final store = CrdtStore('n1', HybridClock('n1'), storage: storage, persistDebounce: Duration.zero);
-      expect(() => store.setField('t', '1', 'a', 1), throwsA(isA<StateError>()));
+      final store = CrdtStore(
+        'n1',
+        HybridClock('n1'),
+        storage: storage,
+        persistDebounce: Duration.zero,
+      );
+      expect(
+        () => store.setField('t', '1', 'a', 1),
+        throwsA(isA<StateError>()),
+      );
       kv.failGet = StateError('transient');
       gate.complete();
       await expectLater(store.ready, throwsA(isA<ReplicaUnavailable>()));
@@ -339,14 +471,19 @@ void main() {
       expect(kv.entries['pending'], 'stored queue bytes');
     });
     test('a store nobody awaits does not raise its load failure as an unhandled error', () async {
-      final storage = RecordingStorage()..failLoadPending = StateError('closed');
+      final storage = RecordingStorage()
+        ..failLoadPending = StateError('closed');
       CrdtStore('n1', HybridClock('n1'), storage: storage);
       await pumpEventQueue();
     });
 
     test('a corrupt stored document is skipped on hydrate, reported with its key, and the rest load', () async {
       final kv = MapReplicaKeyValue();
-      final first = CrdtStore('n1', HybridClock('n1'), storage: KeyValueReplicaStorage(kv));
+      final first = CrdtStore(
+        'n1',
+        HybridClock('n1'),
+        storage: KeyValueReplicaStorage(kv),
+      );
       await first.ready;
       first.setField('t', 'good', 'a', 1);
       first.setField('t', 'bad', 'a', 1);
@@ -354,9 +491,21 @@ void main() {
       kv.entries['doc/t/bad'] = '{"table":"t","pk":"bad","fields":7}';
 
       final errors = <Object>[];
-      final second = CrdtStore('n1', HybridClock('n1'), storage: KeyValueReplicaStorage(kv), onStorageError: errors.add);
+      final second = CrdtStore(
+        'n1',
+        HybridClock('n1'),
+        storage: KeyValueReplicaStorage(kv),
+        onStorageError: errors.add,
+      );
       await expectLater(second.ready, completes);
-      expect(errors.single, isA<FormatException>().having((e) => e.message, 'message', contains('doc/t/bad')));
+      expect(
+        errors.single,
+        isA<FormatException>().having(
+          (e) => e.message,
+          'message',
+          contains('doc/t/bad'),
+        ),
+      );
       expect(second.getDocument('t', 'good')!['a'], 1);
       expect(second.getDocument('t', 'bad'), isNull);
       expect(second.pending, hasLength(2));
@@ -365,65 +514,109 @@ void main() {
     test('a corrupt stored pending queue fails closed', () async {
       final kv = MapReplicaKeyValue()..entries['pending'] = '{"not":"a list"}';
       final errors = <Object>[];
-      final store = CrdtStore('n1', HybridClock('n1'), storage: KeyValueReplicaStorage(kv), onStorageError: errors.add);
+      final store = CrdtStore(
+        'n1',
+        HybridClock('n1'),
+        storage: KeyValueReplicaStorage(kv),
+        onStorageError: errors.add,
+      );
       await expectLater(
         store.ready,
-        throwsA(isA<ReplicaUnavailable>().having((e) => e.cause, 'cause', isA<FormatException>())),
+        throwsA(
+          isA<ReplicaUnavailable>().having(
+            (e) => e.cause,
+            'cause',
+            isA<FormatException>(),
+          ),
+        ),
       );
       expect(errors.single, isA<FormatException>());
       expect(() => store.setField('t', '1', 'a', 1), throwsStateError);
       expect(kv.entries['pending'], '{"not":"a list"}');
     });
 
-    test('a session closed underneath the store is reported and does not crash', () async {
-      final kv = _ClosableKv();
-      final errors = <Object>[];
-      final store = CrdtStore('n1', HybridClock('n1'), storage: KeyValueReplicaStorage(kv), onStorageError: errors.add);
-      await store.ready;
-      kv.closed = true;
-      store.setField('t', '1', 'a', 1);
-      store.deleteDocument('t', '1');
-      await expectLater(store.flushPersistence(), throwsA(isA<ReplicaPersistFailed>()));
-      expect(errors, isNotEmpty);
-      expect(errors, everyElement(isA<StateError>()));
-      expect(store.getDocumentState('t', '1')!.tombstone, isTrue);
-      await expectLater(store.dispose(), throwsA(isA<ReplicaPersistFailed>()));
-    });
-    test('dispose flushes first, then stops persisting, and writes after it throw', () async {
-      final storage = RecordingStorage();
-      final store = CrdtStore('n1', HybridClock('n1'), storage: storage);
-      await store.ready;
-      store.setField('t', '1', 'a', 1);
-      var done = false;
-      final sub = store.documentChanges.listen((_) {}, onDone: () => done = true);
-      await store.dispose();
-      expect(storage.saved, hasLength(1));
-      expect(storage.savedPending.single, hasLength(1));
-      expect(done, isTrue);
-      expect(() => store.setField('t', '1', 'b', 2), throwsStateError);
-      expect(() => store.applyChanges([]), throwsStateError);
-      expect(store.undo, throwsStateError);
-      await store.flushPersistence();
-      expect(storage.saved, hasLength(1));
-      expect(store.getDocument('t', '1')!['a'], 1);
-      await sub.cancel();
-    });
+    test(
+      'a session closed underneath the store is reported and does not crash',
+      () async {
+        final kv = _ClosableKv();
+        final errors = <Object>[];
+        final store = CrdtStore(
+          'n1',
+          HybridClock('n1'),
+          storage: KeyValueReplicaStorage(kv),
+          onStorageError: errors.add,
+        );
+        await store.ready;
+        kv.closed = true;
+        store.setField('t', '1', 'a', 1);
+        store.deleteDocument('t', '1');
+        await expectLater(
+          store.flushPersistence(),
+          throwsA(isA<ReplicaPersistFailed>()),
+        );
+        expect(errors, isNotEmpty);
+        expect(errors, everyElement(isA<StateError>()));
+        expect(store.getDocumentState('t', '1')!.tombstone, isTrue);
+        await expectLater(
+          store.dispose(),
+          throwsA(isA<ReplicaPersistFailed>()),
+        );
+      },
+    );
+    test(
+      'dispose flushes first, then stops persisting, and writes after it throw',
+      () async {
+        final storage = RecordingStorage();
+        final store = CrdtStore('n1', HybridClock('n1'), storage: storage);
+        await store.ready;
+        store.setField('t', '1', 'a', 1);
+        var done = false;
+        final sub = store.documentChanges.listen(
+          (_) {},
+          onDone: () => done = true,
+        );
+        await store.dispose();
+        expect(storage.saved, hasLength(1));
+        expect(storage.savedPending.single, hasLength(1));
+        expect(done, isTrue);
+        expect(() => store.setField('t', '1', 'b', 2), throwsStateError);
+        expect(() => store.applyChanges([]), throwsStateError);
+        expect(store.undo, throwsStateError);
+        await store.flushPersistence();
+        expect(storage.saved, hasLength(1));
+        expect(store.getDocument('t', '1')!['a'], 1);
+        await sub.cancel();
+      },
+    );
 
-    test('importState deletes the documents the snapshot leaves out from storage', () async {
-      final storage = RecordingStorage();
-      final store = CrdtStore('n1', HybridClock('n1'), storage: storage, persistDebounce: Duration.zero);
-      await store.ready;
-      store.setField('users', '1', 'name', 'Alice');
-      store.setField('posts', '1', 'title', 'Hi');
-      final snapshot = store.exportState()..tables.remove('posts');
-      store.importState(snapshot);
-      await store.flushPersistence();
-      expect(storage.deleted, [('posts', '1')]);
-    });
+    test(
+      'importState deletes the documents the snapshot leaves out from storage',
+      () async {
+        final storage = RecordingStorage();
+        final store = CrdtStore(
+          'n1',
+          HybridClock('n1'),
+          storage: storage,
+          persistDebounce: Duration.zero,
+        );
+        await store.ready;
+        store.setField('users', '1', 'name', 'Alice');
+        store.setField('posts', '1', 'title', 'Hi');
+        final snapshot = store.exportState()..tables.remove('posts');
+        store.importState(snapshot);
+        await store.flushPersistence();
+        expect(storage.deleted, [('posts', '1')]);
+      },
+    );
 
     test('dropDocument removes the document from memory and storage', () async {
       final storage = RecordingStorage();
-      final store = CrdtStore('n1', HybridClock('n1'), storage: storage, persistDebounce: Duration.zero);
+      final store = CrdtStore(
+        'n1',
+        HybridClock('n1'),
+        storage: storage,
+        persistDebounce: Duration.zero,
+      );
       await store.ready;
       store.setField('t', '1', 'a', 1);
       store.dropDocument('t', '1');
@@ -435,15 +628,31 @@ void main() {
 
     test('a write before ready throws and changes nothing', () async {
       final kv = MapReplicaKeyValue();
-      final first = CrdtStore('n1', HybridClock('n1', nowMs: () => 9000000), storage: KeyValueReplicaStorage(kv), persistDebounce: Duration.zero);
+      final first = CrdtStore(
+        'n1',
+        HybridClock('n1', nowMs: () => 9000000),
+        storage: KeyValueReplicaStorage(kv),
+        persistDebounce: Duration.zero,
+      );
       await first.ready;
       final old = first.setField('t', '1', 'title', 'old')!;
       await first.dispose();
-      final second = CrdtStore('n1', HybridClock('n1', nowMs: () => 1000), storage: KeyValueReplicaStorage(kv), persistDebounce: Duration.zero);
+      final second = CrdtStore(
+        'n1',
+        HybridClock('n1', nowMs: () => 1000),
+        storage: KeyValueReplicaStorage(kv),
+        persistDebounce: Duration.zero,
+      );
       final before = second.clock.last;
       expect(
         () => second.setField('t', '1', 'title', 'typed before ready'),
-        throwsA(isA<StateError>().having((e) => e.message, 'message', 'await store.ready before writing')),
+        throwsA(
+          isA<StateError>().having(
+            (e) => e.message,
+            'message',
+            'await store.ready before writing',
+          ),
+        ),
       );
       expect(() => second.applyChanges([]), throwsStateError);
       expect(second.clock.last, before);
@@ -454,38 +663,74 @@ void main() {
       expect(c.hlc.isAfter(old.hlc), isTrue);
     });
 
-    test('persisted pending changes stay first, in their stored order', () async {
-      final storage = RecordingStorage()
-        ..preloadedPending = [
-          for (final pk in ['9', '8'])
-            PendingChange(ChangeRecord(table: 't', pk: pk, field: 'f', crdtType: CrdtType.lww, hlc: hlc(1, 'n1'), nodeId: 'n1')),
-        ];
-      final store = CrdtStore('n1', HybridClock('n1'), storage: storage);
-      await store.ready;
-      store.setField('t', '1', 'a', 'fresh');
-      expect(store.pending.map((p) => p.change.pk), ['9', '8', '1']);
-    });
+    test(
+      'persisted pending changes stay first, in their stored order',
+      () async {
+        final storage = RecordingStorage()
+          ..preloadedPending = [
+            for (final pk in ['9', '8'])
+              PendingChange(
+                ChangeRecord(
+                  table: 't',
+                  pk: pk,
+                  field: 'f',
+                  crdtType: CrdtType.lww,
+                  hlc: hlc(1, 'n1'),
+                  nodeId: 'n1',
+                ),
+              ),
+          ];
+        final store = CrdtStore('n1', HybridClock('n1'), storage: storage);
+        await store.ready;
+        store.setField('t', '1', 'a', 'fresh');
+        expect(store.pending.map((p) => p.change.pk), ['9', '8', '1']);
+      },
+    );
     test('a failed queue write is retried by the next flush, so a pulled document does not strand the edit', () async {
       // Plain storage: the queue write fails on the local edit, then a pull
       // flushes a different document. The edit must still reach the stored
       // queue and its document.
       final kv = _FlakyKv()..failPutsTo = {'pending'};
       final errors = <Object>[];
-      final s = CrdtStore('a', HybridClock('a', nowMs: () => 1000),
-          storage: _PlainOnly(KeyValueReplicaStorage(kv)), persistDebounce: Duration.zero, onStorageError: errors.add);
+      final s = CrdtStore(
+        'a',
+        HybridClock('a', nowMs: () => 1000),
+        storage: _PlainOnly(KeyValueReplicaStorage(kv)),
+        persistDebounce: Duration.zero,
+        onStorageError: errors.add,
+      );
       await s.ready;
       final edit = s.setField('t', '1', 'title', 'offline edit')!;
-      await expectLater(s.flushPersistence(), throwsA(isA<ReplicaPersistFailed>()));
-      expect(kv.entries.containsKey('doc/t/1'), isFalse, reason: 'no document without its queue entry');
+      await expectLater(
+        s.flushPersistence(),
+        throwsA(isA<ReplicaPersistFailed>()),
+      );
+      expect(
+        kv.entries.containsKey('doc/t/1'),
+        isFalse,
+        reason: 'no document without its queue entry',
+      );
       kv.failPutsTo = {};
       s.applyChanges([
-        ChangeRecord(table: 't', pk: '2', field: 'x', crdtType: CrdtType.lww, hlc: hlc(5, 'srv'), nodeId: 'srv', value: const JsonValue('r')),
+        ChangeRecord(
+          table: 't',
+          pk: '2',
+          field: 'x',
+          crdtType: CrdtType.lww,
+          hlc: hlc(5, 'srv'),
+          nodeId: 'srv',
+          value: const JsonValue('r'),
+        ),
       ]);
       await s.flushPersistence();
       await s.dispose();
       expect(errors, isNotEmpty);
 
-      final restarted = CrdtStore('a', HybridClock('a', nowMs: () => 1000), storage: KeyValueReplicaStorage(kv));
+      final restarted = CrdtStore(
+        'a',
+        HybridClock('a', nowMs: () => 1000),
+        storage: KeyValueReplicaStorage(kv),
+      );
       await restarted.ready;
       expect(restarted.getDocument('t', '1')!['title'], 'offline edit');
       expect(restarted.getDocument('t', '2')!['x'], 'r');
@@ -494,11 +739,19 @@ void main() {
 
     test('a failed document write is retried while the stored queue is not rewritten', () async {
       final storage = RecordingStorage();
-      final s = CrdtStore('a', HybridClock('a', nowMs: () => 1000), storage: storage, persistDebounce: Duration.zero);
+      final s = CrdtStore(
+        'a',
+        HybridClock('a', nowMs: () => 1000),
+        storage: storage,
+        persistDebounce: Duration.zero,
+      );
       await s.ready;
       storage.failWrites = StateError('disk full');
       s.setField('t', '1', 'a', 1);
-      await expectLater(s.flushPersistence(), throwsA(isA<ReplicaPersistFailed>()));
+      await expectLater(
+        s.flushPersistence(),
+        throwsA(isA<ReplicaPersistFailed>()),
+      );
       expect(storage.savedPending, hasLength(1));
       storage.failWrites = null;
       await s.flushPersistence();
@@ -508,26 +761,53 @@ void main() {
 
     test('a failed atomic commit keeps the edit through a later pull until a commit succeeds', () async {
       final storage = RecordingAtomicStorage();
-      final s = CrdtStore('a', HybridClock('a', nowMs: () => 1000), storage: storage, persistDebounce: Duration.zero);
+      final s = CrdtStore(
+        'a',
+        HybridClock('a', nowMs: () => 1000),
+        storage: storage,
+        persistDebounce: Duration.zero,
+      );
       await s.ready;
       storage.failCommit = StateError('transient');
       s.setField('t', '1', 'title', 'edit');
-      await expectLater(s.flushPersistence(), throwsA(isA<ReplicaPersistFailed>()));
+      await expectLater(
+        s.flushPersistence(),
+        throwsA(isA<ReplicaPersistFailed>()),
+      );
       storage.failCommit = null;
       s.applyChanges([
-        ChangeRecord(table: 't', pk: '2', field: 'x', crdtType: CrdtType.lww, hlc: hlc(5, 'srv'), nodeId: 'srv', value: const JsonValue('r')),
+        ChangeRecord(
+          table: 't',
+          pk: '2',
+          field: 'x',
+          crdtType: CrdtType.lww,
+          hlc: hlc(5, 'srv'),
+          nodeId: 'srv',
+          value: const JsonValue('r'),
+        ),
       ]);
       await s.dispose();
       final docs = {for (final c in storage.commits) ...c.documents.keys};
       expect(docs, containsAll([('t', '1'), ('t', '2')]));
-      expect([for (final c in storage.commits) if (c.pending != null) c.pending!.single.change.field], ['title']);
+      expect(
+        [
+          for (final c in storage.commits)
+            if (c.pending != null) c.pending!.single.change.field,
+        ],
+        ['title'],
+      );
     });
 
     test('dispose after a throwing beforePersist completes with ReplicaPersistFailed after closing', () async {
       final storage = RecordingStorage();
       final errors = <Object>[];
-      final s = CrdtStore('a', HybridClock('a', nowMs: () => 1000),
-          storage: storage, persistDebounce: const Duration(milliseconds: 50), onStorageError: errors.add);
+      final s = CrdtStore(
+        'a',
+        HybridClock('a', nowMs: () => 1000),
+        storage: storage,
+        persistDebounce: const Duration(milliseconds: 50),
+        onStorageError: errors.add,
+      );
       await s.ready;
       s.use(_ThrowingPersist());
       s.setField('t', '1', 'title', 'x');
@@ -535,7 +815,13 @@ void main() {
       final sub = s.documentChanges.listen((_) {}, onDone: () => closed = true);
       await expectLater(
         s.dispose(),
-        throwsA(isA<ReplicaPersistFailed>().having((e) => e.cause, 'cause', isA<StateError>())),
+        throwsA(
+          isA<ReplicaPersistFailed>().having(
+            (e) => e.cause,
+            'cause',
+            isA<StateError>(),
+          ),
+        ),
       );
       expect(closed, isTrue);
       expect(storage.saved, isEmpty);
@@ -549,16 +835,35 @@ void main() {
       final storage = RecordingStorage()
         ..preloadedPending = [
           for (var i = 0; i < 5; i++)
-            PendingChange(ChangeRecord(table: 't', pk: '$i', field: 'f', crdtType: CrdtType.lww, hlc: hlc(i + 1, 'n1'), nodeId: 'n1')),
+            PendingChange(
+              ChangeRecord(
+                table: 't',
+                pk: '$i',
+                field: 'f',
+                crdtType: CrdtType.lww,
+                hlc: hlc(i + 1, 'n1'),
+                nodeId: 'n1',
+              ),
+            ),
         ];
-      final s = CrdtStore('n1', HybridClock('n1'), storage: storage, persistDebounce: Duration.zero, maxPendingChanges: 3);
+      final s = CrdtStore(
+        'n1',
+        HybridClock('n1'),
+        storage: storage,
+        persistDebounce: Duration.zero,
+        maxPendingChanges: 3,
+      );
       final dropped = <ChangeRecord>[];
       s.onPendingOverflow(dropped.addAll);
       await s.ready;
       expect(dropped.map((c) => c.pk), ['0', '1']);
       expect(s.pending.map((p) => p.change.pk), ['2', '3', '4']);
       await s.flushPersistence();
-      expect(storage.savedPending.last.map((p) => p.change.pk), ['2', '3', '4']);
+      expect(storage.savedPending.last.map((p) => p.change.pk), [
+        '2',
+        '3',
+        '4',
+      ]);
     });
 
     test('no storage failure ever escapes as an unhandled error', () async {
@@ -567,7 +872,12 @@ void main() {
         final storage = RecordingAtomicStorage()
           ..failCommit = StateError('commit')
           ..throwSynchronously = true;
-        final s = CrdtStore('a', HybridClock('a', nowMs: () => 1000), storage: storage, persistDebounce: const Duration(milliseconds: 1));
+        final s = CrdtStore(
+          'a',
+          HybridClock('a', nowMs: () => 1000),
+          storage: storage,
+          persistDebounce: const Duration(milliseconds: 1),
+        );
         await s.ready;
         s.setField('t', '1', 'a', 1);
         await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -578,7 +888,11 @@ void main() {
         final bad2 = RecordingStorage()
           ..failLoad = StateError('loadsync')
           ..throwSynchronously = true;
-        final s2 = CrdtStore('c', HybridClock('c', nowMs: () => 1000), storage: bad2);
+        final s2 = CrdtStore(
+          'c',
+          HybridClock('c', nowMs: () => 1000),
+          storage: bad2,
+        );
         unawaited(s2.dispose());
         await Future<void>.delayed(const Duration(milliseconds: 20));
       }, (e, st) => unhandled.add(e));
@@ -591,7 +905,10 @@ void main() {
       expect(store.getDocument('t�', 'k�')!['f�'], 'v�');
       expect(store.getDocument('t\ud800', 'k\udc00')!['f�'], 'v�');
       final c = store.getPendingChanges().single;
-      expect([c.table, c.pk, c.field, c.value!.value], ['t�', 'k�', 'f�', 'v�']);
+      expect(
+        [c.table, c.pk, c.field, c.value!.value],
+        ['t�', 'k�', 'f�', 'v�'],
+      );
     });
   });
 }
@@ -615,7 +932,8 @@ class _DelegatingKv implements ReplicaKeyValue {
   Future<Map<String, String>> scan(String prefix) => inner.scan(prefix);
 
   @override
-  Future<void> batch(void Function(ReplicaKeyValueBatch batch) build) => inner.batch(build);
+  Future<void> batch(void Function(ReplicaKeyValueBatch batch) build) =>
+      inner.batch(build);
 }
 
 /// A key-value store that counts writes and notices a read made while a
@@ -762,7 +1080,9 @@ final class _FlakyKv extends _DelegatingKv {
 
   @override
   Future<void> put(String key, String value) {
-    if (failPutsTo.contains(key)) return Future<void>.error(StateError('put $key failed'));
+    if (failPutsTo.contains(key)) {
+      return Future<void>.error(StateError('put $key failed'));
+    }
     return super.put(key, value);
   }
 }
@@ -773,20 +1093,25 @@ final class _PlainOnly implements ReplicaStorage {
   final ReplicaStorage inner;
 
   @override
-  Future<Map<String, Map<String, DocumentState>>> loadState({void Function(FormatException error)? onUnreadable}) =>
-      inner.loadState(onUnreadable: onUnreadable);
+  Future<Map<String, Map<String, DocumentState>>> loadState({
+    void Function(FormatException error)? onUnreadable,
+  }) => inner.loadState(onUnreadable: onUnreadable);
 
   @override
-  Future<List<PendingChange>> loadPendingChanges() => inner.loadPendingChanges();
+  Future<List<PendingChange>> loadPendingChanges() =>
+      inner.loadPendingChanges();
 
   @override
-  Future<void> saveDocument(String table, String pk, DocumentState doc) => inner.saveDocument(table, pk, doc);
+  Future<void> saveDocument(String table, String pk, DocumentState doc) =>
+      inner.saveDocument(table, pk, doc);
 
   @override
-  Future<void> deleteDocument(String table, String pk) => inner.deleteDocument(table, pk);
+  Future<void> deleteDocument(String table, String pk) =>
+      inner.deleteDocument(table, pk);
 
   @override
-  Future<void> savePendingChanges(List<PendingChange> changes) => inner.savePendingChanges(changes);
+  Future<void> savePendingChanges(List<PendingChange> changes) =>
+      inner.savePendingChanges(changes);
 }
 
 final class _ThrowingPersist extends StorePlugin {
@@ -794,5 +1119,6 @@ final class _ThrowingPersist extends StorePlugin {
   String get name => 'encryptor';
 
   @override
-  DocumentState beforePersist(String table, String pk, DocumentState doc) => throw StateError('no key');
+  DocumentState beforePersist(String table, String pk, DocumentState doc) =>
+      throw StateError('no key');
 }

@@ -18,14 +18,16 @@ final class SyncFilter {
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        if (pkFilter.isNotEmpty) 'pk_filter': pkFilter,
-        if (fieldFilter.isNotEmpty) 'field_filter': fieldFilter,
-      };
+    if (pkFilter.isNotEmpty) 'pk_filter': pkFilter,
+    if (fieldFilter.isNotEmpty) 'field_filter': fieldFilter,
+  };
 
   /// Decodes the Go wire form.
   static SyncFilter fromJson(Object? j) {
     final m = wireObj(j);
-    String s(Object? v) => v is String ? v : throw FormatException('crdt: filter entries must be strings, got $v');
+    String s(Object? v) => v is String
+        ? v
+        : throw FormatException('crdt: filter entries must be strings, got $v');
     return SyncFilter(
       pkFilter: wireList(m['pk_filter'], s),
       fieldFilter: wireList(m['field_filter'], s),
@@ -33,13 +35,19 @@ final class SyncFilter {
   }
 }
 
-String _string(Object? v) => v is String ? v : throw FormatException('crdt: expected a string, got $v');
+String _string(Object? v) =>
+    v is String ? v : throw FormatException('crdt: expected a string, got $v');
 
 /// A pull request. Mirrors Go `crdt.PullRequest`.
 @immutable
 final class PullRequest {
   /// Creates a pull request. [since] defaults to [HLC.zero].
-  PullRequest({required this.tables, HLC? since, required this.nodeId, this.filter}) : since = since ?? HLC.zero;
+  PullRequest({
+    required this.tables,
+    HLC? since,
+    required this.nodeId,
+    this.filter,
+  }) : since = since ?? HLC.zero;
 
   /// The tables to pull.
   final List<String> tables;
@@ -55,11 +63,11 @@ final class PullRequest {
 
   /// Go wire form. `since` is a struct, so it is always emitted.
   Map<String, Object?> toJson() => {
-        'tables': tables,
-        'since': since.toJson(),
-        'node_id': nodeId,
-        if (filter != null) 'filter': filter!.toJson(),
-      };
+    'tables': tables,
+    'since': since.toJson(),
+    'node_id': nodeId,
+    if (filter != null) 'filter': filter!.toJson(),
+  };
 
   /// Decodes the Go wire form.
   static PullRequest fromJson(Object? j) {
@@ -77,7 +85,8 @@ final class PullRequest {
 @immutable
 final class PullResponse {
   /// Creates a pull response. [latestHlc] defaults to [HLC.zero].
-  PullResponse({this.changes = const [], HLC? latestHlc}) : latestHlc = latestHlc ?? HLC.zero;
+  PullResponse({this.changes = const [], HLC? latestHlc})
+    : latestHlc = latestHlc ?? HLC.zero;
 
   /// The changes since the requested clock.
   final List<ChangeRecord> changes;
@@ -87,9 +96,9 @@ final class PullResponse {
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        'changes': [for (final c in changes) c.toJson()],
-        'latest_hlc': latestHlc.toJson(),
-      };
+    'changes': [for (final c in changes) c.toJson()],
+    'latest_hlc': latestHlc.toJson(),
+  };
 
   /// Decodes the Go wire form. A `null` `changes` decodes as empty.
   static PullResponse fromJson(Object? j) {
@@ -115,9 +124,9 @@ final class PushRequest {
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        'changes': [for (final c in changes) c.toJson()],
-        'node_id': nodeId,
-      };
+    'changes': [for (final c in changes) c.toJson()],
+    'node_id': nodeId,
+  };
 
   /// Decodes the Go wire form.
   static PushRequest fromJson(Object? j) {
@@ -133,7 +142,8 @@ final class PushRequest {
 @immutable
 final class PushResponse {
   /// Creates a push response. [latestHlc] defaults to [HLC.zero].
-  PushResponse({required this.merged, HLC? latestHlc}) : latestHlc = latestHlc ?? HLC.zero;
+  PushResponse({required this.merged, HLC? latestHlc})
+    : latestHlc = latestHlc ?? HLC.zero;
 
   /// How many changes the server merged.
   final int merged;
@@ -142,12 +152,18 @@ final class PushResponse {
   final HLC latestHlc;
 
   /// Go wire form.
-  Map<String, Object?> toJson() => {'merged': merged, 'latest_hlc': latestHlc.toJson()};
+  Map<String, Object?> toJson() => {
+    'merged': merged,
+    'latest_hlc': latestHlc.toJson(),
+  };
 
   /// Decodes the Go wire form.
   static PushResponse fromJson(Object? j) {
     final m = wireObj(j);
-    return PushResponse(merged: wireInt(m, 'merged'), latestHlc: HLC.fromJson(m['latest_hlc']));
+    return PushResponse(
+      merged: wireInt(m, 'merged'),
+      latestHlc: HLC.fromJson(m['latest_hlc']),
+    );
   }
 }
 
@@ -156,7 +172,13 @@ final class PushResponse {
 @immutable
 final class SyncReport {
   /// Creates a report.
-  const SyncReport({this.pulled = 0, this.pushed = 0, this.merged = 0, this.conflicts = 0, this.rejected = 0});
+  const SyncReport({
+    this.pulled = 0,
+    this.pushed = 0,
+    this.merged = 0,
+    this.conflicts = 0,
+    this.rejected = 0,
+  });
 
   /// Changes pulled.
   final int pulled;
@@ -175,12 +197,12 @@ final class SyncReport {
 
   /// Wire form.
   Map<String, Object?> toJson() => {
-        'pulled': pulled,
-        'pushed': pushed,
-        'merged': merged,
-        'conflicts': conflicts,
-        'rejected': rejected,
-      };
+    'pulled': pulled,
+    'pushed': pushed,
+    'merged': merged,
+    'conflicts': conflicts,
+    'rejected': rejected,
+  };
 
   /// Decodes the wire form.
   static SyncReport fromJson(Object? j) {

@@ -58,8 +58,9 @@ List<T> wireList<T>(Object? j, T Function(Object?) f) {
 }
 
 /// Decodes a JSON object's values with [f]; `null` decodes as an empty map.
-Map<String, T> wireMap<T>(Object? j, T Function(Object?) f) =>
-    {for (final e in wireObj(j).entries) e.key: f(e.value)};
+Map<String, T> wireMap<T>(Object? j, T Function(Object?) f) => {
+  for (final e in wireObj(j).entries) e.key: f(e.value),
+};
 
 /// Looks an enum value up by [name]; an unknown name throws.
 T wireEnum<T extends Enum>(List<T> values, String name, String what) {
@@ -75,7 +76,9 @@ final DateTime goZeroTime = DateTime.utc(1);
 /// Whether [t] is Go's zero time.
 bool isGoZeroTime(DateTime t) => t.toUtc() == goZeroTime;
 
-final RegExp _rfc3339 = RegExp(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$');
+final RegExp _rfc3339 = RegExp(
+  r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$',
+);
 
 /// Decodes an RFC 3339 string key as a UTC instant. A missing or `null` key is
 /// [goZeroTime], as it is for a Go `time.Time` field.
@@ -87,6 +90,8 @@ DateTime wireTime(Map<String, Object?> m, String k) {
   }
   // Go's time.Time.UnmarshalJSON requires RFC 3339, which DateTime.parse alone
   // does not (it also takes a bare date).
-  if (!_rfc3339.hasMatch(v)) throw FormatException('crdt: "$k" is not RFC 3339: $v');
+  if (!_rfc3339.hasMatch(v)) {
+    throw FormatException('crdt: "$k" is not RFC 3339: $v');
+  }
   return DateTime.parse(v).toUtc();
 }

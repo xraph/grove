@@ -23,7 +23,8 @@ final class JsonValue {
   final Object? value;
 
   @override
-  bool operator ==(Object other) => other is JsonValue && jsonDeepEquals(other.value, value);
+  bool operator ==(Object other) =>
+      other is JsonValue && jsonDeepEquals(other.value, value);
 
   @override
   int get hashCode => goMarshal(value).hashCode;
@@ -59,15 +60,15 @@ enum CrdtType {
 
   /// Decodes a wire string; throws [FormatException] for an unknown one.
   static CrdtType fromWire(Object? s) => switch (s) {
-        null || '' => none,
-        'lww' => lww,
-        'counter' => counter,
-        'set' => set,
-        'list' => list,
-        'document' => document,
-        'text' => text,
-        _ => throw FormatException('crdt: unknown crdt type $s'),
-      };
+    null || '' => none,
+    'lww' => lww,
+    'counter' => counter,
+    'set' => set,
+    'list' => list,
+    'document' => document,
+    'text' => text,
+    _ => throw FormatException('crdt: unknown crdt type $s'),
+  };
 }
 
 /// OR-set operation kind.
@@ -103,7 +104,8 @@ enum TextOpType {
   format,
 }
 
-JsonValue? _present(Map<String, Object?> m, String k) => m.containsKey(k) ? JsonValue(m[k]) : null;
+JsonValue? _present(Map<String, Object?> m, String k) =>
+    m.containsKey(k) ? JsonValue(m[k]) : null;
 
 /// A node's cumulative counter totals. Mirrors Go `crdt.CounterDelta`.
 @immutable
@@ -166,10 +168,10 @@ final class SetOperation {
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        'op': op.name,
-        'elements': elements,
-        if (tags.isNotEmpty) 'tags': [for (final t in tags) t.toJson()],
-      };
+    'op': op.name,
+    'elements': elements,
+    if (tags.isNotEmpty) 'tags': [for (final t in tags) t.toJson()],
+  };
 
   /// Decodes the Go wire form.
   static SetOperation fromJson(Object? j) {
@@ -187,8 +189,8 @@ final class SetOperation {
 final class ListOperation {
   /// Creates a list operation.
   ListOperation(this.op, {HLC? nodeId, HLC? parentId, this.value})
-      : nodeId = nodeId ?? HLC.zero,
-        parentId = parentId ?? HLC.zero;
+    : nodeId = nodeId ?? HLC.zero,
+      parentId = parentId ?? HLC.zero;
 
   /// The operation kind.
   final ListOpType op;
@@ -205,11 +207,11 @@ final class ListOperation {
   /// Go wire form. `node_id` and `parent_id` are always emitted: Go's
   /// `omitempty` never omits a struct.
   Map<String, Object?> toJson() => {
-        'op': op.name,
-        'node_id': nodeId.toJson(),
-        'parent_id': parentId.toJson(),
-        if (value != null) 'value': value!.value,
-      };
+    'op': op.name,
+    'node_id': nodeId.toJson(),
+    'parent_id': parentId.toJson(),
+    if (value != null) 'value': value!.value,
+  };
 
   /// Decodes the Go wire form.
   static ListOperation fromJson(Object? j) {
@@ -242,7 +244,10 @@ final class TextRef {
   final int offset;
 
   /// Go wire form.
-  Map<String, Object?> toJson() => {'origin': origin.toJson(), 'offset': offset};
+  Map<String, Object?> toJson() => {
+    'origin': origin.toJson(),
+    'offset': offset,
+  };
 
   /// Decodes the Go wire form.
   static TextRef fromJson(Object? j) {
@@ -251,7 +256,8 @@ final class TextRef {
   }
 
   @override
-  bool operator ==(Object other) => other is TextRef && other.origin == origin && other.offset == offset;
+  bool operator ==(Object other) =>
+      other is TextRef && other.origin == origin && other.offset == offset;
 
   @override
   int get hashCode => Object.hash(origin, offset);
@@ -273,12 +279,20 @@ final class TextSpan {
   final int length;
 
   /// Go wire form.
-  Map<String, Object?> toJson() => {'origin': origin.toJson(), 'start': start, 'length': length};
+  Map<String, Object?> toJson() => {
+    'origin': origin.toJson(),
+    'start': start,
+    'length': length,
+  };
 
   /// Decodes the Go wire form.
   static TextSpan fromJson(Object? j) {
     final m = wireObj(j);
-    return TextSpan(HLC.fromJson(m['origin']), wireInt(m, 'start'), wireInt(m, 'length'));
+    return TextSpan(
+      HLC.fromJson(m['origin']),
+      wireInt(m, 'start'),
+      wireInt(m, 'length'),
+    );
   }
 }
 
@@ -299,12 +313,20 @@ final class AttrState {
   final String nodeId;
 
   /// Go wire form.
-  Map<String, Object?> toJson() => {'value': value.value, 'hlc': hlc.toJson(), 'node_id': nodeId};
+  Map<String, Object?> toJson() => {
+    'value': value.value,
+    'hlc': hlc.toJson(),
+    'node_id': nodeId,
+  };
 
   /// Decodes the Go wire form.
   static AttrState fromJson(Object? j) {
     final m = wireObj(j);
-    return AttrState(JsonValue(m['value']), HLC.fromJson(m['hlc']), wireStr(m, 'node_id'));
+    return AttrState(
+      JsonValue(m['value']),
+      HLC.fromJson(m['hlc']),
+      wireStr(m, 'node_id'),
+    );
   }
 }
 
@@ -322,8 +344,8 @@ final class TextFragment {
     TextRef? parent,
     this.tombstone = false,
     Map<String, AttrState>? attrs,
-  })  : parent = parent ?? TextRef.head,
-        attrs = attrs ?? <String, AttrState>{};
+  }) : parent = parent ?? TextRef.head,
+       attrs = attrs ?? <String, AttrState>{};
 
   /// The origin clock of the run this fragment belongs to.
   HLC origin;
@@ -349,25 +371,26 @@ final class TextFragment {
 
   /// A deep copy.
   TextFragment clone() => TextFragment(
-        origin: origin,
-        start: start,
-        content: content,
-        length: length,
-        parent: parent,
-        tombstone: tombstone,
-        attrs: Map<String, AttrState>.of(attrs),
-      );
+    origin: origin,
+    start: start,
+    content: content,
+    length: length,
+    parent: parent,
+    tombstone: tombstone,
+    attrs: Map<String, AttrState>.of(attrs),
+  );
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        'origin': origin.toJson(),
-        'start': start,
-        'content': content,
-        'length': length,
-        'parent': parent.toJson(),
-        if (tombstone) 'tombstone': true,
-        if (attrs.isNotEmpty) 'attrs': {for (final e in attrs.entries) e.key: e.value.toJson()},
-      };
+    'origin': origin.toJson(),
+    'start': start,
+    'content': content,
+    'length': length,
+    'parent': parent.toJson(),
+    if (tombstone) 'tombstone': true,
+    if (attrs.isNotEmpty)
+      'attrs': {for (final e in attrs.entries) e.key: e.value.toJson()},
+  };
 
   /// Decodes the Go wire form.
   static TextFragment fromJson(Object? j) {
@@ -390,27 +413,31 @@ final class TextFragment {
 /// Mutable: see [TextFragment].
 final class TextState {
   /// Creates a state, empty when [frags] is omitted.
-  TextState([Map<String, List<TextFragment>>? frags]) : frags = frags ?? <String, List<TextFragment>>{};
+  TextState([Map<String, List<TextFragment>>? frags])
+    : frags = frags ?? <String, List<TextFragment>>{};
 
   /// Fragments keyed by the `HLC.String()` form of their origin.
   Map<String, List<TextFragment>> frags;
 
   /// A deep copy: every fragment is cloned.
   TextState clone() => TextState({
-        for (final e in frags.entries) e.key: [for (final f in e.value) f.clone()],
-      });
+    for (final e in frags.entries) e.key: [for (final f in e.value) f.clone()],
+  });
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        'frags': {
-          for (final e in frags.entries) e.key: [for (final f in e.value) f.toJson()],
-        },
-      };
+    'frags': {
+      for (final e in frags.entries)
+        e.key: [for (final f in e.value) f.toJson()],
+    },
+  };
 
   /// Decodes the Go wire form.
   static TextState fromJson(Object? j) {
     final m = wireObj(j);
-    return TextState(wireMap(m['frags'], (v) => wireList(v, TextFragment.fromJson)));
+    return TextState(
+      wireMap(m['frags'], (v) => wireList(v, TextFragment.fromJson)),
+    );
   }
 }
 
@@ -425,8 +452,8 @@ final class TextOperation {
     this.content = '',
     this.spans = const [],
     this.attrs = const {},
-  })  : ref = ref ?? TextRef.head,
-        origin = origin ?? HLC.zero;
+  }) : ref = ref ?? TextRef.head,
+       origin = origin ?? HLC.zero;
 
   /// The operation kind.
   final TextOpType op;
@@ -448,13 +475,14 @@ final class TextOperation {
 
   /// Go wire form. `ref` and `origin` are structs, so they are always emitted.
   Map<String, Object?> toJson() => {
-        'op': op.name,
-        'ref': ref.toJson(),
-        'origin': origin.toJson(),
-        if (content.isNotEmpty) 'content': content,
-        if (spans.isNotEmpty) 'spans': [for (final s in spans) s.toJson()],
-        if (attrs.isNotEmpty) 'attrs': {for (final e in attrs.entries) e.key: e.value.value},
-      };
+    'op': op.name,
+    'ref': ref.toJson(),
+    'origin': origin.toJson(),
+    if (content.isNotEmpty) 'content': content,
+    if (spans.isNotEmpty) 'spans': [for (final s in spans) s.toJson()],
+    if (attrs.isNotEmpty)
+      'attrs': {for (final e in attrs.entries) e.key: e.value.value},
+  };
 
   /// Decodes the Go wire form.
   static TextOperation fromJson(Object? j) {
@@ -510,11 +538,12 @@ final class OrSetState {
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        'entries': {
-          for (final e in entries.entries) e.key: [for (final t in e.value) t.toJson()],
-        },
-        'removed': removed,
-      };
+    'entries': {
+      for (final e in entries.entries)
+        e.key: [for (final t in e.value) t.toJson()],
+    },
+    'removed': removed,
+  };
 
   /// Decodes the Go wire form.
   static OrSetState fromJson(Object? j) {
@@ -523,7 +552,9 @@ final class OrSetState {
       entries: wireMap(m['entries'], (v) => wireList(v, OrSetTag.fromJson)),
       removed: wireMap(m['removed'], (v) {
         if (v is bool) return v;
-        throw FormatException('crdt: "removed" values must be booleans, got $v');
+        throw FormatException(
+          'crdt: "removed" values must be booleans, got $v',
+        );
       }),
     );
   }
@@ -558,12 +589,12 @@ final class RgaNode {
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        'id': id.toJson(),
-        'node_id': nodeId,
-        'parent_id': parentId.toJson(),
-        'value': value.value,
-        if (tombstone) 'tombstone': true,
-      };
+    'id': id.toJson(),
+    'node_id': nodeId,
+    'parent_id': parentId.toJson(),
+    'value': value.value,
+    if (tombstone) 'tombstone': true,
+  };
 
   /// Decodes the Go wire form.
   static RgaNode fromJson(Object? j) {
@@ -589,11 +620,12 @@ final class RgaListState {
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        'nodes': {for (final e in nodes.entries) e.key: e.value.toJson()},
-      };
+    'nodes': {for (final e in nodes.entries) e.key: e.value.toJson()},
+  };
 
   /// Decodes the Go wire form.
-  static RgaListState fromJson(Object? j) => RgaListState(wireMap(wireObj(j)['nodes'], RgaNode.fromJson));
+  static RgaListState fromJson(Object? j) =>
+      RgaListState(wireMap(wireObj(j)['nodes'], RgaNode.fromJson));
 }
 
 /// The state of a nested document CRDT. Mirrors Go `crdt.DocumentCRDTState`.
@@ -607,8 +639,8 @@ final class DocumentCrdtState {
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        'fields': {for (final e in fields.entries) e.key: e.value.toJson()},
-      };
+    'fields': {for (final e in fields.entries) e.key: e.value.toJson()},
+  };
 
   /// Decodes the Go wire form.
   static DocumentCrdtState fromJson(Object? j) =>
@@ -669,31 +701,30 @@ final class FieldState {
     RgaListState? listState,
     DocumentCrdtState? docState,
     TextState? textState,
-  }) =>
-      FieldState(
-        type: type ?? this.type,
-        hlc: hlc ?? this.hlc,
-        nodeId: nodeId ?? this.nodeId,
-        value: value ?? this.value,
-        counterState: counterState ?? this.counterState,
-        setState: setState ?? this.setState,
-        listState: listState ?? this.listState,
-        docState: docState ?? this.docState,
-        textState: textState ?? this.textState,
-      );
+  }) => FieldState(
+    type: type ?? this.type,
+    hlc: hlc ?? this.hlc,
+    nodeId: nodeId ?? this.nodeId,
+    value: value ?? this.value,
+    counterState: counterState ?? this.counterState,
+    setState: setState ?? this.setState,
+    listState: listState ?? this.listState,
+    docState: docState ?? this.docState,
+    textState: textState ?? this.textState,
+  );
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        'type': type.wire,
-        'hlc': hlc.toJson(),
-        'node_id': nodeId,
-        if (value != null) 'value': value!.value,
-        if (counterState != null) 'counter_state': counterState!.toJson(),
-        if (setState != null) 'set_state': setState!.toJson(),
-        if (listState != null) 'list_state': listState!.toJson(),
-        if (docState != null) 'doc_state': docState!.toJson(),
-        if (textState != null) 'text_state': textState!.toJson(),
-      };
+    'type': type.wire,
+    'hlc': hlc.toJson(),
+    'node_id': nodeId,
+    if (value != null) 'value': value!.value,
+    if (counterState != null) 'counter_state': counterState!.toJson(),
+    if (setState != null) 'set_state': setState!.toJson(),
+    if (listState != null) 'list_state': listState!.toJson(),
+    if (docState != null) 'doc_state': docState!.toJson(),
+    if (textState != null) 'text_state': textState!.toJson(),
+  };
 
   /// Decodes the Go wire form. A missing `type` decodes as [CrdtType.none].
   static FieldState fromJson(Object? j) {
@@ -703,11 +734,21 @@ final class FieldState {
       hlc: HLC.fromJson(m['hlc']),
       nodeId: wireStr(m, 'node_id'),
       value: _present(m, 'value'),
-      counterState: m['counter_state'] == null ? null : PnCounterState.fromJson(m['counter_state']),
-      setState: m['set_state'] == null ? null : OrSetState.fromJson(m['set_state']),
-      listState: m['list_state'] == null ? null : RgaListState.fromJson(m['list_state']),
-      docState: m['doc_state'] == null ? null : DocumentCrdtState.fromJson(m['doc_state']),
-      textState: m['text_state'] == null ? null : TextState.fromJson(m['text_state']),
+      counterState: m['counter_state'] == null
+          ? null
+          : PnCounterState.fromJson(m['counter_state']),
+      setState: m['set_state'] == null
+          ? null
+          : OrSetState.fromJson(m['set_state']),
+      listState: m['list_state'] == null
+          ? null
+          : RgaListState.fromJson(m['list_state']),
+      docState: m['doc_state'] == null
+          ? null
+          : DocumentCrdtState.fromJson(m['doc_state']),
+      textState: m['text_state'] == null
+          ? null
+          : TextState.fromJson(m['text_state']),
     );
   }
 }
@@ -786,39 +827,38 @@ final class ChangeRecord {
     ListOperation? listOp,
     TextOperation? textOp,
     FieldState? state,
-  }) =>
-      ChangeRecord(
-        table: table ?? this.table,
-        pk: pk ?? this.pk,
-        field: field ?? this.field,
-        crdtType: crdtType ?? this.crdtType,
-        hlc: hlc ?? this.hlc,
-        nodeId: nodeId ?? this.nodeId,
-        value: value ?? this.value,
-        tombstone: tombstone ?? this.tombstone,
-        counterDelta: counterDelta ?? this.counterDelta,
-        setOp: setOp ?? this.setOp,
-        listOp: listOp ?? this.listOp,
-        textOp: textOp ?? this.textOp,
-        state: state ?? this.state,
-      );
+  }) => ChangeRecord(
+    table: table ?? this.table,
+    pk: pk ?? this.pk,
+    field: field ?? this.field,
+    crdtType: crdtType ?? this.crdtType,
+    hlc: hlc ?? this.hlc,
+    nodeId: nodeId ?? this.nodeId,
+    value: value ?? this.value,
+    tombstone: tombstone ?? this.tombstone,
+    counterDelta: counterDelta ?? this.counterDelta,
+    setOp: setOp ?? this.setOp,
+    listOp: listOp ?? this.listOp,
+    textOp: textOp ?? this.textOp,
+    state: state ?? this.state,
+  );
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        'table': table,
-        'pk': pk,
-        'field': field,
-        'crdt_type': crdtType.wire,
-        'hlc': hlc.toJson(),
-        'node_id': nodeId,
-        if (value != null) 'value': value!.value,
-        if (tombstone) 'tombstone': true,
-        if (counterDelta != null) 'counter_delta': counterDelta!.toJson(),
-        if (setOp != null) 'set_op': setOp!.toJson(),
-        if (listOp != null) 'list_op': listOp!.toJson(),
-        if (textOp != null) 'text_op': textOp!.toJson(),
-        if (state != null) 'state': state!.toJson(),
-      };
+    'table': table,
+    'pk': pk,
+    'field': field,
+    'crdt_type': crdtType.wire,
+    'hlc': hlc.toJson(),
+    'node_id': nodeId,
+    if (value != null) 'value': value!.value,
+    if (tombstone) 'tombstone': true,
+    if (counterDelta != null) 'counter_delta': counterDelta!.toJson(),
+    if (setOp != null) 'set_op': setOp!.toJson(),
+    if (listOp != null) 'list_op': listOp!.toJson(),
+    if (textOp != null) 'text_op': textOp!.toJson(),
+    if (state != null) 'state': state!.toJson(),
+  };
 
   /// Decodes the Go wire form.
   static ChangeRecord fromJson(Object? j) {
@@ -832,10 +872,16 @@ final class ChangeRecord {
       nodeId: wireStr(m, 'node_id'),
       value: _present(m, 'value'),
       tombstone: wireBool(m, 'tombstone'),
-      counterDelta: m['counter_delta'] == null ? null : CounterDelta.fromJson(m['counter_delta']),
+      counterDelta: m['counter_delta'] == null
+          ? null
+          : CounterDelta.fromJson(m['counter_delta']),
       setOp: m['set_op'] == null ? null : SetOperation.fromJson(m['set_op']),
-      listOp: m['list_op'] == null ? null : ListOperation.fromJson(m['list_op']),
-      textOp: m['text_op'] == null ? null : TextOperation.fromJson(m['text_op']),
+      listOp: m['list_op'] == null
+          ? null
+          : ListOperation.fromJson(m['list_op']),
+      textOp: m['text_op'] == null
+          ? null
+          : TextOperation.fromJson(m['text_op']),
       state: m['state'] == null ? null : FieldState.fromJson(m['state']),
     );
   }
@@ -876,23 +922,22 @@ final class DocumentState {
     Map<String, FieldState>? fields,
     bool? tombstone,
     HLC? tombstoneHlc,
-  }) =>
-      DocumentState(
-        table: table ?? this.table,
-        pk: pk ?? this.pk,
-        fields: fields ?? this.fields,
-        tombstone: tombstone ?? this.tombstone,
-        tombstoneHlc: tombstoneHlc ?? this.tombstoneHlc,
-      );
+  }) => DocumentState(
+    table: table ?? this.table,
+    pk: pk ?? this.pk,
+    fields: fields ?? this.fields,
+    tombstone: tombstone ?? this.tombstone,
+    tombstoneHlc: tombstoneHlc ?? this.tombstoneHlc,
+  );
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
-        'table': table,
-        'pk': pk,
-        'fields': {for (final e in fields.entries) e.key: e.value.toJson()},
-        'tombstone': tombstone,
-        'tombstone_hlc': tombstoneHlc.toJson(),
-      };
+    'table': table,
+    'pk': pk,
+    'fields': {for (final e in fields.entries) e.key: e.value.toJson()},
+    'tombstone': tombstone,
+    'tombstone_hlc': tombstoneHlc.toJson(),
+  };
 
   /// Decodes the Go wire form.
   static DocumentState fromJson(Object? j) {

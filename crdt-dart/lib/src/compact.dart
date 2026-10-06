@@ -19,19 +19,26 @@ import 'types.dart';
 /// children is never removed, so no anchor is orphaned.
 ///
 /// Port of Go `RGAListState.Compact`. A zero [before] is a no-op.
-({RgaListState state, int dropped}) compactListState(RgaListState s, HLC before) {
+({RgaListState state, int dropped}) compactListState(
+  RgaListState s,
+  HLC before,
+) {
   if (before.isZero || s.nodes.isEmpty) return (state: s, dropped: 0);
 
   var nodes = s.nodes;
   var dropped = 0;
   while (true) {
     // Recompute anchors each round: dropping a leaf may expose its parent.
-    final hasChild = <String>{for (final n in nodes.values) hlcString(n.parentId)};
+    final hasChild = <String>{
+      for (final n in nodes.values) hlcString(n.parentId),
+    };
     final survivors = <String, RgaNode>{};
     var droppedThisRound = 0;
     for (final e in nodes.entries) {
       final node = e.value;
-      if (node.tombstone && !hasChild.contains(e.key) && before.isAfter(node.id)) {
+      if (node.tombstone &&
+          !hasChild.contains(e.key) &&
+          before.isAfter(node.id)) {
         droppedThisRound++;
         continue;
       }
@@ -41,7 +48,9 @@ import 'types.dart';
     nodes = survivors;
     dropped += droppedThisRound;
   }
-  return dropped == 0 ? (state: s, dropped: 0) : (state: RgaListState(nodes), dropped: dropped);
+  return dropped == 0
+      ? (state: s, dropped: 0)
+      : (state: RgaListState(nodes), dropped: dropped);
 }
 
 /// Drops observed-removed tags older than [before] along with their
@@ -87,7 +96,10 @@ import 'types.dart';
   }
   return dropped == 0 && !pruned
       ? (state: s, dropped: 0)
-      : (state: OrSetState(entries: entries, removed: removed), dropped: dropped);
+      : (
+          state: OrSetState(entries: entries, removed: removed),
+          dropped: dropped,
+        );
 }
 
 bool _tagRemoved(Map<String, bool> removed, String elem, OrSetTag t) =>
@@ -135,7 +147,9 @@ bool _tagRemoved(Map<String, bool> removed, String elem, OrSetTag t) =>
     }
     frags[e.key] = out;
   }
-  return dropped == 0 ? (state: s, dropped: 0) : (state: TextState(frags), dropped: dropped);
+  return dropped == 0
+      ? (state: s, dropped: 0)
+      : (state: TextState(frags), dropped: dropped);
 }
 
 /// Compacts every compactable field of [doc]: lists, sets and text.
@@ -143,7 +157,10 @@ bool _tagRemoved(Map<String, bool> removed, String elem, OrSetTag t) =>
 /// Port of Go `State.Compact`. It does not recurse into a nested `docState`,
 /// exactly as Go does. A zero [before] is a no-op, and an untouched field keeps
 /// its identity.
-({DocumentState doc, int dropped}) compactDocument(DocumentState doc, HLC before) {
+({DocumentState doc, int dropped}) compactDocument(
+  DocumentState doc,
+  HLC before,
+) {
   if (before.isZero) return (doc: doc, dropped: 0);
 
   final fields = <String, FieldState>{};
@@ -159,7 +176,9 @@ bool _tagRemoved(Map<String, bool> removed, String elem, OrSetTag t) =>
         final r = compactSetState(fs.setState!, before);
         dropped += r.dropped;
         // Go parity: a pruned empty entry changes the state without counting.
-        fields[e.key] = identical(r.state, fs.setState) ? fs : fs.copyWith(setState: r.state);
+        fields[e.key] = identical(r.state, fs.setState)
+            ? fs
+            : fs.copyWith(setState: r.state);
       case CrdtType.text when fs.textState != null:
         final r = compactTextState(fs.textState!, before);
         dropped += r.dropped;

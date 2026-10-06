@@ -2,7 +2,9 @@
 import 'package:grove_crdt/grove_crdt.dart';
 import 'package:test/test.dart';
 
-({CrdtStore store, HybridClock clock}) createTestStore([String nodeId = 'test-node']) {
+({CrdtStore store, HybridClock clock}) createTestStore([
+  String nodeId = 'test-node',
+]) {
   var time = 1000;
   final clock = HybridClock(nodeId, nowMs: () => time++);
   return (store: CrdtStore(nodeId, clock), clock: clock);
@@ -10,8 +12,21 @@ import 'package:test/test.dart';
 
 HLC hlc(int ts, int c, String node) => HLC(BigInt.from(ts), c, node);
 
-ChangeRecord lww(String table, String pk, String field, HLC at, Object? value) =>
-    ChangeRecord(table: table, pk: pk, field: field, crdtType: CrdtType.lww, hlc: at, nodeId: at.node, value: JsonValue(value));
+ChangeRecord lww(
+  String table,
+  String pk,
+  String field,
+  HLC at,
+  Object? value,
+) => ChangeRecord(
+  table: table,
+  pk: pk,
+  field: field,
+  crdtType: CrdtType.lww,
+  hlc: at,
+  nodeId: at.node,
+  value: JsonValue(value),
+);
 
 /// Counts calls, like vitest's `vi.fn()`.
 final class Spy {
@@ -36,8 +51,10 @@ final class _Plugin extends StorePlugin {
   final void Function()? onDestroy;
   final WriteEvent? Function(WriteEvent e)? onBeforeWrite;
   final ChangeRecord? Function(MergeEvent e)? onBeforeMerge;
-  final Map<String, Object?>? Function(Map<String, Object?> doc)? onTransformDocument;
-  final List<Map<String, Object?>> Function(List<Map<String, Object?>> docs)? onTransformCollection;
+  final Map<String, Object?>? Function(Map<String, Object?> doc)?
+  onTransformDocument;
+  final List<Map<String, Object?>> Function(List<Map<String, Object?>> docs)?
+  onTransformCollection;
 
   @override
   void init() => onInit?.call();
@@ -46,18 +63,25 @@ final class _Plugin extends StorePlugin {
   void destroy() => onDestroy?.call();
 
   @override
-  WriteEvent? beforeWrite(WriteEvent e) => onBeforeWrite == null ? e : onBeforeWrite!(e);
+  WriteEvent? beforeWrite(WriteEvent e) =>
+      onBeforeWrite == null ? e : onBeforeWrite!(e);
 
   @override
-  ChangeRecord? beforeMerge(MergeEvent e) => onBeforeMerge == null ? e.remote : onBeforeMerge!(e);
+  ChangeRecord? beforeMerge(MergeEvent e) =>
+      onBeforeMerge == null ? e.remote : onBeforeMerge!(e);
 
   @override
-  Map<String, Object?>? transformDocument(String table, String pk, Map<String, Object?> doc) =>
-      onTransformDocument == null ? doc : onTransformDocument!(doc);
+  Map<String, Object?>? transformDocument(
+    String table,
+    String pk,
+    Map<String, Object?> doc,
+  ) => onTransformDocument == null ? doc : onTransformDocument!(doc);
 
   @override
-  List<Map<String, Object?>> transformCollection(String table, List<Map<String, Object?>> docs) =>
-      onTransformCollection == null ? docs : onTransformCollection!(docs);
+  List<Map<String, Object?>> transformCollection(
+    String table,
+    List<Map<String, Object?>> docs,
+  ) => onTransformCollection == null ? docs : onTransformCollection!(docs);
 }
 
 void main() {
@@ -312,7 +336,9 @@ void main() {
       test('merges LWW fields correctly (remote wins)', () {
         final (:store, clock: _) = createTestStore();
         store.setField('users', '1', 'name', 'Local');
-        store.applyChanges([lww('users', '1', 'name', hlc(999000000000, 0, 'remote'), 'Remote')]);
+        store.applyChanges([
+          lww('users', '1', 'name', hlc(999000000000, 0, 'remote'), 'Remote'),
+        ]);
         expect(store.getDocument('users', '1')!['name'], 'Remote');
       });
 
@@ -595,10 +621,15 @@ void main() {
       test('runs WriteHook.beforeWrite on setField', () {
         final (:store, clock: _) = createTestStore();
         final calls = <WriteEvent>[];
-        store.use(_Plugin('w', onBeforeWrite: (e) {
-          calls.add(e);
-          return e;
-        }));
+        store.use(
+          _Plugin(
+            'w',
+            onBeforeWrite: (e) {
+              calls.add(e);
+              return e;
+            },
+          ),
+        );
         store.setField('users', '1', 'name', 'Alice');
         expect(calls, hasLength(1));
         expect(calls[0].table, 'users');
@@ -617,17 +648,29 @@ void main() {
       test('runs MergeHook.beforeMerge on applyChanges', () {
         final (:store, clock: _) = createTestStore();
         var calls = 0;
-        store.use(_Plugin('m', onBeforeMerge: (e) {
-          calls++;
-          return e.remote;
-        }));
-        store.applyChanges([lww('users', '1', 'name', hlc(500000000000, 0, 'remote'), 'Alice')]);
+        store.use(
+          _Plugin(
+            'm',
+            onBeforeMerge: (e) {
+              calls++;
+              return e.remote;
+            },
+          ),
+        );
+        store.applyChanges([
+          lww('users', '1', 'name', hlc(500000000000, 0, 'remote'), 'Alice'),
+        ]);
         expect(calls, 1);
       });
 
       test('runs ReadHook.transformDocument on getDocument', () {
         final (:store, clock: _) = createTestStore();
-        store.use(_Plugin('read', onTransformDocument: (doc) => {...doc, 'computed': true}));
+        store.use(
+          _Plugin(
+            'read',
+            onTransformDocument: (doc) => {...doc, 'computed': true},
+          ),
+        );
         store.setField('users', '1', 'name', 'Alice');
         final doc = store.getDocument('users', '1');
         expect(doc!['computed'], isTrue);
@@ -636,7 +679,9 @@ void main() {
 
       test('runs ReadHook.transformCollection on getCollection', () {
         final (:store, clock: _) = createTestStore();
-        store.use(_Plugin('read', onTransformCollection: (docs) => docs.sublist(0, 1))); // Only return first doc
+        store.use(
+          _Plugin('read', onTransformCollection: (docs) => docs.sublist(0, 1)),
+        ); // Only return first doc
         store.setField('users', '1', 'name', 'Alice');
         store.setField('users', '2', 'name', 'Bob');
         expect(store.getCollection('users'), hasLength(1));
@@ -652,7 +697,11 @@ void main() {
 
       test('commits multiple field changes atomically', () {
         final (:store, clock: _) = createTestStore();
-        final changes = store.batch('users', '1').setField('name', 'Alice').setField('email', 'alice@example.com').commit();
+        final changes = store
+            .batch('users', '1')
+            .setField('name', 'Alice')
+            .setField('email', 'alice@example.com')
+            .commit();
         expect(changes, hasLength(2));
         final doc = store.getDocument('users', '1')!;
         expect(doc['name'], 'Alice');
@@ -661,7 +710,11 @@ void main() {
 
       test('batch setField + incrementCounter together', () {
         final (:store, clock: _) = createTestStore();
-        store.batch('users', '1').setField('name', 'Alice').incrementCounter('views', 5).commit();
+        store
+            .batch('users', '1')
+            .setField('name', 'Alice')
+            .incrementCounter('views', 5)
+            .commit();
         final doc = store.getDocument('users', '1')!;
         expect(doc['name'], 'Alice');
         expect(doc['views'], 5);
@@ -670,7 +723,11 @@ void main() {
       test('batch changes appear in pending', () {
         final (:store, clock: _) = createTestStore();
         expect(store.pendingCount, 0);
-        store.batch('users', '1').setField('name', 'Alice').setField('email', 'alice@example.com').commit();
+        store
+            .batch('users', '1')
+            .setField('name', 'Alice')
+            .setField('email', 'alice@example.com')
+            .commit();
         expect(store.pendingCount, 2);
       });
 
@@ -678,7 +735,11 @@ void main() {
         final (:store, clock: _) = createTestStore();
         final listener = Spy();
         store.subscribeDocument('users', '1', listener.call);
-        store.batch('users', '1').setField('name', 'Alice').setField('email', 'alice@example.com').commit();
+        store
+            .batch('users', '1')
+            .setField('name', 'Alice')
+            .setField('email', 'alice@example.com')
+            .commit();
         // BatchWriter.commit() runs the whole batch inside one transact(),
         // so notifyListeners fires once for the batch, not once per field.
         expect(listener.calls, 1);

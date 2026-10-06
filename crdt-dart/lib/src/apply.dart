@@ -29,12 +29,15 @@ final class CrdtApplyError implements Exception {
 
 /// The OR-set key for an element: verbatim for a [RawJson], else its Go JSON
 /// encoding.
-String elementKey(Object? element) => element is RawJson ? element.json : setElementKey(element);
+String elementKey(Object? element) =>
+    element is RawJson ? element.json : setElementKey(element);
 
 /// The clock and node of whichever of [local] and [c] is newer: the merged
 /// field's authorship stamp. Port of Go `pickNewer`.
 (HLC, String) _pickNewer(FieldState? local, ChangeRecord c) =>
-    local != null && local.hlc.isAfter(c.hlc) ? (local.hlc, local.nodeId) : (c.hlc, c.nodeId);
+    local != null && local.hlc.isAfter(c.hlc)
+    ? (local.hlc, local.nodeId)
+    : (c.hlc, c.nodeId);
 
 FieldState _merge(FieldState? local, FieldState remote) {
   try {
@@ -64,40 +67,70 @@ FieldState _merge(FieldState? local, FieldState remote) {
 /// malformed document change, or a text insert without content.
 FieldState applyChange(FieldState? local, ChangeRecord c) {
   if (local != null && local.type != c.crdtType) {
-    throw CrdtApplyError('crdt: cannot apply ${c.crdtType.wire} change onto ${local.type.wire} field');
+    throw CrdtApplyError(
+      'crdt: cannot apply ${c.crdtType.wire} change onto ${local.type.wire} field',
+    );
   }
   final state = c.state;
   if (state != null) {
     if (state.type != c.crdtType) {
-      throw CrdtApplyError('crdt: change type ${c.crdtType.wire} carries ${state.type.wire} state');
+      throw CrdtApplyError(
+        'crdt: change type ${c.crdtType.wire} carries ${state.type.wire} state',
+      );
     }
     return _merge(local, state);
   }
   switch (c.crdtType) {
     case CrdtType.lww:
-      return _merge(local, FieldState(type: CrdtType.lww, hlc: c.hlc, nodeId: c.nodeId, value: c.value));
+      return _merge(
+        local,
+        FieldState(
+          type: CrdtType.lww,
+          hlc: c.hlc,
+          nodeId: c.nodeId,
+          value: c.value,
+        ),
+      );
     case CrdtType.counter:
-      final d = c.counterDelta ?? (throw const CrdtApplyError('crdt: counter change missing counter_delta'));
+      final d =
+          c.counterDelta ??
+          (throw const CrdtApplyError(
+            'crdt: counter change missing counter_delta',
+          ));
       return _merge(
         local,
         FieldState(
           type: CrdtType.counter,
           hlc: c.hlc,
           nodeId: c.nodeId,
-          counterState: PnCounterState(inc: {c.nodeId: d.inc}, dec: {c.nodeId: d.dec}),
+          counterState: PnCounterState(
+            inc: {c.nodeId: d.inc},
+            dec: {c.nodeId: d.dec},
+          ),
         ),
       );
     case CrdtType.set:
-      final op = c.setOp ?? (throw const CrdtApplyError('crdt: set change missing set_op'));
+      final op =
+          c.setOp ??
+          (throw const CrdtApplyError('crdt: set change missing set_op'));
       return _merge(local, _setOpState(local, c, op));
     case CrdtType.list:
-      final op = c.listOp ?? (throw const CrdtApplyError('crdt: list change missing list_op'));
+      final op =
+          c.listOp ??
+          (throw const CrdtApplyError('crdt: list change missing list_op'));
       return _merge(local, _listOpState(c, op));
     case CrdtType.text:
-      final op = c.textOp ?? (throw const CrdtApplyError('crdt: text change missing text_op'));
+      final op =
+          c.textOp ??
+          (throw const CrdtApplyError('crdt: text change missing text_op'));
       final TextState txt;
       try {
-        txt = applyTextOpTo(local?.textState ?? newTextState(), op, c.nodeId, c.hlc);
+        txt = applyTextOpTo(
+          local?.textState ?? newTextState(),
+          op,
+          c.nodeId,
+          c.hlc,
+        );
       } on StateError catch (e) {
         throw CrdtApplyError(e.message, cause: e);
       }
@@ -105,7 +138,12 @@ FieldState applyChange(FieldState? local, ChangeRecord c) {
       // applied op is O(doc) per keystroke. Readers resolve through the
       // TextState.
       final (hlc, node) = _pickNewer(local, c);
-      return FieldState(type: CrdtType.text, hlc: hlc, nodeId: node, textState: txt);
+      return FieldState(
+        type: CrdtType.text,
+        hlc: hlc,
+        nodeId: node,
+        textState: txt,
+      );
     case CrdtType.document:
       return _applyDocument(local, c);
     case CrdtType.none:
@@ -157,7 +195,11 @@ FieldState _setOpState(FieldState? local, ChangeRecord c, SetOperation op) {
         }
       }
   }
-  return setFieldState(OrSetState(entries: entries, removed: removed), c.hlc, c.nodeId);
+  return setFieldState(
+    OrSetState(entries: entries, removed: removed),
+    c.hlc,
+    c.nodeId,
+  );
 }
 
 /// The one-op remote RGA state for a list change. Port of Go `listOpState`.
@@ -165,7 +207,8 @@ FieldState _listOpState(ChangeRecord c, ListOperation op) {
   final nodes = <String, RgaNode>{};
   // A delete or a move names a node this replica may not have seen yet. The
   // tombstone is kept, so a late insert of that node stays deleted.
-  RgaNode tomb(HLC id) => RgaNode(id: id, nodeId: c.nodeId, parentId: HLC.zero, tombstone: true);
+  RgaNode tomb(HLC id) =>
+      RgaNode(id: id, nodeId: c.nodeId, parentId: HLC.zero, tombstone: true);
   switch (op.op) {
     case ListOpType.insert:
       final id = op.nodeId.isZero ? c.hlc : op.nodeId;
@@ -192,13 +235,13 @@ FieldState _listOpState(ChangeRecord c, ListOperation op) {
 }
 
 String _jsonKind(Object? v) => switch (v) {
-      null => 'null',
-      bool() => 'bool',
-      num() => 'number',
-      String() => 'string',
-      List<Object?>() => 'array',
-      _ => 'object',
-    };
+  null => 'null',
+  bool() => 'bool',
+  num() => 'number',
+  String() => 'string',
+  List<Object?>() => 'array',
+  _ => 'object',
+};
 
 bool _foldEquals(String key, String name) {
   if (key.length != name.length) return false;
@@ -213,7 +256,9 @@ bool _foldEquals(String key, String name) {
 /// The `{path, value}` payload of a document change, decoded the way Go's
 /// `encoding/json` fills `documentPathOp`: keys match case-insensitively, a
 /// later key wins, `null` leaves the zero value, and a wrong type is an error.
-({String path, bool hasValue, Object? value}) _documentPayload(Object? payload) {
+({String path, bool hasValue, Object? value}) _documentPayload(
+  Object? payload,
+) {
   if (payload == null) return (path: '', hasValue: false, value: null);
   if (payload is! Map<String, Object?>) {
     throw CrdtApplyError(
@@ -244,9 +289,13 @@ bool _foldEquals(String key, String name) {
 /// Folds a document path write or path delete. Port of Go
 /// `applyDocumentChange`.
 FieldState _applyDocument(FieldState? local, ChangeRecord c) {
-  final raw = c.value ?? (throw const CrdtApplyError('crdt: document change missing value'));
+  final raw =
+      c.value ??
+      (throw const CrdtApplyError('crdt: document change missing value'));
   final op = _documentPayload(raw.value);
-  if (op.path.isEmpty) throw const CrdtApplyError('crdt: document change missing path');
+  if (op.path.isEmpty) {
+    throw const CrdtApplyError('crdt: document change missing path');
+  }
   final doc = local?.docState ?? const DocumentCrdtState();
   final (hlc, node) = _pickNewer(local, c);
   if (c.tombstone) {

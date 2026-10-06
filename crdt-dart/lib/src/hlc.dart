@@ -139,9 +139,9 @@ final class HybridClock {
   /// Creates a clock for [nodeId]. [nowMs] returns wall time in
   /// milliseconds and defaults to the system clock.
   HybridClock(String nodeId, {int maxDriftMs = 5000, int Function()? nowMs})
-      : _nodeId = nodeId,
-        _maxDriftNs = BigInt.from(maxDriftMs) * _nsPerMs,
-        _nowMs = nowMs ?? _systemNowMs;
+    : _nodeId = nodeId,
+      _maxDriftNs = BigInt.from(maxDriftMs) * _nsPerMs,
+      _nowMs = nowMs ?? _systemNowMs;
 
   /// The node id stamped on every value this clock issues.
   String get nodeId => _nodeId;

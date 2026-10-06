@@ -10,12 +10,15 @@ import 'wire_helpers.dart';
 /// Unique because one node never issues the same HLC twice, and the HLC string
 /// carries the node id. The parts are joined with U+0000 only as a separator;
 /// uniqueness does not rest on U+0000 being absent from a name.
-String pendingKey(ChangeRecord c) => '${c.table}\u0000${c.pk}\u0000${c.field}\u0000${hlcString(c.hlc)}';
+String pendingKey(ChangeRecord c) =>
+    '${c.table}\u0000${c.pk}\u0000${c.field}\u0000${hlcString(c.hlc)}';
 
 String _requiredString(Map<String, Object?> m, String key, String owner) {
   final v = m[key];
   if (v is String) return v;
-  throw FormatException('crdt: $owner "$key" must be a string, got ${v == null ? 'nothing' : v.runtimeType}');
+  throw FormatException(
+    'crdt: $owner "$key" must be a string, got ${v == null ? 'nothing' : v.runtimeType}',
+  );
 }
 
 /// Why the server refused a pending change.
@@ -44,7 +47,8 @@ final class PendingRejection {
   }
 
   @override
-  bool operator ==(Object other) => other is PendingRejection && other.kind == kind && other.reason == reason;
+  bool operator ==(Object other) =>
+      other is PendingRejection && other.kind == kind && other.reason == reason;
 
   @override
   int get hashCode => Object.hash(kind, reason);
@@ -82,12 +86,11 @@ final class PendingChange {
     PendingRejection? rejection,
     bool clearRejection = false,
     int? restamps,
-  }) =>
-      PendingChange(
-        change ?? this.change,
-        rejection: clearRejection ? null : (rejection ?? this.rejection),
-        restamps: restamps ?? this.restamps,
-      );
+  }) => PendingChange(
+    change ?? this.change,
+    rejection: clearRejection ? null : (rejection ?? this.rejection),
+    restamps: restamps ?? this.restamps,
+  );
 
   /// JSON form.
   ///
@@ -102,7 +105,10 @@ final class PendingChange {
       'change': change.toJson(),
       if (rejection != null) 'rejection': rejection!.toJson(),
       if (restamps != 0) 'restamps': restamps,
-      if (hasRaw) 'raw_elements': [for (final e in elements) e is RawJson ? e.json : null],
+      if (hasRaw)
+        'raw_elements': [
+          for (final e in elements) e is RawJson ? e.json : null,
+        ],
     };
   }
 
@@ -111,29 +117,36 @@ final class PendingChange {
   /// [FormatException].
   static PendingChange fromJson(Object? j) {
     final m = wireObj(j);
-    if (m['change'] == null) throw const FormatException('crdt: pending change has no "change"');
+    if (m['change'] == null) {
+      throw const FormatException('crdt: pending change has no "change"');
+    }
     var change = ChangeRecord.fromJson(m['change']);
     final raw = m['raw_elements'];
     if (raw != null) {
       final texts = wireList<String?>(raw, (e) {
         if (e == null || e is String) return e as String?;
-        throw FormatException('crdt: pending "raw_elements" entries must be strings or null, got $e');
+        throw FormatException(
+          'crdt: pending "raw_elements" entries must be strings or null, got $e',
+        );
       });
       final op = change.setOp;
       if (op == null || op.elements.length != texts.length) {
-        throw const FormatException('crdt: pending "raw_elements" does not match the set elements');
+        throw const FormatException(
+          'crdt: pending "raw_elements" does not match the set elements',
+        );
       }
       change = change.copyWith(
-        setOp: SetOperation(
-          op.op,
-          [for (var i = 0; i < texts.length; i++) texts[i] == null ? op.elements[i] : RawJson(texts[i]!)],
-          tags: op.tags,
-        ),
+        setOp: SetOperation(op.op, [
+          for (var i = 0; i < texts.length; i++)
+            texts[i] == null ? op.elements[i] : RawJson(texts[i]!),
+        ], tags: op.tags),
       );
     }
     return PendingChange(
       change,
-      rejection: m['rejection'] == null ? null : PendingRejection.fromJson(m['rejection']),
+      rejection: m['rejection'] == null
+          ? null
+          : PendingRejection.fromJson(m['rejection']),
       restamps: wireInt(m, 'restamps'),
     );
   }

@@ -108,14 +108,15 @@ final class StateSnapshot {
 
   /// JSON form, with the crdt-js client-side key names.
   Map<String, Object?> toJson() => {
-        'version': version,
-        'nodeId': nodeId,
-        'timestamp': timestamp,
-        'tables': {
-          for (final t in tables.entries) t.key: {for (final d in t.value.entries) d.key: d.value.toJson()},
-        },
-        'pending': [for (final p in pending) p.toJson()],
-      };
+    'version': version,
+    'nodeId': nodeId,
+    'timestamp': timestamp,
+    'tables': {
+      for (final t in tables.entries)
+        t.key: {for (final d in t.value.entries) d.key: d.value.toJson()},
+    },
+    'pending': [for (final p in pending) p.toJson()],
+  };
 
   /// Decodes the JSON form. A pending entry may be a [PendingChange] or, as
   /// crdt-js exports it, a bare change record.
@@ -128,7 +129,9 @@ final class StateSnapshot {
       tables: wireMap(m['tables'], (t) => wireMap(t, DocumentState.fromJson)),
       pending: wireList(m['pending'], (p) {
         final pm = wireObj(p);
-        return pm.containsKey('change') ? PendingChange.fromJson(pm) : PendingChange(ChangeRecord.fromJson(pm));
+        return pm.containsKey('change')
+            ? PendingChange.fromJson(pm)
+            : PendingChange(ChangeRecord.fromJson(pm));
       }),
     );
   }
@@ -149,23 +152,29 @@ final class _FrozenList extends UnmodifiableListView<Object?> {
 
 /// A deep copy of [v] whose maps and lists refuse changes.
 Object? _freeze(Object? v) => switch (v) {
-      _FrozenMap() || _FrozenList() => v,
-      final Map<String, Object?> m => _FrozenMap({for (final e in m.entries) e.key: _freeze(e.value)}),
-      final List<Object?> l => _FrozenList([for (final e in l) _freeze(e)]),
-      _ => v,
-    };
+  _FrozenMap() || _FrozenList() => v,
+  final Map<String, Object?> m => _FrozenMap({
+    for (final e in m.entries) e.key: _freeze(e.value),
+  }),
+  final List<Object?> l => _FrozenList([for (final e in l) _freeze(e)]),
+  _ => v,
+};
 
 /// A deep copy of a `toJson` tree, so a decode of it shares nothing mutable
 /// with the original.
 Object? _copyJson(Object? v) => switch (v) {
-      final Map<String, Object?> m => <String, Object?>{for (final e in m.entries) e.key: _copyJson(e.value)},
-      final List<Object?> l => <Object?>[for (final e in l) _copyJson(e)],
-      _ => v,
-    };
+  final Map<String, Object?> m => <String, Object?>{
+    for (final e in m.entries) e.key: _copyJson(e.value),
+  },
+  final List<Object?> l => <Object?>[for (final e in l) _copyJson(e)],
+  _ => v,
+};
 
-DocumentState _copyDoc(DocumentState d) => DocumentState.fromJson(_copyJson(d.toJson()));
+DocumentState _copyDoc(DocumentState d) =>
+    DocumentState.fromJson(_copyJson(d.toJson()));
 
-PendingChange _copyPending(PendingChange p) => PendingChange.fromJson(_copyJson(p.toJson()));
+PendingChange _copyPending(PendingChange p) =>
+    PendingChange.fromJson(_copyJson(p.toJson()));
 
 /// Rebuilds RGA node keys from each node's id, migrating states persisted with
 /// the pre-parity key format. Port of crdt-js `normalizeHLCKeys`, without the
@@ -174,9 +183,14 @@ DocumentState _normalizeHlcKeys(DocumentState doc) {
   Map<String, FieldState>? fields;
   for (final e in doc.fields.entries) {
     final nodes = e.value.listState?.nodes;
-    if (nodes == null || nodes.entries.every((n) => n.key == hlcString(n.value.id))) continue;
+    if (nodes == null ||
+        nodes.entries.every((n) => n.key == hlcString(n.value.id))) {
+      continue;
+    }
     final fixed = {for (final n in nodes.values) hlcString(n.id): n};
-    (fields ??= {...doc.fields})[e.key] = e.value.copyWith(listState: RgaListState(fixed));
+    (fields ??= {...doc.fields})[e.key] = e.value.copyWith(
+      listState: RgaListState(fixed),
+    );
   }
   return fields == null ? doc : doc.copyWith(fields: fields);
 }
@@ -259,11 +273,15 @@ final class CrdtStore {
     this._onError,
     this._onStorageError,
     PluginErrorHandler? onPluginError,
-  })  : _storage = storage ?? const MemoryReplicaStorage(),
-        _undo = UndoManager(maxHistory: undoHistory),
-        _plugins = PluginManager(onPluginError: onPluginError) {
+  }) : _storage = storage ?? const MemoryReplicaStorage(),
+       _undo = UndoManager(maxHistory: undoHistory),
+       _plugins = PluginManager(onPluginError: onPluginError) {
     if (nodeId != clock.nodeId) {
-      throw ArgumentError.value(nodeId, 'nodeId', 'must equal the clock node id "${clock.nodeId}"');
+      throw ArgumentError.value(
+        nodeId,
+        'nodeId',
+        'must equal the clock node id "${clock.nodeId}"',
+      );
     }
     if (_storage is MemoryReplicaStorage) {
       // Nothing to load: hydration is complete at once.
@@ -328,8 +346,11 @@ final class CrdtStore {
   // the document object.
   Expando<_Cached<Map<String, Object?>?>> _docCache = Expando('docCache');
   Expando<Map<String, List<HLC>>> _listIdCache = Expando('listIdCache');
-  Expando<Map<String, List<TextDeltaSegment>>> _textDeltaCache = Expando('textDeltaCache');
-  final Map<String, ({int version, List<Map<String, Object?>> items})> _collectionCache = {};
+  Expando<Map<String, List<TextDeltaSegment>>> _textDeltaCache = Expando(
+    'textDeltaCache',
+  );
+  final Map<String, ({int version, List<Map<String, Object?>> items})>
+  _collectionCache = {};
 
   int _txDepth = 0;
   Map<String, Set<String>> _txTouched = {};
@@ -391,8 +412,14 @@ final class CrdtStore {
     if (doc == null || doc.tombstone) return null;
     final hit = _docCache[doc];
     if (hit != null) return hit.value;
-    final transformed = _plugins.dispatchTransformDocument(t, p, _resolveDocument(doc));
-    final frozen = transformed == null ? null : _freeze(transformed)! as Map<String, Object?>;
+    final transformed = _plugins.dispatchTransformDocument(
+      t,
+      p,
+      _resolveDocument(doc),
+    );
+    final frozen = transformed == null
+        ? null
+        : _freeze(transformed)! as Map<String, Object?>;
     _docCache[doc] = _Cached(frozen);
     return frozen;
   }
@@ -411,7 +438,8 @@ final class CrdtStore {
       if (doc != null) result.add(doc);
     }
     final items = List<Map<String, Object?>>.unmodifiable([
-      for (final d in _plugins.dispatchTransformCollection(t, result)) _freeze(d)! as Map<String, Object?>,
+      for (final d in _plugins.dispatchTransformCollection(t, result))
+        _freeze(d)! as Map<String, Object?>,
     ]);
     _collectionCache[t] = (version: version, items: items);
     return items;
@@ -419,7 +447,8 @@ final class CrdtStore {
 
   /// The raw state of a document, tombstoned or not. Do not mutate it: a
   /// [TextState] inside is mutable.
-  DocumentState? getDocumentState(String table, String pk) => _getDoc(goString(table), goString(pk));
+  DocumentState? getDocumentState(String table, String pk) =>
+      _getDoc(goString(table), goString(pk));
 
   /// Every table that holds a document.
   Iterable<String> get tables => List.unmodifiable(_state.keys);
@@ -434,14 +463,19 @@ final class CrdtStore {
     final hit = byField[f];
     if (hit != null) return hit;
     final ls = doc.fields[f]?.listState;
-    final ids = ls == null ? _emptyHlcs : List<HLC>.unmodifiable(listNodeIds(ls));
+    final ids = ls == null
+        ? _emptyHlcs
+        : List<HLC>.unmodifiable(listNodeIds(ls));
     byField[f] = ids;
     return ids;
   }
 
   /// The visible text of a text field, or `''`.
   String getText(String table, String pk, String field) {
-    final ts = _getDoc(goString(table), goString(pk))?.fields[goString(field)]?.textState;
+    final ts = _getDoc(
+      goString(table),
+      goString(pk),
+    )?.fields[goString(field)]?.textState;
     return ts == null ? '' : textValue(ts);
   }
 
@@ -455,7 +489,9 @@ final class CrdtStore {
     final hit = byField[f];
     if (hit != null) return hit;
     final ts = doc.fields[f]?.textState;
-    final delta = ts == null ? _emptyDelta : List<TextDeltaSegment>.unmodifiable(textDelta(ts));
+    final delta = ts == null
+        ? _emptyDelta
+        : List<TextDeltaSegment>.unmodifiable(textDelta(ts));
     byField[f] = delta;
     return delta;
   }
@@ -463,13 +499,19 @@ final class CrdtStore {
   /// The stable address of the character at a visible [index], which
   /// survives concurrent edits (cursor anchoring).
   TextRef? getTextRefAt(String table, String pk, String field, int index) {
-    final ts = _getDoc(goString(table), goString(pk))?.fields[goString(field)]?.textState;
+    final ts = _getDoc(
+      goString(table),
+      goString(pk),
+    )?.fields[goString(field)]?.textState;
     return ts == null ? null : textRefAt(ts, index);
   }
 
   /// The current visible index of a stable text address.
   int? getTextIndexOf(String table, String pk, String field, TextRef ref) {
-    final ts = _getDoc(goString(table), goString(pk))?.fields[goString(field)]?.textState;
+    final ts = _getDoc(
+      goString(table),
+      goString(pk),
+    )?.fields[goString(field)]?.textState;
     return ts == null ? null : textIndexOf(ts, ref);
   }
 
@@ -500,14 +542,29 @@ final class CrdtStore {
   /// Increments a counter by [delta]. The change carries this node's
   /// cumulative totals, which merge max-per-node, so redelivery is
   /// idempotent, as in Go.
-  ChangeRecord? incrementCounter(String table, String pk, String field, [int delta = 1]) =>
-      _counter(table, pk, field, delta, 0, delta);
+  ChangeRecord? incrementCounter(
+    String table,
+    String pk,
+    String field, [
+    int delta = 1,
+  ]) => _counter(table, pk, field, delta, 0, delta);
 
   /// Decrements a counter by [delta].
-  ChangeRecord? decrementCounter(String table, String pk, String field, [int delta = 1]) =>
-      _counter(table, pk, field, 0, delta, -delta);
+  ChangeRecord? decrementCounter(
+    String table,
+    String pk,
+    String field, [
+    int delta = 1,
+  ]) => _counter(table, pk, field, 0, delta, -delta);
 
-  ChangeRecord? _counter(String table, String pk, String field, int inc, int dec, int eventValue) {
+  ChangeRecord? _counter(
+    String table,
+    String pk,
+    String field,
+    int inc,
+    int dec,
+    int eventValue,
+  ) {
     _checkWritable();
     _assertPendingCapacity();
     final t = goString(table);
@@ -515,15 +572,31 @@ final class CrdtStore {
     final f = goString(field);
     final hlc = clock.now();
     final cs = _getDoc(t, p)?.fields[f]?.counterState;
-    final totals = CounterDelta((cs?.inc[hlc.node] ?? 0) + inc, (cs?.dec[hlc.node] ?? 0) + dec);
+    final totals = CounterDelta(
+      (cs?.inc[hlc.node] ?? 0) + inc,
+      (cs?.dec[hlc.node] ?? 0) + dec,
+    );
     return _commitLocal(
-      ChangeRecord(table: t, pk: p, field: f, crdtType: CrdtType.counter, hlc: hlc, nodeId: hlc.node, counterDelta: totals),
+      ChangeRecord(
+        table: t,
+        pk: p,
+        field: f,
+        crdtType: CrdtType.counter,
+        hlc: hlc,
+        nodeId: hlc.node,
+        counterDelta: totals,
+      ),
       eventValue,
     );
   }
 
   /// Adds [elements] to a set field.
-  ChangeRecord? addToSet(String table, String pk, String field, List<Object?> elements) {
+  ChangeRecord? addToSet(
+    String table,
+    String pk,
+    String field,
+    List<Object?> elements,
+  ) {
     _checkWritable();
     _assertPendingCapacity();
     final els = [for (final e in elements) goJsonCopy(e)];
@@ -551,7 +624,12 @@ final class CrdtStore {
   /// tags observed under those keys. An element with no stored key is sent as
   /// its value. When no element has a key the op has no tags: a legacy remove,
   /// which Go applies to tags older than the change.
-  ChangeRecord? removeFromSet(String table, String pk, String field, List<Object?> elements) {
+  ChangeRecord? removeFromSet(
+    String table,
+    String pk,
+    String field,
+    List<Object?> elements,
+  ) {
     _checkWritable();
     _assertPendingCapacity();
     final t = goString(table);
@@ -564,7 +642,9 @@ final class CrdtStore {
     final tags = <OrSetTag>[];
     final seenTags = <String>{};
     for (final el in els) {
-      final keys = setState == null ? const <String>[] : keysForElement(setState, el);
+      final keys = setState == null
+          ? const <String>[]
+          : keysForElement(setState, el);
       var named = false;
       for (final k in keys) {
         if (!_isJson(k)) continue; // a non-JSON key cannot travel on the wire
@@ -601,7 +681,13 @@ final class CrdtStore {
 
   /// Inserts [value] into a list field after [afterId], or at the head when
   /// it is null.
-  ChangeRecord? insertIntoList(String table, String pk, String field, Object? value, {HLC? afterId}) {
+  ChangeRecord? insertIntoList(
+    String table,
+    String pk,
+    String field,
+    Object? value, {
+    HLC? afterId,
+  }) {
     _checkWritable();
     _assertPendingCapacity();
     final v = goJsonCopy(value);
@@ -614,14 +700,24 @@ final class CrdtStore {
         crdtType: CrdtType.list,
         hlc: hlc,
         nodeId: hlc.node,
-        listOp: ListOperation(ListOpType.insert, nodeId: hlc, parentId: afterId ?? HLC.zero, value: JsonValue(v)),
+        listOp: ListOperation(
+          ListOpType.insert,
+          nodeId: hlc,
+          parentId: afterId ?? HLC.zero,
+          value: JsonValue(v),
+        ),
       ),
       v,
     );
   }
 
   /// Deletes the list node [nodeId].
-  ChangeRecord? deleteFromList(String table, String pk, String field, HLC nodeId) {
+  ChangeRecord? deleteFromList(
+    String table,
+    String pk,
+    String field,
+    HLC nodeId,
+  ) {
     _checkWritable();
     _assertPendingCapacity();
     final hlc = clock.now();
@@ -641,32 +737,59 @@ final class CrdtStore {
 
   TextState _textStateOf(String t, String p, String f) {
     final fs = _getDoc(t, p)?.fields[f];
-    return fs?.type == CrdtType.text && fs?.textState != null ? fs!.textState! : newTextState();
+    return fs?.type == CrdtType.text && fs?.textState != null
+        ? fs!.textState!
+        : newTextState();
   }
 
-  ChangeRecord? _commitText(String t, String p, String f, HLC hlc, TextOperation op, TextState next, Object? value) =>
-      _commitLocal(
-        ChangeRecord(table: t, pk: p, field: f, crdtType: CrdtType.text, hlc: hlc, nodeId: hlc.node, textOp: op),
-        value,
-        prebuilt: (existing) {
-          final keep = existing != null && existing.hlc.isAfter(hlc);
-          return FieldState(
-            type: CrdtType.text,
-            hlc: keep ? existing.hlc : hlc,
-            nodeId: keep ? existing.nodeId : hlc.node,
-            textState: next,
-          );
-        },
+  ChangeRecord? _commitText(
+    String t,
+    String p,
+    String f,
+    HLC hlc,
+    TextOperation op,
+    TextState next,
+    Object? value,
+  ) => _commitLocal(
+    ChangeRecord(
+      table: t,
+      pk: p,
+      field: f,
+      crdtType: CrdtType.text,
+      hlc: hlc,
+      nodeId: hlc.node,
+      textOp: op,
+    ),
+    value,
+    prebuilt: (existing) {
+      final keep = existing != null && existing.hlc.isAfter(hlc);
+      return FieldState(
+        type: CrdtType.text,
+        hlc: keep ? existing.hlc : hlc,
+        nodeId: keep ? existing.nodeId : hlc.node,
+        textState: next,
       );
+    },
+  );
 
   /// Inserts [content] at visible character [index]. Sequential typing
   /// coalesces into one origin. Throws an [ArgumentError] for empty content
   /// and a [RangeError] when there is no character before [index].
-  ChangeRecord? insertText(String table, String pk, String field, int index, String content) {
+  ChangeRecord? insertText(
+    String table,
+    String pk,
+    String field,
+    int index,
+    String content,
+  ) {
     _checkWritable();
     _assertPendingCapacity();
-    if (content.isEmpty) throw ArgumentError.value(content, 'content', 'crdt: empty text insert');
-    if (index < 0) throw RangeError.value(index, 'index', 'crdt: negative text index');
+    if (content.isEmpty) {
+      throw ArgumentError.value(content, 'content', 'crdt: empty text insert');
+    }
+    if (index < 0) {
+      throw RangeError.value(index, 'index', 'crdt: negative text index');
+    }
     final t = goString(table);
     final p = goString(pk);
     final f = goString(field);
@@ -674,7 +797,9 @@ final class CrdtStore {
     final current = _textStateOf(t, p, f);
     TextRef? ref;
     if (index > 0) {
-      ref = textRefAt(current, index - 1) ?? (throw RangeError('crdt: no text character at index ${index - 1}'));
+      ref =
+          textRefAt(current, index - 1) ??
+          (throw RangeError('crdt: no text character at index ${index - 1}'));
     }
     // The builders apply the op as they build it, so build against a clone and
     // keep the clone as the new state.
@@ -684,7 +809,13 @@ final class CrdtStore {
   }
 
   /// Deletes [length] visible characters from [index].
-  ChangeRecord? deleteText(String table, String pk, String field, int index, int length) {
+  ChangeRecord? deleteText(
+    String table,
+    String pk,
+    String field,
+    int index,
+    int length,
+  ) {
     _checkWritable();
     _assertPendingCapacity();
     final t = goString(table);
@@ -692,7 +823,9 @@ final class CrdtStore {
     final f = goString(field);
     final hlc = clock.now();
     final current = _textStateOf(t, p, f);
-    final ref = textRefAt(current, index) ?? (throw RangeError('crdt: no text character at index $index'));
+    final ref =
+        textRefAt(current, index) ??
+        (throw RangeError('crdt: no text character at index $index'));
     final next = current.clone();
     final op = textDeleteOp(next, ref, length);
     return _commitText(t, p, f, hlc, op, next, length);
@@ -700,7 +833,14 @@ final class CrdtStore {
 
   /// Sets formatting [attrs] on [length] visible characters from [index]. A
   /// null value clears the attribute.
-  ChangeRecord? formatText(String table, String pk, String field, int index, int length, Map<String, Object?> attrs) {
+  ChangeRecord? formatText(
+    String table,
+    String pk,
+    String field,
+    int index,
+    int length,
+    Map<String, Object?> attrs,
+  ) {
     _checkWritable();
     _assertPendingCapacity();
     final t = goString(table);
@@ -709,7 +849,9 @@ final class CrdtStore {
     final a = goJsonCopy(attrs)! as Map<String, Object?>;
     final hlc = clock.now();
     final current = _textStateOf(t, p, f);
-    final ref = textRefAt(current, index) ?? (throw RangeError('crdt: no text character at index $index'));
+    final ref =
+        textRefAt(current, index) ??
+        (throw RangeError('crdt: no text character at index $index'));
     final next = current.clone();
     final op = textFormat(next, ref, length, a, hlc.node, hlc);
     return _commitText(t, p, f, hlc, op, next, a);
@@ -718,7 +860,12 @@ final class CrdtStore {
   /// Replaces a text field's visible text with [value] using a common prefix
   /// and suffix diff (Go `TextState.SetString`), and returns the changes: a
   /// delete, an insert, both, or none. Each is recorded for undo on its own.
-  List<ChangeRecord> setText(String table, String pk, String field, String value) {
+  List<ChangeRecord> setText(
+    String table,
+    String pk,
+    String field,
+    String value,
+  ) {
     _checkWritable();
     _assertPendingCapacity();
     final t = goString(table);
@@ -737,7 +884,15 @@ final class CrdtStore {
       for (var i = 0; i < ops.length; i++) {
         final h = clocks[i];
         final c = _commitLocal(
-          ChangeRecord(table: t, pk: p, field: f, crdtType: CrdtType.text, hlc: h, nodeId: h.node, textOp: ops[i]),
+          ChangeRecord(
+            table: t,
+            pk: p,
+            field: f,
+            crdtType: CrdtType.text,
+            hlc: h,
+            nodeId: h.node,
+            textOp: ops[i],
+          ),
           value,
         );
         if (c != null) out.add(c);
@@ -747,7 +902,13 @@ final class CrdtStore {
   }
 
   /// Writes [value] at the dotted [path] inside a nested document field.
-  ChangeRecord? setDocumentField(String table, String pk, String field, String path, Object? value) {
+  ChangeRecord? setDocumentField(
+    String table,
+    String pk,
+    String field,
+    String path,
+    Object? value,
+  ) {
     _checkWritable();
     _assertPendingCapacity();
     final v = goJsonCopy(value);
@@ -768,7 +929,12 @@ final class CrdtStore {
 
   /// Deletes the dotted [path], and the paths under it, inside a nested
   /// document field.
-  ChangeRecord? deleteDocumentField(String table, String pk, String field, String path) {
+  ChangeRecord? deleteDocumentField(
+    String table,
+    String pk,
+    String field,
+    String path,
+  ) {
     _checkWritable();
     _assertPendingCapacity();
     final hlc = clock.now();
@@ -824,20 +990,29 @@ final class CrdtStore {
   }) {
     _checkNotQuarantined(change.table, change.pk);
     final previous = _captureFieldState(change.table, change.pk, change.field);
-    final allowed = _plugins.dispatchBeforeWrite(WriteEvent(
-      table: change.table,
-      pk: change.pk,
-      field: change.field,
-      crdtType: change.crdtType,
-      value: value,
-      change: change,
-      previousState: previous,
-    ));
+    final allowed = _plugins.dispatchBeforeWrite(
+      WriteEvent(
+        table: change.table,
+        pk: change.pk,
+        field: change.field,
+        crdtType: change.crdtType,
+        value: value,
+        change: change,
+        previousState: previous,
+      ),
+    );
     if (allowed == null) return null;
     final c = _normalizeKeys(allowed.change);
-    final sameKey = c.table == change.table && c.pk == change.pk && c.field == change.field;
-    _applyChangeInternal(c, prebuilt: identical(allowed.change, change) ? prebuilt : null);
-    _recordUndo(c, sameKey ? previous : _captureFieldState(c.table, c.pk, c.field));
+    final sameKey =
+        c.table == change.table && c.pk == change.pk && c.field == change.field;
+    _applyChangeInternal(
+      c,
+      prebuilt: identical(allowed.change, change) ? prebuilt : null,
+    );
+    _recordUndo(
+      c,
+      sameKey ? previous : _captureFieldState(c.table, c.pk, c.field),
+    );
     _enqueuePending(c);
     _persistWrite(c.table, c.pk);
     _notifyListeners(c.table, c.pk);
@@ -845,8 +1020,14 @@ final class CrdtStore {
     return c;
   }
 
-  void _recordUndo(ChangeRecord c, FieldState? previous, {DocumentState? previousDocument}) {
-    if (_suppressUndo == 0) _undo.record(c, previous, previousDocument: previousDocument);
+  void _recordUndo(
+    ChangeRecord c,
+    FieldState? previous, {
+    DocumentState? previousDocument,
+  }) {
+    if (_suppressUndo == 0) {
+      _undo.record(c, previous, previousDocument: previousDocument);
+    }
   }
 
   // --- Reconciliation and recovery (Dart additions) ---
@@ -854,7 +1035,13 @@ final class CrdtStore {
   /// Reconciles [field] toward [value] with the smallest set of local ops for
   /// its type, and returns the changes it made. Used by undo and by
   /// forge_client_grove to turn a REST-shaped write into CRDT ops.
-  List<ChangeRecord> reconcileField(String table, String pk, String field, CrdtType type, Object? value) {
+  List<ChangeRecord> reconcileField(
+    String table,
+    String pk,
+    String field,
+    CrdtType type,
+    Object? value,
+  ) {
     _checkWritable();
     final t = goString(table);
     final p = goString(pk);
@@ -875,15 +1062,22 @@ final class CrdtStore {
 
     switch (type) {
       case CrdtType.lww || CrdtType.none:
-        if (current == null || !jsonDeepEquals(resolveFieldValue(current), want0)) step(() => setField(t, p, f, want0));
+        if (current == null ||
+            !jsonDeepEquals(resolveFieldValue(current), want0)) {
+          step(() => setField(t, p, f, want0));
+        }
       case CrdtType.counter:
         final target = (want0 as num?)?.toInt() ?? 0;
-        final now = current?.counterState == null ? 0 : counterValue(current!.counterState!);
+        final now = current?.counterState == null
+            ? 0
+            : counterValue(current!.counterState!);
         if (target > now) step(() => incrementCounter(t, p, f, target - now));
         if (target < now) step(() => decrementCounter(t, p, f, now - target));
       case CrdtType.set:
         final want = (want0 as List<Object?>?) ?? const [];
-        final have = current?.setState == null ? const <Object?>[] : setElements(current!.setState!);
+        final have = current?.setState == null
+            ? const <Object?>[]
+            : setElements(current!.setState!);
         final adds = [
           for (final w in want)
             if (!have.any((h) => jsonDeepEquals(h, w))) w,
@@ -896,16 +1090,25 @@ final class CrdtStore {
         if (adds.isNotEmpty) step(() => addToSet(t, p, f, adds));
       case CrdtType.list:
         final want = (want0 as List<Object?>?) ?? const [];
-        final ids = current?.listState == null ? const <HLC>[] : listNodeIds(current!.listState!);
-        final have = current?.listState == null ? const <Object?>[] : listElements(current!.listState!);
+        final ids = current?.listState == null
+            ? const <HLC>[]
+            : listNodeIds(current!.listState!);
+        final have = current?.listState == null
+            ? const <Object?>[]
+            : listElements(current!.listState!);
         var prefix = 0;
-        while (prefix < have.length && prefix < want.length && jsonDeepEquals(have[prefix], want[prefix])) {
+        while (prefix < have.length &&
+            prefix < want.length &&
+            jsonDeepEquals(have[prefix], want[prefix])) {
           prefix++;
         }
         var suffix = 0;
         while (suffix < have.length - prefix &&
             suffix < want.length - prefix &&
-            jsonDeepEquals(have[have.length - 1 - suffix], want[want.length - 1 - suffix])) {
+            jsonDeepEquals(
+              have[have.length - 1 - suffix],
+              want[want.length - 1 - suffix],
+            )) {
           suffix++;
         }
         for (var i = prefix; i < have.length - suffix; i++) {
@@ -917,7 +1120,9 @@ final class CrdtStore {
           final v = want[i];
           step(() {
             final c = insertIntoList(t, p, f, v, afterId: after);
-            if (c != null) after = c.listOp!.nodeId.isZero ? c.hlc : c.listOp!.nodeId;
+            if (c != null) {
+              after = c.listOp!.nodeId.isZero ? c.hlc : c.listOp!.nodeId;
+            }
             return c;
           });
         }
@@ -926,19 +1131,25 @@ final class CrdtStore {
         needed += _textOpsFor(t, p, f, text);
         steps.add(() => setText(t, p, f, text));
       case CrdtType.document:
-        final want = _flattenPaths((want0 as Map<String, Object?>?) ?? const {});
+        final want = _flattenPaths(
+          (want0 as Map<String, Object?>?) ?? const {},
+        );
         final have = current?.docState == null
             ? const <String, Object?>{}
             : {
-                for (final e in current!.docState!.fields.entries) e.key: resolveFieldValue(e.value),
+                for (final e in current!.docState!.fields.entries)
+                  e.key: resolveFieldValue(e.value),
               };
         for (final e in want.entries) {
-          if (!have.containsKey(e.key) || !jsonDeepEquals(have[e.key], e.value)) {
+          if (!have.containsKey(e.key) ||
+              !jsonDeepEquals(have[e.key], e.value)) {
             step(() => setDocumentField(t, p, f, e.key, e.value));
           }
         }
         for (final path in have.keys) {
-          if (!want.containsKey(path)) step(() => deleteDocumentField(t, p, f, path));
+          if (!want.containsKey(path)) {
+            step(() => deleteDocumentField(t, p, f, path));
+          }
         }
     }
     _assertPendingCapacity(needed);
@@ -946,10 +1157,17 @@ final class CrdtStore {
   }
 
   /// How many changes [setText] would queue to reach [value].
-  int _textOpsFor(String t, String p, String f, String value) =>
-      textSetString(_textStateOf(t, p, f).clone(), value, nodeId, () => HLC.zero).length;
+  int _textOpsFor(String t, String p, String f, String value) => textSetString(
+    _textStateOf(t, p, f).clone(),
+    value,
+    nodeId,
+    () => HLC.zero,
+  ).length;
 
-  static Map<String, Object?> _flattenPaths(Map<String, Object?> m, [String prefix = '']) {
+  static Map<String, Object?> _flattenPaths(
+    Map<String, Object?> m, [
+    String prefix = '',
+  ]) {
     final out = <String, Object?>{};
     for (final e in m.entries) {
       final path = prefix.isEmpty ? e.key : '$prefix.${e.key}';
@@ -975,19 +1193,31 @@ final class CrdtStore {
     if (index < 0) return null;
     final entry = _pending[index];
     final old = entry.change;
-    if (old.crdtType == CrdtType.list || old.crdtType == CrdtType.text || old.crdtType == CrdtType.counter) return null;
+    if (old.crdtType == CrdtType.list ||
+        old.crdtType == CrdtType.text ||
+        old.crdtType == CrdtType.counter) {
+      return null;
+    }
     final hlc = clock.now();
     final fresh = old.copyWith(hlc: hlc, nodeId: hlc.node);
     final doc = _docOrEmpty(old.table, old.pk);
     DocumentState next = doc;
     if (_isRecordDelete(old)) {
-      if (doc.tombstone && doc.tombstoneHlc == old.hlc) next = doc.copyWith(tombstoneHlc: hlc);
+      if (doc.tombstone && doc.tombstoneHlc == old.hlc) {
+        next = doc.copyWith(tombstoneHlc: hlc);
+      }
     } else {
       final fs = doc.fields[old.field];
-      if (fs != null) next = _withField(doc, old.field, _restampField(fs, old, hlc));
+      if (fs != null) {
+        next = _withField(doc, old.field, _restampField(fs, old, hlc));
+      }
     }
     if (!identical(next, doc)) _setDocument(old.table, old.pk, next);
-    _pending[index] = entry.copyWith(change: fresh, clearRejection: true, restamps: entry.restamps + 1);
+    _pending[index] = entry.copyWith(
+      change: fresh,
+      clearRejection: true,
+      restamps: entry.restamps + 1,
+    );
     if (old.crdtType == CrdtType.set && old.setOp?.op == SetOpType.add) {
       // A later pending remove that observed the add names its old tag. Point
       // it at the new one, for every element it covers, or the server would
@@ -997,8 +1227,14 @@ final class CrdtStore {
       for (var i = index + 1; i < _pending.length; i++) {
         final c = _pending[i].change;
         final op = c.setOp;
-        if (c.table != old.table || c.pk != old.pk || c.field != old.field) continue;
-        if (op == null || op.op != SetOpType.remove || !op.tags.any((t) => tagKey(t) == oldTag)) continue;
+        if (c.table != old.table || c.pk != old.pk || c.field != old.field) {
+          continue;
+        }
+        if (op == null ||
+            op.op != SetOpType.remove ||
+            !op.tags.any((t) => tagKey(t) == oldTag)) {
+          continue;
+        }
         _pending[i] = _pending[i].copyWith(
           change: c.copyWith(
             setOp: SetOperation(
@@ -1024,7 +1260,8 @@ final class CrdtStore {
         final oldTag = tagKey(OrSetTag(old.nodeId, old.hlc));
         final newTag = OrSetTag(hlc.node, hlc);
         final entries = {
-          for (final e in fs.setState!.entries.entries) e.key: [for (final t in e.value) tagKey(t) == oldTag ? newTag : t],
+          for (final e in fs.setState!.entries.entries)
+            e.key: [for (final t in e.value) tagKey(t) == oldTag ? newTag : t],
         };
         // A local remove of the add already marked the old tag removed; move
         // the mark to the new tag, as the rewritten pending remove will on the
@@ -1035,17 +1272,29 @@ final class CrdtStore {
             if (e.key == oldTag)
               newKey: e.value
             else if (e.key.endsWith('|$oldTag'))
-              '${e.key.substring(0, e.key.length - oldTag.length)}$newKey': e.value
+              '${e.key.substring(0, e.key.length - oldTag.length)}$newKey':
+                  e.value
             else
               e.key: e.value,
         };
-        return setFieldState(OrSetState(entries: entries, removed: removed), fieldHlc, fieldNode);
+        return setFieldState(
+          OrSetState(entries: entries, removed: removed),
+          fieldHlc,
+          fieldNode,
+        );
       case CrdtType.document:
-        final path = (old.value!.value! as Map<String, Object?>)['path']! as String;
+        final path =
+            (old.value!.value! as Map<String, Object?>)['path']! as String;
         final inner = fs.docState!.fields[path];
         final fields = {...fs.docState!.fields};
-        if (inner != null && inner.hlc == old.hlc) fields[path] = inner.copyWith(hlc: hlc, nodeId: hlc.node);
-        return documentFieldState(DocumentCrdtState(fields), fieldHlc, fieldNode);
+        if (inner != null && inner.hlc == old.hlc) {
+          fields[path] = inner.copyWith(hlc: hlc, nodeId: hlc.node);
+        }
+        return documentFieldState(
+          DocumentCrdtState(fields),
+          fieldHlc,
+          fieldNode,
+        );
       default:
         return stampedHere ? fs.copyWith(hlc: hlc, nodeId: hlc.node) : fs;
     }
@@ -1096,10 +1345,12 @@ final class CrdtStore {
     _setDocument(
       t,
       p,
-      doc.copyWith(fields: {
-        for (final e in doc.fields.entries)
-          if (e.key != f) e.key: e.value,
-      }),
+      doc.copyWith(
+        fields: {
+          for (final e in doc.fields.entries)
+            if (e.key != f) e.key: e.value,
+        },
+      ),
     );
     _persistDocument(t, p);
     _notifyListeners(t, p);
@@ -1185,27 +1436,45 @@ final class CrdtStore {
     final c = entry.change;
     final prev = entry.previousState;
     final op = c.textOp;
-    if (c.crdtType == CrdtType.text && op != null && op.op == TextOpType.format) {
+    if (c.crdtType == CrdtType.text &&
+        op != null &&
+        op.op == TextOpType.format) {
       if (op.spans.isEmpty) return;
       final first = op.spans.first;
       final ts = prev?.textState;
       _formatSpans(c.table, c.pk, c.field, op.spans, {
-        for (final name in op.attrs.keys) name: ts == null ? null : _attrAt(ts, first, name),
+        for (final name in op.attrs.keys)
+          name: ts == null ? null : _attrAt(ts, first, name),
       });
       return;
     }
-    reconcileField(c.table, c.pk, c.field, c.crdtType, prev == null ? null : resolveFieldValue(prev));
+    reconcileField(
+      c.table,
+      c.pk,
+      c.field,
+      c.crdtType,
+      prev == null ? null : resolveFieldValue(prev),
+    );
   }
 
   /// The value of attribute [name] at the first character of [span] in [s].
   static Object? _attrAt(TextState s, TextSpan span, String name) {
-    for (final f in s.frags[textOriginKey(span.origin)] ?? const <TextFragment>[]) {
-      if (span.start >= f.start && span.start < f.start + f.length) return goJsonCopy(f.attrs[name]?.value.value);
+    for (final f
+        in s.frags[textOriginKey(span.origin)] ?? const <TextFragment>[]) {
+      if (span.start >= f.start && span.start < f.start + f.length) {
+        return goJsonCopy(f.attrs[name]?.value.value);
+      }
     }
     return null;
   }
 
-  ChangeRecord? _formatSpans(String t, String p, String f, List<TextSpan> spans, Map<String, Object?> attrs) {
+  ChangeRecord? _formatSpans(
+    String t,
+    String p,
+    String f,
+    List<TextSpan> spans,
+    Map<String, Object?> attrs,
+  ) {
     _assertPendingCapacity();
     final hlc = clock.now();
     final op = TextOperation(
@@ -1214,7 +1483,15 @@ final class CrdtStore {
       attrs: {for (final e in attrs.entries) e.key: JsonValue(e.value)},
     );
     return _commitLocal(
-      ChangeRecord(table: t, pk: p, field: f, crdtType: CrdtType.text, hlc: hlc, nodeId: hlc.node, textOp: op),
+      ChangeRecord(
+        table: t,
+        pk: p,
+        field: f,
+        crdtType: CrdtType.text,
+        hlc: hlc,
+        nodeId: hlc.node,
+        textOp: op,
+      ),
       attrs,
     );
   }
@@ -1223,7 +1500,9 @@ final class CrdtStore {
     final c = entry.change;
     final i = _pending.indexWhere((p) => p.key == pendingKey(c));
     final doc = _getDoc(c.table, c.pk);
-    if (i < 0 || doc == null || !doc.tombstone || doc.tombstoneHlc != c.hlc) return false;
+    if (i < 0 || doc == null || !doc.tombstone || doc.tombstoneHlc != c.hlc) {
+      return false;
+    }
     _pending.removeAt(i);
     _markPending();
     final prev = entry.previousDocument;
@@ -1233,7 +1512,10 @@ final class CrdtStore {
       _setDocument(
         c.table,
         c.pk,
-        doc.copyWith(tombstone: prev?.tombstone ?? false, tombstoneHlc: prev?.tombstoneHlc ?? HLC.zero),
+        doc.copyWith(
+          tombstone: prev?.tombstone ?? false,
+          tombstoneHlc: prev?.tombstoneHlc ?? HLC.zero,
+        ),
       );
     }
     _persistWrite(c.table, c.pk);
@@ -1266,12 +1548,14 @@ final class CrdtStore {
     } finally {
       _suppressUndo--;
     }
-    _undo.pushUndo(UndoEntry(
-      change: replayed ?? c,
-      previousState: entry.previousState,
-      previousDocument: isDelete ? before : entry.previousDocument,
-      timestamp: DateTime.now().millisecondsSinceEpoch,
-    ));
+    _undo.pushUndo(
+      UndoEntry(
+        change: replayed ?? c,
+        previousState: entry.previousState,
+        previousDocument: isDelete ? before : entry.previousDocument,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
     return true;
   }
 
@@ -1294,7 +1578,9 @@ final class CrdtStore {
         return last;
       case CrdtType.set:
         final op = c.setOp!;
-        final elements = [for (final e in op.elements) e is RawJson ? jsonDecode(e.json) : e];
+        final elements = [
+          for (final e in op.elements) e is RawJson ? jsonDecode(e.json) : e,
+        ];
         return op.op == SetOpType.add
             ? addToSet(c.table, c.pk, c.field, elements)
             : removeFromSet(c.table, c.pk, c.field, elements);
@@ -1304,7 +1590,13 @@ final class CrdtStore {
         if (path is! String) return null;
         return c.tombstone
             ? deleteDocumentField(c.table, c.pk, c.field, path)
-            : setDocumentField(c.table, c.pk, c.field, path, (payload! as Map<String, Object?>)['value']);
+            : setDocumentField(
+                c.table,
+                c.pk,
+                c.field,
+                path,
+                (payload! as Map<String, Object?>)['value'],
+              );
       case CrdtType.text when c.textOp?.op == TextOpType.format:
         final op = c.textOp!;
         return _formatSpans(c.table, c.pk, c.field, op.spans, {
@@ -1313,7 +1605,13 @@ final class CrdtStore {
       case CrdtType.list || CrdtType.text:
         // Node and origin ids change on every insert, so a list or text write
         // is replayed as the value it produced.
-        final out = reconcileField(c.table, c.pk, c.field, c.crdtType, resolveFieldValue(applyChange(prev, c)));
+        final out = reconcileField(
+          c.table,
+          c.pk,
+          c.field,
+          c.crdtType,
+          resolveFieldValue(applyChange(prev, c)),
+        );
         return out.isEmpty ? null : out.last;
     }
   }
@@ -1349,7 +1647,11 @@ final class CrdtStore {
         _applyChangeInternal(c);
         affected.add((table: c.table, pk: c.pk));
         if (_quarantined.contains((c.table, c.pk))) {
-          _reportStorage(StateError('crdt: document ${c.table}/${c.pk} is quarantined; a remote change is held in memory only'));
+          _reportStorage(
+            StateError(
+              'crdt: document ${c.table}/${c.pk} is quarantined; a remote change is held in memory only',
+            ),
+          );
         }
         // The merge installed a new document object, so re-read the result.
         final result = _getDoc(c.table, c.pk)?.fields[c.field];
@@ -1377,9 +1679,9 @@ final class CrdtStore {
   /// The pushable pending changes, oldest first: rejected ones are left out
   /// until [retryRejected]. A new list each call.
   List<ChangeRecord> getPendingChanges() => [
-        for (final p in _pending)
-          if (!p.isRejected) p.change,
-      ];
+    for (final p in _pending)
+      if (!p.isRejected) p.change,
+  ];
 
   /// Every pending change, rejected ones included, oldest first.
   List<PendingChange> get pending => List.unmodifiable(_pending);
@@ -1408,7 +1710,9 @@ final class CrdtStore {
   /// Registers [handler] for changes the pending bound drops. Returns a
   /// function that unregisters it. Overflow means unsynced local work was
   /// discarded: surface it rather than swallow it.
-  void Function() onPendingOverflow(void Function(List<ChangeRecord> dropped) handler) {
+  void Function() onPendingOverflow(
+    void Function(List<ChangeRecord> dropped) handler,
+  ) {
     _overflowHandlers.add(handler);
     return () => _overflowHandlers.remove(handler);
   }
@@ -1417,7 +1721,9 @@ final class CrdtStore {
   /// bound is reached. Every mutator calls this first, before it reads the
   /// clock, so a refused write leaves no trace.
   void _assertPendingCapacity([int changes = 1]) {
-    if (_throwOnOverflow && _maxPendingChanges > 0 && _pending.length + changes > _maxPendingChanges) {
+    if (_throwOnOverflow &&
+        _maxPendingChanges > 0 &&
+        _pending.length + changes > _maxPendingChanges) {
       throw PendingQueueFullError(_maxPendingChanges);
     }
   }
@@ -1439,7 +1745,9 @@ final class CrdtStore {
   /// `onStorageError` and the others still run, so the write that overflowed
   /// is still persisted and notified.
   bool _evictOverflow({required bool keepNewest}) {
-    if (_maxPendingChanges <= 0 || _pending.length <= _maxPendingChanges) return false;
+    if (_maxPendingChanges <= 0 || _pending.length <= _maxPendingChanges) {
+      return false;
+    }
     final excess = _pending.length - _maxPendingChanges;
     final dropped = <ChangeRecord>[];
     final scanEnd = keepNewest ? 1 : 0;
@@ -1475,7 +1783,11 @@ final class CrdtStore {
 
   /// Calls [listener] after a change to one document. Returns a function that
   /// unsubscribes it.
-  void Function() subscribeDocument(String table, String pk, void Function() listener) {
+  void Function() subscribeDocument(
+    String table,
+    String pk,
+    void Function() listener,
+  ) {
     final t = goString(table);
     final p = goString(pk);
     final byPk = _docListeners[t] ??= {};
@@ -1485,7 +1797,9 @@ final class CrdtStore {
       listeners.remove(listener);
       if (listeners.isEmpty && identical(byPk[p], listeners)) {
         byPk.remove(p);
-        if (byPk.isEmpty && identical(_docListeners[t], byPk)) _docListeners.remove(t);
+        if (byPk.isEmpty && identical(_docListeners[t], byPk)) {
+          _docListeners.remove(t);
+        }
       }
     };
   }
@@ -1498,7 +1812,9 @@ final class CrdtStore {
     listeners.add(listener);
     return () {
       listeners.remove(listener);
-      if (listeners.isEmpty && identical(_tableListeners[t], listeners)) _tableListeners.remove(t);
+      if (listeners.isEmpty && identical(_tableListeners[t], listeners)) {
+        _tableListeners.remove(t);
+      }
     };
   }
 
@@ -1575,14 +1891,15 @@ final class CrdtStore {
 
   /// A deep copy of the whole store.
   StateSnapshot exportState() => StateSnapshot(
-        version: 1,
-        nodeId: nodeId,
-        timestamp: DateTime.now().millisecondsSinceEpoch,
-        tables: {
-          for (final t in _state.entries) t.key: {for (final d in t.value.entries) d.key: _copyDoc(d.value)},
-        },
-        pending: [for (final p in _pending) _copyPending(p)],
-      );
+    version: 1,
+    nodeId: nodeId,
+    timestamp: DateTime.now().millisecondsSinceEpoch,
+    tables: {
+      for (final t in _state.entries)
+        t.key: {for (final d in t.value.entries) d.key: _copyDoc(d.value)},
+    },
+    pending: [for (final p in _pending) _copyPending(p)],
+  );
 
   /// Replaces the whole store with [snapshot] and notifies every listener.
   ///
@@ -1645,8 +1962,10 @@ final class CrdtStore {
 
   /// A deep copy of one table's documents.
   Map<String, DocumentState> exportTable(String table) => {
-        for (final d in (_state[goString(table)] ?? const <String, DocumentState>{}).entries) d.key: _copyDoc(d.value),
-      };
+    for (final d
+        in (_state[goString(table)] ?? const <String, DocumentState>{}).entries)
+      d.key: _copyDoc(d.value),
+  };
 
   // --- Hydration and persistence ---
 
@@ -1663,7 +1982,9 @@ final class CrdtStore {
       }
     }
 
-    final stateFuture = load(() => _storage.loadState(onUnreadable: _reportStorage));
+    final stateFuture = load(
+      () => _storage.loadState(onUnreadable: _reportStorage),
+    );
     final pendingFuture = load(_storage.loadPendingChanges);
     final loaded = await stateFuture;
     final loadedPending = await pendingFuture;
@@ -1684,7 +2005,11 @@ final class CrdtStore {
       for (final d in t.value.entries) {
         final DocumentState doc;
         try {
-          doc = _plugins.dispatchAfterHydrate(t.key, d.key, _normalizeHlcKeys(d.value));
+          doc = _plugins.dispatchAfterHydrate(
+            t.key,
+            d.key,
+            _normalizeHlcKeys(d.value),
+          );
         } on Object catch (e) {
           // A decryptor that failed: the document is not served, and its
           // stored bytes are left alone.
@@ -1722,7 +2047,8 @@ final class CrdtStore {
     }
   }
 
-  void _markDocument(String table, String pk) => (_docQueue[table] ??= {}).add(pk);
+  void _markDocument(String table, String pk) =>
+      (_docQueue[table] ??= {}).add(pk);
 
   void _markPending() => _pendingDirty = true;
 
@@ -1769,7 +2095,11 @@ final class CrdtStore {
   /// [_minRetryDelay]) and doubles per consecutive failure up to
   /// [_maxRetryDelay], so a storage that stays down is not retried in a hot
   /// loop.
-  void _requeue(Iterable<(String, String)> docs, {required bool pending, required Object cause}) {
+  void _requeue(
+    Iterable<(String, String)> docs, {
+    required bool pending,
+    required Object cause,
+  }) {
     for (final k in docs) {
       _markDocument(k.$1, k.$2);
     }
@@ -1789,7 +2119,8 @@ final class CrdtStore {
   static const Duration _minRetryDelay = Duration(milliseconds: 50);
   static const Duration _maxRetryDelay = Duration(seconds: 30);
 
-  Duration get _baseRetryDelay => _persistDebounce > _minRetryDelay ? _persistDebounce : _minRetryDelay;
+  Duration get _baseRetryDelay =>
+      _persistDebounce > _minRetryDelay ? _persistDebounce : _minRetryDelay;
 
   /// Takes everything queued, reading documents now, and hands it to the
   /// write chain.
@@ -1799,7 +2130,11 @@ final class CrdtStore {
   /// back on the queue for a retry. A broken encryptor therefore blocks
   /// persistence rather than letting plaintext through.
   void _drain() {
-    if (_persistStopped || !_hydrated || (_docQueue.isEmpty && !_pendingDirty)) return;
+    if (_persistStopped ||
+        !_hydrated ||
+        (_docQueue.isEmpty && !_pendingDirty)) {
+      return;
+    }
     final queued = _docQueue;
     _docQueue = {};
     final pendingDirty = _pendingDirty;
@@ -1810,24 +2145,36 @@ final class CrdtStore {
         for (final pk in e.value) {
           if (_quarantined.contains((e.key, pk))) continue;
           final doc = _getDoc(e.key, pk);
-          docs[(e.key, pk)] = doc == null ? null : _plugins.dispatchBeforePersist(e.key, pk, doc);
+          docs[(e.key, pk)] = doc == null
+              ? null
+              : _plugins.dispatchBeforePersist(e.key, pk, doc);
         }
       }
     } on Object catch (err) {
-      _requeue([
-        for (final e in queued.entries)
-          for (final pk in e.value) (e.key, pk),
-      ], pending: pendingDirty, cause: err);
+      _requeue(
+        [
+          for (final e in queued.entries)
+            for (final pk in e.value) (e.key, pk),
+        ],
+        pending: pendingDirty,
+        cause: err,
+      );
       return;
     }
-    final pending = pendingDirty ? List<PendingChange>.unmodifiable(_pending) : null;
+    final pending = pendingDirty
+        ? List<PendingChange>.unmodifiable(_pending)
+        : null;
     if (docs.isEmpty && pending == null) return;
     final prev = _writeTail;
-    final next = prev == null ? _writeOut(docs, pending) : prev.then((_) => _writeOut(docs, pending));
+    final next = prev == null
+        ? _writeOut(docs, pending)
+        : prev.then((_) => _writeOut(docs, pending));
     _writeTail = next;
-    unawaited(next.whenComplete(() {
-      if (identical(_writeTail, next)) _writeTail = null;
-    }));
+    unawaited(
+      next.whenComplete(() {
+        if (identical(_writeTail, next)) _writeTail = null;
+      }),
+    );
   }
 
   /// Writes one flush and requeues whatever did not reach storage. Never
@@ -1836,10 +2183,15 @@ final class CrdtStore {
   /// With plain storage the pending queue is written first, and the documents
   /// only once it is stored. A failure part way then leaves an edit queued
   /// (and still pushed) rather than saved in a document with no queue entry.
-  Future<void> _writeOut(Map<(String, String), DocumentState?> docs, List<PendingChange>? pending) async {
+  Future<void> _writeOut(
+    Map<(String, String), DocumentState?> docs,
+    List<PendingChange>? pending,
+  ) async {
     final s = _storage;
     if (s is AtomicReplicaStorage) {
-      final error = await _attempt(() => s.commit(documents: docs, pending: pending));
+      final error = await _attempt(
+        () => s.commit(documents: docs, pending: pending),
+      );
       if (error != null) {
         _requeue(docs.keys, pending: pending != null, cause: error);
       } else {
@@ -1859,7 +2211,9 @@ final class CrdtStore {
       for (final k in keys)
         _attempt(() {
           final doc = docs[k];
-          return doc == null ? s.deleteDocument(k.$1, k.$2) : s.saveDocument(k.$1, k.$2, doc);
+          return doc == null
+              ? s.deleteDocument(k.$1, k.$2)
+              : s.saveDocument(k.$1, k.$2, doc);
         }),
     ]);
     final failed = [
@@ -1869,7 +2223,11 @@ final class CrdtStore {
     if (failed.isEmpty) {
       _retryDelay = _baseRetryDelay;
     } else {
-      _requeue(failed, pending: false, cause: errors.firstWhere((e) => e != null)!);
+      _requeue(
+        failed,
+        pending: false,
+        cause: errors.firstWhere((e) => e != null)!,
+      );
     }
   }
 
@@ -1896,7 +2254,9 @@ final class CrdtStore {
   /// unavailable (see [ReplicaUnavailable]).
   Future<void> flushPersistence() async {
     final unavailable = _unavailable;
-    if (unavailable != null) throw StateError('crdt: the replica is unavailable: $unavailable');
+    if (unavailable != null) {
+      throw StateError('crdt: the replica is unavailable: $unavailable');
+    }
     if (!_hydrated) {
       // Nothing may be written before hydration; wait for it, then flush.
       try {
@@ -1945,14 +2305,20 @@ final class CrdtStore {
 
   void _checkWritable() {
     if (_disposed) throw StateError('crdt: the store is disposed');
-    if (!_hydrated && _unavailable == null) throw StateError('await store.ready before writing');
+    if (!_hydrated && _unavailable == null) {
+      throw StateError('await store.ready before writing');
+    }
     final unavailable = _unavailable;
-    if (unavailable != null) throw StateError('crdt: the replica is unavailable: $unavailable');
+    if (unavailable != null) {
+      throw StateError('crdt: the replica is unavailable: $unavailable');
+    }
   }
 
   void _checkNotQuarantined(String table, String pk) {
     if (_quarantined.contains((table, pk))) {
-      throw StateError('crdt: document $table/$pk is quarantined: its afterHydrate hook failed');
+      throw StateError(
+        'crdt: document $table/$pk is quarantined: its afterHydrate hook failed',
+      );
     }
   }
 
@@ -1974,7 +2340,8 @@ final class CrdtStore {
 
   // --- Internals ---
 
-  FieldState? _captureFieldState(String table, String pk, String field) => _getDoc(table, pk)?.fields[field];
+  FieldState? _captureFieldState(String table, String pk, String field) =>
+      _getDoc(table, pk)?.fields[field];
 
   static ChangeRecord _normalizeKeys(ChangeRecord c) {
     final t = goString(c.table);
@@ -1989,11 +2356,18 @@ final class CrdtStore {
   /// change that is not a document path delete) sets the sticky tombstone at
   /// the later of the two clocks. Anything else goes through [applyChange].
   /// [prebuilt] supplies a field state already built for a local text edit.
-  void _applyChangeInternal(ChangeRecord c, {FieldState Function(FieldState? existing)? prebuilt}) {
+  void _applyChangeInternal(
+    ChangeRecord c, {
+    FieldState Function(FieldState? existing)? prebuilt,
+  }) {
     final doc = _docOrEmpty(c.table, c.pk);
     if (_isRecordDelete(c)) {
       final at = doc.tombstone ? hlcMax(doc.tombstoneHlc, c.hlc) : c.hlc;
-      _setDocument(c.table, c.pk, doc.copyWith(tombstone: true, tombstoneHlc: at));
+      _setDocument(
+        c.table,
+        c.pk,
+        doc.copyWith(tombstone: true, tombstoneHlc: at),
+      );
       return;
     }
     final existing = doc.fields[c.field];
@@ -2002,7 +2376,9 @@ final class CrdtStore {
       next = applyChange(existing, c);
     } else {
       if (existing != null && existing.type != c.crdtType) {
-        throw CrdtApplyError('crdt: cannot apply ${c.crdtType.wire} change onto ${existing.type.wire} field');
+        throw CrdtApplyError(
+          'crdt: cannot apply ${c.crdtType.wire} change onto ${existing.type.wire} field',
+        );
       }
       next = prebuilt(existing);
     }
@@ -2015,12 +2391,14 @@ final class CrdtStore {
   // path delete only when it is a document change carrying a value
   // (`CRDTType == TypeDocument && len(Value) > 0`); every other tombstone,
   // a value-less document one included, writes a record tombstone.
-  static bool _isRecordDelete(ChangeRecord c) => c.tombstone && !(c.crdtType == CrdtType.document && c.value != null);
+  static bool _isRecordDelete(ChangeRecord c) =>
+      c.tombstone && !(c.crdtType == CrdtType.document && c.value != null);
 
   DocumentState? _getDoc(String table, String pk) => _state[table]?[pk];
 
   /// The current document, or a fresh empty one. Never inserts.
-  DocumentState _docOrEmpty(String table, String pk) => _getDoc(table, pk) ?? DocumentState(table: table, pk: pk);
+  DocumentState _docOrEmpty(String table, String pk) =>
+      _getDoc(table, pk) ?? DocumentState(table: table, pk: pk);
 
   /// Installs a new document object: the only write path into the state.
   void _setDocument(String table, String pk, DocumentState doc) {
@@ -2048,10 +2426,10 @@ final class CrdtStore {
       doc.copyWith(fields: {...doc.fields, field: fs});
 
   Map<String, Object?> _resolveDocument(DocumentState doc) => {
-        '_table': doc.table,
-        '_pk': doc.pk,
-        for (final e in doc.fields.entries) e.key: resolveFieldValue(e.value),
-      };
+    '_table': doc.table,
+    '_pk': doc.pk,
+    for (final e in doc.fields.entries) e.key: resolveFieldValue(e.value),
+  };
 
   void _emit(String table, String pk) {
     if (!_events.isClosed) _events.add((table: table, pk: pk));
@@ -2150,13 +2528,19 @@ final class BatchWriter {
 
   /// Queues [CrdtStore.insertIntoList].
   BatchWriter insertIntoList(String field, Object? value, {HLC? afterId}) {
-    _ops.add(() => _one(_store.insertIntoList(_table, _pk, field, value, afterId: afterId)));
+    _ops.add(
+      () => _one(
+        _store.insertIntoList(_table, _pk, field, value, afterId: afterId),
+      ),
+    );
     return this;
   }
 
   /// Queues [CrdtStore.setDocumentField].
   BatchWriter setDocumentField(String field, String path, Object? value) {
-    _ops.add(() => _one(_store.setDocumentField(_table, _pk, field, path, value)));
+    _ops.add(
+      () => _one(_store.setDocumentField(_table, _pk, field, path, value)),
+    );
     return this;
   }
 

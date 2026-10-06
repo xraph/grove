@@ -83,19 +83,25 @@ bool _isSurrogate(int rune) => rune >= 0xD800 && rune <= 0xDFFF;
 /// replica, so `mergeText` does not depend on argument order.
 String _goString(String s) {
   if (!s.runes.any(_isSurrogate)) return s;
-  return String.fromCharCodes([for (final r in s.runes) _isSurrogate(r) ? 0xFFFD : r]);
+  return String.fromCharCodes([
+    for (final r in s.runes) _isSurrogate(r) ? 0xFFFD : r,
+  ]);
 }
 
 /// [v] with every string, object keys included, passed through [_goString].
 Object? _goJson(Object? v) => switch (v) {
-      final String s => _goString(s),
-      final List<Object?> l => [for (final e in l) _goJson(e)],
-      final Map<Object?, Object?> m => {for (final e in m.entries) _goString(e.key! as String): _goJson(e.value)},
-      _ => v,
-    };
+  final String s => _goString(s),
+  final List<Object?> l => [for (final e in l) _goJson(e)],
+  final Map<Object?, Object?> m => {
+    for (final e in m.entries) _goString(e.key! as String): _goJson(e.value),
+  },
+  _ => v,
+};
 
-Map<String, JsonValue> _goAttrs(Map<String, JsonValue> attrs) =>
-    {for (final e in attrs.entries) _goString(e.key): JsonValue(_goJson(e.value.value))};
+Map<String, JsonValue> _goAttrs(Map<String, JsonValue> attrs) => {
+  for (final e in attrs.entries)
+    _goString(e.key): JsonValue(_goJson(e.value.value)),
+};
 
 /// The runes `[from, to)` of [s], clamped to the string, as Go `substring`.
 String _substringRunes(String s, int from, int to) {
@@ -131,7 +137,9 @@ List<TextSeg> textWalk(TextState state) {
     if (list == null) {
       children[pk] = [head.origin];
       if (!_isHeadRef(head.parent)) {
-        (anchorsByOrigin[textOriginKey(head.parent.origin)] ??= <int>[]).add(head.parent.offset);
+        (anchorsByOrigin[textOriginKey(head.parent.origin)] ??= <int>[]).add(
+          head.parent.offset,
+        );
       }
     } else {
       list.add(head.origin);
@@ -225,7 +233,8 @@ List<TextSeg> textWalk(TextState state) {
 
 // --- Reads ---
 
-bool _segVisible(TextSeg seg) => !seg.frag.tombstone && seg.frag.content.isNotEmpty;
+bool _segVisible(TextSeg seg) =>
+    !seg.frag.tombstone && seg.frag.content.isNotEmpty;
 
 /// The visible text.
 String textValue(TextState state) {
@@ -285,7 +294,8 @@ List<TextDeltaSegment> textDelta(TextState state) {
     attrsOf.add(attrs);
   }
   return [
-    for (var i = 0; i < texts.length; i++) TextDeltaSegment(texts[i].toString(), attributes: attrsOf[i]),
+    for (var i = 0; i < texts.length; i++)
+      TextDeltaSegment(texts[i].toString(), attributes: attrsOf[i]),
   ];
 }
 
@@ -313,7 +323,8 @@ int? textIndexOf(TextState state, TextRef ref) {
   if (_isHeadRef(ref)) return 0;
   var n = 0;
   for (final seg in textWalk(state)) {
-    final covers = seg.frag.origin == ref.origin &&
+    final covers =
+        seg.frag.origin == ref.origin &&
         ref.offset >= seg.frag.start + seg.from &&
         ref.offset < seg.frag.start + seg.to;
     final visible = _segVisible(seg);
@@ -360,13 +371,18 @@ void _splitAt(TextState state, String key, int at) {
 
 /// Splits fragments at every span boundary and applies [fn] to the fragments
 /// fully covered by each span.
-void _applySpans(TextState state, List<TextSpan> spans, void Function(TextFragment) fn) {
+void _applySpans(
+  TextState state,
+  List<TextSpan> spans,
+  void Function(TextFragment) fn,
+) {
   for (final span in spans) {
     final key = textOriginKey(span.origin);
     _splitAt(state, key, span.start);
     _splitAt(state, key, span.start + span.length);
     for (final f in state.frags[key] ?? const <TextFragment>[]) {
-      if (f.start >= span.start && f.start + f.length <= span.start + span.length) {
+      if (f.start >= span.start &&
+          f.start + f.length <= span.start + span.length) {
         fn(f);
       }
     }
@@ -453,7 +469,12 @@ void _applyInsert(TextState s, TextOperation op, String nodeId, HLC clock) {
 }
 
 /// Folds [op] into a copy of [s] and returns the copy, leaving [s] untouched.
-TextState applyTextOpTo(TextState s, TextOperation op, String nodeId, HLC clock) {
+TextState applyTextOpTo(
+  TextState s,
+  TextOperation op,
+  String nodeId,
+  HLC clock,
+) {
   final next = cloneTextState(s);
   applyTextOp(next, op, nodeId, clock);
   return next;
@@ -471,11 +492,17 @@ TextState cloneTextState(TextState s) => s.clone();
 /// when [ref] is unknown or the span runs past the end of the text.
 List<TextSpan> resolveTextSpans(TextState s, TextRef? ref, int length) {
   if (length <= 0) {
-    throw ArgumentError.value(length, 'length', 'crdt: text span length must be positive');
+    throw ArgumentError.value(
+      length,
+      'length',
+      'crdt: text span length must be positive',
+    );
   }
   final start = ref == null ? 0 : textIndexOf(s, ref);
   if (start == null) {
-    throw StateError('crdt: text ref ${textOriginKey(ref!.origin)}+${ref.offset} not found');
+    throw StateError(
+      'crdt: text ref ${textOriginKey(ref!.origin)}+${ref.offset} not found',
+    );
   }
 
   final spans = <TextSpan>[];
@@ -491,17 +518,23 @@ List<TextSpan> resolveTextSpans(TextState s, TextRef? ref, int length) {
     }
     final from = start > n ? start - n : 0;
     final take = width - from < remaining ? width - from : remaining;
-    spans.add(TextSpan(seg.frag.origin, seg.frag.start + seg.from + from, take));
+    spans.add(
+      TextSpan(seg.frag.origin, seg.frag.start + seg.from + from, take),
+    );
     remaining -= take;
     n += width;
   }
   if (remaining > 0) {
-    throw StateError('crdt: text span exceeds document ($remaining chars short)');
+    throw StateError(
+      'crdt: text span exceeds document ($remaining chars short)',
+    );
   }
   // Merge adjacent spans.
   final out = <TextSpan>[];
   for (final sp in spans) {
-    if (out.isNotEmpty && out.last.origin == sp.origin && sp.start == out.last.start + out.last.length) {
+    if (out.isNotEmpty &&
+        out.last.origin == sp.origin &&
+        sp.start == out.last.start + out.last.length) {
       final last = out.removeLast();
       out.add(TextSpan(last.origin, last.start, last.length + sp.length));
       continue;
@@ -517,7 +550,13 @@ List<TextSpan> resolveTextSpans(TextState s, TextRef? ref, int length) {
 /// Sequential inserts by the same node at the tail of its own span extend that
 /// span, so typing coalesces into one origin. Throws an [ArgumentError] for
 /// empty content.
-TextOperation textInsert(TextState s, TextRef? ref, String content, String nodeId, HLC clock) {
+TextOperation textInsert(
+  TextState s,
+  TextRef? ref,
+  String content,
+  String nodeId,
+  HLC clock,
+) {
   if (content.isEmpty) {
     throw ArgumentError.value(content, 'content', 'crdt: empty text insert');
   }
@@ -530,7 +569,12 @@ TextOperation textInsert(TextState s, TextRef? ref, String content, String nodeI
       origin = anchor.origin;
     }
   }
-  final op = TextOperation(TextOpType.insert, ref: anchor, content: content, origin: origin);
+  final op = TextOperation(
+    TextOpType.insert,
+    ref: anchor,
+    content: content,
+    origin: origin,
+  );
   applyTextOp(s, op, nodeId, clock);
   return op;
 }
@@ -586,7 +630,10 @@ TextFragment _subFragment(TextFragment f, int from, int to) {
 }
 
 /// Splits copies of [frags] at every cut point, keyed by start.
-Map<int, TextFragment> _normalizeFrags(List<TextFragment> frags, List<int> cuts) {
+Map<int, TextFragment> _normalizeFrags(
+  List<TextFragment> frags,
+  List<int> cuts,
+) {
   final out = <int, TextFragment>{};
   for (final f in frags) {
     final end = f.start + f.length;
@@ -614,14 +661,21 @@ TextFragment _combineFrags(TextFragment a, TextFragment b) {
   final attrs = Map<String, AttrState>.of(a.attrs);
   for (final e in b.attrs.entries) {
     final existing = attrs[e.key];
-    if (existing == null || e.value.hlc.isAfter(existing.hlc)) attrs[e.key] = e.value;
+    if (existing == null || e.value.hlc.isAfter(existing.hlc)) {
+      attrs[e.key] = e.value;
+    }
   }
   out.attrs = attrs;
   return out;
 }
 
-List<TextFragment> _mergeOriginFrags(List<TextFragment>? a, List<TextFragment>? b) {
-  if (a == null || a.isEmpty) return [for (final f in b ?? const <TextFragment>[]) f.clone()];
+List<TextFragment> _mergeOriginFrags(
+  List<TextFragment>? a,
+  List<TextFragment>? b,
+) {
+  if (a == null || a.isEmpty) {
+    return [for (final f in b ?? const <TextFragment>[]) f.clone()];
+  }
   if (b == null || b.isEmpty) return [for (final f in a) f.clone()];
 
   // Finest common partition: every boundary from both sides.
@@ -694,34 +748,48 @@ List<int> _visibleRunes(TextState s) {
 ///
 /// Throws a [StateError] when a diff position has no character, as Go returns
 /// an error.
-List<TextOperation> textSetString(TextState s, String value, String nodeId, HLC Function() nextClock) {
+List<TextOperation> textSetString(
+  TextState s,
+  String value,
+  String nodeId,
+  HLC Function() nextClock,
+) {
   final oldRunes = _visibleRunes(s);
   final newRunes = _goString(value).runes.toList();
 
   var prefix = 0;
-  while (prefix < oldRunes.length && prefix < newRunes.length && oldRunes[prefix] == newRunes[prefix]) {
+  while (prefix < oldRunes.length &&
+      prefix < newRunes.length &&
+      oldRunes[prefix] == newRunes[prefix]) {
     prefix++;
   }
   var suffix = 0;
   while (suffix < oldRunes.length - prefix &&
       suffix < newRunes.length - prefix &&
-      oldRunes[oldRunes.length - 1 - suffix] == newRunes[newRunes.length - 1 - suffix]) {
+      oldRunes[oldRunes.length - 1 - suffix] ==
+          newRunes[newRunes.length - 1 - suffix]) {
     suffix++;
   }
 
   final ops = <TextOperation>[];
   final del = oldRunes.length - prefix - suffix;
   if (del > 0) {
-    final ref = textRefAt(s, prefix) ?? (throw StateError('crdt: text diff: no char at $prefix'));
+    final ref =
+        textRefAt(s, prefix) ??
+        (throw StateError('crdt: text diff: no char at $prefix'));
     // textDeleteOp applies the delete to [s].
     ops.add(textDeleteOp(s, ref, del));
     nextClock();
   }
-  final ins = String.fromCharCodes(newRunes.sublist(prefix, newRunes.length - suffix));
+  final ins = String.fromCharCodes(
+    newRunes.sublist(prefix, newRunes.length - suffix),
+  );
   if (ins.isNotEmpty) {
     TextRef? ref;
     if (prefix > 0) {
-      ref = textRefAt(s, prefix - 1) ?? (throw StateError('crdt: text diff: no char at ${prefix - 1}'));
+      ref =
+          textRefAt(s, prefix - 1) ??
+          (throw StateError('crdt: text diff: no char at ${prefix - 1}'));
     }
     // textInsert applies the insert to [s].
     ops.add(textInsert(s, ref, ins, nodeId, nextClock()));

@@ -167,7 +167,11 @@ void main() {
       });
       test('clamps remote timestamp to maxDrift', () {
         const fixed = 1000;
-        final clock = HybridClock('node-1', maxDriftMs: 1000, nowMs: () => fixed);
+        final clock = HybridClock(
+          'node-1',
+          maxDriftMs: 1000,
+          nowMs: () => fixed,
+        );
         clock.update(h((fixed + 10000) * 1000000, 0, 'node-2'));
         expect(clock.now().ts <= BigInt.from((fixed + 1000) * 1000000), isTrue);
       });
@@ -183,19 +187,30 @@ void main() {
   group('Go wire parity', () {
     test('encodes ts as an exact decimal string', () {
       final v = HLC(BigInt.parse('1712345678901234567'), 3, 'n');
-      expect(jsonEncode(v.toJson()), '{"ts":"1712345678901234567","c":3,"node":"n"}');
+      expect(
+        jsonEncode(v.toJson()),
+        '{"ts":"1712345678901234567","c":3,"node":"n"}',
+      );
     });
     test('decodes the string form without precision loss', () {
-      final v = HLC.fromJson(jsonDecode('{"ts":"1712345678901234567","c":3,"node":"n"}'));
+      final v = HLC.fromJson(
+        jsonDecode('{"ts":"1712345678901234567","c":3,"node":"n"}'),
+      );
       expect(v.ts, BigInt.parse('1712345678901234567'));
       expect(v.c, 3);
       expect(v.node, 'n');
     });
     test('decodes the legacy numeric form', () {
-      expect(HLC.fromJson(jsonDecode('{"ts":12345,"c":0,"node":"n"}')).ts, BigInt.from(12345));
+      expect(
+        HLC.fromJson(jsonDecode('{"ts":12345,"c":0,"node":"n"}')).ts,
+        BigInt.from(12345),
+      );
     });
     test('decodes an empty ts as zero', () {
-      expect(HLC.fromJson(jsonDecode('{"ts":"","c":0,"node":""}')).isZero, isTrue);
+      expect(
+        HLC.fromJson(jsonDecode('{"ts":"","c":0,"node":""}')).isZero,
+        isTrue,
+      );
     });
     test('compares node ids by code point like Go', () {
       // Go parity: HLC.Compare compares NodeID by UTF-8 bytes, so U+FFFD sorts
@@ -210,15 +225,28 @@ void main() {
       expect(compareGoStrings('\uDC00', '\u{1F600}'), -1);
     });
     test('accepts a signed decimal ts within int64', () {
-      HLC ts(String s) => HLC.fromJson(jsonDecode('{"ts":"$s","c":0,"node":""}'));
+      HLC ts(String s) =>
+          HLC.fromJson(jsonDecode('{"ts":"$s","c":0,"node":""}'));
       expect(ts('+5').ts, BigInt.from(5));
       expect(ts('-7').ts, BigInt.from(-7));
       expect(ts('9223372036854775807').ts, BigInt.parse('9223372036854775807'));
-      expect(ts('-9223372036854775808').ts, BigInt.parse('-9223372036854775808'));
+      expect(
+        ts('-9223372036854775808').ts,
+        BigInt.parse('-9223372036854775808'),
+      );
     });
     test('rejects a ts string Go rejects', () {
       // Go parity: strconv.ParseInt(s, 10, 64).
-      for (final bad in ['0x10', ' 12 ', '1_0', '1.5', '+', '-', '9223372036854775808', '99999999999999999999']) {
+      for (final bad in [
+        '0x10',
+        ' 12 ',
+        '1_0',
+        '1.5',
+        '+',
+        '-',
+        '9223372036854775808',
+        '99999999999999999999',
+      ]) {
         expect(
           () => HLC.fromJson(jsonDecode('{"ts":"$bad","c":0,"node":""}')),
           throwsFormatException,
@@ -228,7 +256,8 @@ void main() {
     });
     test('accepts a counter in [0, 2^32) and rejects the rest', () {
       // Go parity: HLC.Counter is a uint32.
-      HLC counter(String c) => HLC.fromJson(jsonDecode('{"ts":"1","c":$c,"node":""}'));
+      HLC counter(String c) =>
+          HLC.fromJson(jsonDecode('{"ts":"1","c":$c,"node":""}'));
       expect(counter('0').c, 0);
       expect(counter('4294967295').c, 4294967295);
       for (final bad in ['-3', '2.7', '4294967296', '"3"', 'true']) {

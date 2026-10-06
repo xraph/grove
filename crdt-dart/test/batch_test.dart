@@ -37,7 +37,12 @@ void main() {
       final store = mk();
       var fired = 0;
       store.subscribeDocument('t', 'p', () => fired++);
-      store.batch('t', 'p').setField('a', 1).setField('b', 2).setField('c', 3).commit();
+      store
+          .batch('t', 'p')
+          .setField('a', 1)
+          .setField('b', 2)
+          .setField('c', 3)
+          .commit();
       expect(fired, 1);
     });
 
@@ -55,7 +60,12 @@ void main() {
 
     test('a plugin rejecting one batch write does not abort the others', () {
       final store = mk();
-      store.use(FnPlugin('gate', onBeforeWrite: (ev) => ev.field == 'blocked' ? null : ev));
+      store.use(
+        FnPlugin(
+          'gate',
+          onBeforeWrite: (ev) => ev.field == 'blocked' ? null : ev,
+        ),
+      );
       store.batch('t', 'p').setField('ok', 1).setField('blocked', 2).commit();
       final doc = store.getDocument('t', 'p');
       expect(doc?['ok'], 1);

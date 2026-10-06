@@ -8,14 +8,23 @@ HLC hlc(int ts, String node) => HLC(BigInt.from(ts), 0, node);
 typedef Typed = ({TextOperation op, HLC hlc, String node});
 
 /// Types chunks sequentially from one node.
-List<Typed> typeChunks(TextState st, String node, int startTs, List<String> chunks) {
+List<Typed> typeChunks(
+  TextState st,
+  String node,
+  int startTs,
+  List<String> chunks,
+) {
   final ops = <Typed>[];
   var ts = startTs;
   for (final chunk in chunks) {
     final len = textLength(st);
     final ref = len > 0 ? textRefAt(st, len - 1) : null;
     final clock = hlc(ts, node);
-    ops.add((op: textInsert(st, ref, chunk, node, clock), hlc: clock, node: node));
+    ops.add((
+      op: textInsert(st, ref, chunk, node, clock),
+      hlc: clock,
+      node: node,
+    ));
     ts++;
   }
   return ops;
@@ -25,7 +34,11 @@ List<Typed> typeChunks(TextState st, String node, int startTs, List<String> chun
 void expectRuneLengths(TextState st) {
   for (final frags in st.frags.values) {
     for (final f in frags) {
-      expect(f.length, f.content.runes.length, reason: 'fragment ${f.origin} start ${f.start}');
+      expect(
+        f.length,
+        f.content.runes.length,
+        reason: 'fragment ${f.origin} start ${f.start}',
+      );
     }
   }
 }
@@ -130,14 +143,17 @@ void main() {
   });
 
   group('runes, not UTF-16 units', () {
-    test('an astral character is one offset and one rune of fragment length', () {
-      final st = newTextState();
-      typeChunks(st, 'a', 1, ['😀']);
-      expect(textLength(st), 1);
-      expect(st.frags.values.single.single.length, 1);
-      expect(textRefAt(st, 0)!.offset, 0);
-      expect(textRefAt(st, 1), isNull);
-    });
+    test(
+      'an astral character is one offset and one rune of fragment length',
+      () {
+        final st = newTextState();
+        typeChunks(st, 'a', 1, ['😀']);
+        expect(textLength(st), 1);
+        expect(st.frags.values.single.single.length, 1);
+        expect(textRefAt(st, 0)!.offset, 0);
+        expect(textRefAt(st, 1), isNull);
+      },
+    );
 
     test('inserts after an astral character split at the rune offset', () {
       final st = newTextState();
@@ -174,28 +190,34 @@ void main() {
       expectRuneLengths(st);
     });
 
-    test('an anchor on a deleted astral character collapses to its position', () {
-      final st = newTextState();
-      typeChunks(st, 'a', 1, ['x😀😀y']);
-      final anchor = textRefAt(st, 2)!;
-      textDeleteOp(st, textRefAt(st, 1)!, 2);
-      expect(textValue(st), 'xy');
-      expect(textIndexOf(st, anchor), 1);
-      textInsert(st, anchor, 'Q', 'b', hlc(100, 'b'));
-      expect(textValue(st), 'xQy');
-    });
+    test(
+      'an anchor on a deleted astral character collapses to its position',
+      () {
+        final st = newTextState();
+        typeChunks(st, 'a', 1, ['x😀😀y']);
+        final anchor = textRefAt(st, 2)!;
+        textDeleteOp(st, textRefAt(st, 1)!, 2);
+        expect(textValue(st), 'xy');
+        expect(textIndexOf(st, anchor), 1);
+        textInsert(st, anchor, 'Q', 'b', hlc(100, 'b'));
+        expect(textValue(st), 'xQy');
+      },
+    );
 
     test('formats a range that starts after an astral character', () {
       final st = newTextState();
       typeChunks(st, 'a', 1, ['😀😀hello']);
       textFormat(st, textRefAt(st, 2)!, 5, {'bold': true}, 'a', hlc(50, 'a'));
-      expect([for (final d in textDelta(st)) d.toJson()], [
-        {'insert': '😀😀'},
-        {
-          'insert': 'hello',
-          'attributes': {'bold': true},
-        },
-      ]);
+      expect(
+        [for (final d in textDelta(st)) d.toJson()],
+        [
+          {'insert': '😀😀'},
+          {
+            'insert': 'hello',
+            'attributes': {'bold': true},
+          },
+        ],
+      );
       expectRuneLengths(st);
     });
 
@@ -245,7 +267,12 @@ void main() {
       final local = newTextState();
       final op = textInsert(local, null, 'a\uD83D', 'a', hlc(1, 'a'));
       final remote = newTextState();
-      applyTextOp(remote, TextOperation.fromJson(jsonDecode(encodeWire(op.toJson()))), 'a', hlc(1, 'a'));
+      applyTextOp(
+        remote,
+        TextOperation.fromJson(jsonDecode(encodeWire(op.toJson()))),
+        'a',
+        hlc(1, 'a'),
+      );
       expect(textValue(local), textValue(remote));
       expect(jsonEncode(local.toJson()), jsonEncode(remote.toJson()));
       final lr = mergeText(local, remote);
@@ -257,7 +284,16 @@ void main() {
 
     test('a lone surrogate arriving as a remote op is normalised as well', () {
       final st = newTextState();
-      applyTextOp(st, TextOperation(TextOpType.insert, content: '\uDE00z', origin: hlc(1, 'a')), 'a', hlc(1, 'a'));
+      applyTextOp(
+        st,
+        TextOperation(
+          TextOpType.insert,
+          content: '\uDE00z',
+          origin: hlc(1, 'a'),
+        ),
+        'a',
+        hlc(1, 'a'),
+      );
       expect(textValue(st), '\uFFFDz');
       expect(st.frags.values.single.single.length, 2);
     });
@@ -265,7 +301,14 @@ void main() {
     test('a lone surrogate in an attribute value is normalised', () {
       final st = newTextState();
       typeChunks(st, 'a', 1, ['hi']);
-      textFormat(st, textRefAt(st, 0)!, 2, {'k\uD83D': 'v\uD83D'}, 'a', hlc(5, 'a'));
+      textFormat(
+        st,
+        textRefAt(st, 0)!,
+        2,
+        {'k\uD83D': 'v\uD83D'},
+        'a',
+        hlc(5, 'a'),
+      );
       expect(textDelta(st).single.attributes, {'k\uFFFD': 'v\uFFFD'});
     });
 
@@ -285,13 +328,23 @@ void main() {
     test('is iterative: a long chain of anchored origins does not overflow the stack', () {
       const n = 50000;
       final st = newTextState();
-      applyTextOp(st, TextOperation(TextOpType.insert, content: 'x', origin: hlc(1, 'n0')), 'n0', hlc(1, 'n0'));
+      applyTextOp(
+        st,
+        TextOperation(TextOpType.insert, content: 'x', origin: hlc(1, 'n0')),
+        'n0',
+        hlc(1, 'n0'),
+      );
       for (var i = 1; i < n; i++) {
         final parent = hlc(i, 'n${i - 1}');
         final clock = hlc(i + 1, 'n$i');
         applyTextOp(
           st,
-          TextOperation(TextOpType.insert, ref: TextRef(parent, 0), content: 'x', origin: clock),
+          TextOperation(
+            TextOpType.insert,
+            ref: TextRef(parent, 0),
+            content: 'x',
+            origin: clock,
+          ),
           'n$i',
           clock,
         );
@@ -299,21 +352,29 @@ void main() {
       expect(textLength(st), n);
     });
 
-    test('orders siblings newest first and places a parent continuation last', () {
-      final st = newTextState();
-      typeChunks(st, 'a', 1, ['ab']);
-      final ref = textRefAt(st, 0)!;
-      textInsert(st, ref, '1', 'x', hlc(10, 'x'));
-      textInsert(st, ref, '2', 'y', hlc(20, 'y'));
-      textInsert(st, ref, '3', 'z', hlc(15, 'z'));
-      expect(textValue(st), 'a231b');
-    });
+    test(
+      'orders siblings newest first and places a parent continuation last',
+      () {
+        final st = newTextState();
+        typeChunks(st, 'a', 1, ['ab']);
+        final ref = textRefAt(st, 0)!;
+        textInsert(st, ref, '1', 'x', hlc(10, 'x'));
+        textInsert(st, ref, '2', 'y', hlc(20, 'y'));
+        textInsert(st, ref, '3', 'z', hlc(15, 'z'));
+        expect(textValue(st), 'a231b');
+      },
+    );
 
     test('places an origin whose anchor character has not arrived after its parent head', () {
       final st = newTextState();
       applyTextOp(
         st,
-        TextOperation(TextOpType.insert, ref: TextRef(hlc(1, 'a'), 3), content: 'late', origin: hlc(5, 'b')),
+        TextOperation(
+          TextOpType.insert,
+          ref: TextRef(hlc(1, 'a'), 3),
+          content: 'late',
+          origin: hlc(5, 'b'),
+        ),
         'b',
         hlc(5, 'b'),
       );
@@ -337,7 +398,12 @@ void main() {
 
     test('an insert without content is an error, as Go returns one', () {
       expect(
-        () => applyTextOp(newTextState(), TextOperation(TextOpType.insert), 'a', hlc(1, 'a')),
+        () => applyTextOp(
+          newTextState(),
+          TextOperation(TextOpType.insert),
+          'a',
+          hlc(1, 'a'),
+        ),
         throwsStateError,
       );
     });
@@ -353,7 +419,12 @@ void main() {
     test('applyTextOpTo leaves the input untouched', () {
       final st = newTextState();
       typeChunks(st, 'a', 1, ['hello']);
-      final op = TextOperation(TextOpType.insert, ref: textRefAt(st, 4), content: '!', origin: hlc(2, 'b'));
+      final op = TextOperation(
+        TextOpType.insert,
+        ref: textRefAt(st, 4),
+        content: '!',
+        origin: hlc(2, 'b'),
+      );
       final next = applyTextOpTo(st, op, 'b', hlc(2, 'b'));
       expect(textValue(st), 'hello');
       expect(textValue(next), 'hello!');
@@ -368,27 +439,41 @@ void main() {
       expect(textValue(st), '');
     });
 
-    test('mergeText with a missing side returns the other, or an empty state', () {
-      final st = newTextState();
-      typeChunks(st, 'a', 1, ['hi']);
-      expect(textValue(mergeText(st, null)), 'hi');
-      expect(textValue(mergeText(null, st)), 'hi');
-      expect(textValue(mergeText(null, null)), '');
-    });
+    test(
+      'mergeText with a missing side returns the other, or an empty state',
+      () {
+        final st = newTextState();
+        typeChunks(st, 'a', 1, ['hi']);
+        expect(textValue(mergeText(st, null)), 'hi');
+        expect(textValue(mergeText(null, st)), 'hi');
+        expect(textValue(mergeText(null, null)), '');
+      },
+    );
 
     test('argument errors', () {
       final st = newTextState();
       typeChunks(st, 'a', 1, ['hi']);
-      expect(() => textInsert(st, null, '', 'a', hlc(9, 'a')), throwsArgumentError);
-      expect(() => textFormat(st, null, 1, {}, 'a', hlc(9, 'a')), throwsArgumentError);
+      expect(
+        () => textInsert(st, null, '', 'a', hlc(9, 'a')),
+        throwsArgumentError,
+      );
+      expect(
+        () => textFormat(st, null, 1, {}, 'a', hlc(9, 'a')),
+        throwsArgumentError,
+      );
       expect(() => resolveTextSpans(st, null, 0), throwsArgumentError);
       expect(() => resolveTextSpans(st, null, 3), throwsStateError);
-      expect(() => resolveTextSpans(st, TextRef(hlc(77, 'q'), 0), 1), throwsStateError);
+      expect(
+        () => resolveTextSpans(st, TextRef(hlc(77, 'q'), 0), 1),
+        throwsStateError,
+      );
     });
 
     test('TextDeltaSegment writes attributes only when there are some', () {
       expect(const TextDeltaSegment('a').toJson(), {'insert': 'a'});
-      expect(const TextDeltaSegment('a', attributes: {}).toJson(), {'insert': 'a'});
+      expect(const TextDeltaSegment('a', attributes: {}).toJson(), {
+        'insert': 'a',
+      });
       expect(const TextDeltaSegment('a', attributes: {'b': 1}).toJson(), {
         'insert': 'a',
         'attributes': {'b': 1},

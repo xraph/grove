@@ -2,13 +2,16 @@
 import 'package:grove_crdt/grove_crdt.dart';
 import 'package:test/test.dart';
 
-CrdtStore mkStore({int maxPendingChanges = 10000, bool throwOnOverflow = false}) => CrdtStore(
-      'n1',
-      HybridClock('n1'),
-      persistDebounce: Duration.zero,
-      maxPendingChanges: maxPendingChanges,
-      throwOnOverflow: throwOnOverflow,
-    );
+CrdtStore mkStore({
+  int maxPendingChanges = 10000,
+  bool throwOnOverflow = false,
+}) => CrdtStore(
+  'n1',
+  HybridClock('n1'),
+  persistDebounce: Duration.zero,
+  maxPendingChanges: maxPendingChanges,
+  throwOnOverflow: throwOnOverflow,
+);
 
 void main() {
   group('offline queue', () {
@@ -42,7 +45,10 @@ void main() {
       store.setField('t', 'p', 'a', 1);
       store.setField('t', 'p', 'b', 2);
       final before = store.clock.last;
-      expect(() => store.setField('t', 'p', 'c', 3), throwsA(isA<PendingQueueFullError>()));
+      expect(
+        () => store.setField('t', 'p', 'c', 3),
+        throwsA(isA<PendingQueueFullError>()),
+      );
       // No clock was consumed by the refused write.
       expect(store.clock.last, before);
       // The rejected change must not be left half-queued.
@@ -79,8 +85,14 @@ void main() {
       final a = store.setField('t', 'p', 'a', 1)!;
       final b = store.setField('t', 'p', 'b', 1)!;
       store.setField('t', 'p', 'c', 1);
-      store.markRejected(pendingKey(a), const PendingRejection(kind: 'hook', reason: 'no'));
-      store.markRejected(pendingKey(b), const PendingRejection(kind: 'hook', reason: 'no'));
+      store.markRejected(
+        pendingKey(a),
+        const PendingRejection(kind: 'hook', reason: 'no'),
+      );
+      store.markRejected(
+        pendingKey(b),
+        const PendingRejection(kind: 'hook', reason: 'no'),
+      );
       store.setField('t', 'p', 'd', 1); // evicts c, the oldest pushable
       expect(dropped.map((c) => c.field), ['c']);
       store.setField('t', 'p', 'e', 1); // d is pushable and older than e
@@ -90,27 +102,36 @@ void main() {
       expect(store.pendingCount, 1);
     });
 
-    test('with only rejected changes left, the oldest rejected one is evicted', () {
-      final store = mkStore(maxPendingChanges: 2);
-      final dropped = <ChangeRecord>[];
-      store.onPendingOverflow(dropped.addAll);
-      for (final f in ['a', 'b']) {
-        store.markRejected(pendingKey(store.setField('t', 'p', f, 1)!), const PendingRejection(kind: 'hook', reason: 'no'));
-      }
-      store.setField('t', 'p', 'c', 1);
-      expect(dropped.map((c) => c.field), ['a']);
-      expect(store.pending.map((p) => p.change.field), ['b', 'c']);
-    });
+    test(
+      'with only rejected changes left, the oldest rejected one is evicted',
+      () {
+        final store = mkStore(maxPendingChanges: 2);
+        final dropped = <ChangeRecord>[];
+        store.onPendingOverflow(dropped.addAll);
+        for (final f in ['a', 'b']) {
+          store.markRejected(
+            pendingKey(store.setField('t', 'p', f, 1)!),
+            const PendingRejection(kind: 'hook', reason: 'no'),
+          );
+        }
+        store.setField('t', 'p', 'c', 1);
+        expect(dropped.map((c) => c.field), ['a']);
+        expect(store.pending.map((p) => p.change.field), ['b', 'c']);
+      },
+    );
 
-    test('onPendingOverflow returns a function that unregisters the handler', () {
-      final store = mkStore(maxPendingChanges: 1);
-      var calls = 0;
-      final off = store.onPendingOverflow((_) => calls++);
-      store.setField('t', 'p', 'a', 1);
-      store.setField('t', 'p', 'b', 1);
-      off();
-      store.setField('t', 'p', 'c', 1);
-      expect(calls, 1);
-    });
+    test(
+      'onPendingOverflow returns a function that unregisters the handler',
+      () {
+        final store = mkStore(maxPendingChanges: 1);
+        var calls = 0;
+        final off = store.onPendingOverflow((_) => calls++);
+        store.setField('t', 'p', 'a', 1);
+        store.setField('t', 'p', 'b', 1);
+        off();
+        store.setField('t', 'p', 'c', 1);
+        expect(calls, 1);
+      },
+    );
   });
 }

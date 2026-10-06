@@ -9,9 +9,12 @@ void main() {
     test('escapes U+2028 and U+2029', () {
       expect(goMarshal('\u2028\u2029'), r'"\u2028\u2029"');
     });
-    test('uses short escapes for quote, backslash, newline, return and tab', () {
-      expect(goMarshal('l\nb\tt"q\\r\r'), r'"l\nb\tt\"q\\r\r"');
-    });
+    test(
+      'uses short escapes for quote, backslash, newline, return and tab',
+      () {
+        expect(goMarshal('l\nb\tt"q\\r\r'), r'"l\nb\tt\"q\\r\r"');
+      },
+    );
     test('escapes other control characters as lowercase u00XX', () {
       expect(goMarshal('\u0001\u001f'), r'"\u0001\u001f"');
     });
@@ -35,8 +38,18 @@ void main() {
     });
     test('orders a key holding a lone surrogate as U+FFFD, like Go', () {
       // Go parity: encoding/json sorts keys after decoding \ud800 to U+FFFD.
-      final keys = <String>['z', '\u00e9', '\ue000', '\uff00', '\uD800', '\uffff', '\u{1F600}'];
-      final m = <String, Object?>{for (var i = 0; i < keys.length; i++) keys[i]: i + 1};
+      final keys = <String>[
+        'z',
+        '\u00e9',
+        '\ue000',
+        '\uff00',
+        '\uD800',
+        '\uffff',
+        '\u{1F600}',
+      ];
+      final m = <String, Object?>{
+        for (var i = 0; i < keys.length; i++) keys[i]: i + 1,
+      };
       expect(
         goMarshal(m),
         '{"z":1,"\u00e9":2,"\ue000":3,"\uff00":4,"\u{FFFD}":5,"\uffff":6,"\u{1F600}":7}',
@@ -48,7 +61,11 @@ void main() {
     });
     test('encodes nested values', () {
       expect(
-        goMarshal({'b': 1, 'a': [true, false, null], 'c': {'z': '', 'y': 0}}),
+        goMarshal({
+          'b': 1,
+          'a': [true, false, null],
+          'c': {'z': '', 'y': 0},
+        }),
         '{"a":[true,false,null],"b":1,"c":{"y":0,"z":""}}',
       );
     });
@@ -70,7 +87,10 @@ void main() {
       expect(goMarshal({'x': const RawJson('{"k":1}')}), '{"x":{"k":1}}');
     });
     test('encodes BigInt as decimal', () {
-      expect(goMarshal(BigInt.parse('1712345678901234567')), '1712345678901234567');
+      expect(
+        goMarshal(BigInt.parse('1712345678901234567')),
+        '1712345678901234567',
+      );
     });
     test('rejects NaN', () {
       expect(() => goMarshal(double.nan), throwsUnsupportedError);
@@ -101,13 +121,29 @@ void main() {
   });
 
   test('jsonDeepEquals treats 1 and 1.0 as equal', () {
-    expect(jsonDeepEquals({'a': [1]}, {'a': [1.0]}), isTrue);
+    expect(
+      jsonDeepEquals(
+        {
+          'a': [1],
+        },
+        {
+          'a': [1.0],
+        },
+      ),
+      isTrue,
+    );
     expect(jsonDeepEquals({'a': 1}, {'a': 2}), isFalse);
   });
 
   test('formatRfc3339Nano matches Go time.Time JSON', () {
-    expect(formatRfc3339Nano(DateTime.utc(2026, 10, 4, 12)), '2026-10-04T12:00:00Z');
-    expect(formatRfc3339Nano(DateTime.utc(2026, 10, 4, 12, 0, 0, 120)), '2026-10-04T12:00:00.12Z');
+    expect(
+      formatRfc3339Nano(DateTime.utc(2026, 10, 4, 12)),
+      '2026-10-04T12:00:00Z',
+    );
+    expect(
+      formatRfc3339Nano(DateTime.utc(2026, 10, 4, 12, 0, 0, 120)),
+      '2026-10-04T12:00:00.12Z',
+    );
   });
 
   group('goString and goJsonCopy', () {
@@ -119,9 +155,19 @@ void main() {
 
     test('goJsonCopy deep-copies, normalizes strings and keys, and refuses non-JSON', () {
       final inner = <Object?>['x\ud800'];
-      final src = <String, Object?>{'k\udc00': inner, 'n': 1.5, 'b': true, 'z': null};
+      final src = <String, Object?>{
+        'k\udc00': inner,
+        'n': 1.5,
+        'b': true,
+        'z': null,
+      };
       final copy = goJsonCopy(src)! as Map<String, Object?>;
-      expect(copy, {'k�': ['x�'], 'n': 1.5, 'b': true, 'z': null});
+      expect(copy, {
+        'k�': ['x�'],
+        'n': 1.5,
+        'b': true,
+        'z': null,
+      });
       inner.add('later');
       expect(copy['k�'], ['x�']);
       expect(goJsonCopy({'a\ud800': 1, 'a\udc00': 2}), {'a�': 2});
