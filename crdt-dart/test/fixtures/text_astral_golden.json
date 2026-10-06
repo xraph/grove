@@ -1,0 +1,2077 @@
+{
+  "cases": [
+    {
+      "name": "astral_insert_split",
+      "records": [
+        {
+          "node_id": "a",
+          "hlc": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "op": {
+            "op": "insert",
+            "ref": {
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "offset": 0
+            },
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "content": "a😀b🌍c"
+          }
+        },
+        {
+          "node_id": "b",
+          "hlc": {
+            "ts": "100",
+            "c": 0,
+            "node": "b"
+          },
+          "op": {
+            "op": "insert",
+            "ref": {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "offset": 2
+            },
+            "origin": {
+              "ts": "100",
+              "c": 0,
+              "node": "b"
+            },
+            "content": "X"
+          }
+        },
+        {
+          "node_id": "c",
+          "hlc": {
+            "ts": "101",
+            "c": 0,
+            "node": "c"
+          },
+          "op": {
+            "op": "insert",
+            "ref": {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "offset": 0
+            },
+            "origin": {
+              "ts": "101",
+              "c": 0,
+              "node": "c"
+            },
+            "content": "Y"
+          }
+        },
+        {
+          "node_id": "a",
+          "hlc": {
+            "ts": "102",
+            "c": 0,
+            "node": "a"
+          },
+          "op": {
+            "op": "insert",
+            "ref": {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "offset": 4
+            },
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "content": "😀"
+          }
+        }
+      ],
+      "expected_value": "aY😀bX🌍c😀",
+      "expected_len": 8,
+      "expected_delta": [
+        {
+          "insert": "aY😀bX🌍c😀"
+        }
+      ],
+      "ref_at": [
+        {
+          "origin": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "offset": 0
+        },
+        {
+          "origin": {
+            "ts": "101",
+            "c": 0,
+            "node": "c"
+          },
+          "offset": 0
+        },
+        {
+          "origin": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "offset": 1
+        },
+        {
+          "origin": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "offset": 2
+        },
+        {
+          "origin": {
+            "ts": "100",
+            "c": 0,
+            "node": "b"
+          },
+          "offset": 0
+        },
+        {
+          "origin": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "offset": 3
+        },
+        {
+          "origin": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "offset": 4
+        },
+        {
+          "origin": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "offset": 5
+        }
+      ],
+      "index_of": [
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 0
+          },
+          "index": 0
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 1
+          },
+          "index": 2
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 2
+          },
+          "index": 3
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 3
+          },
+          "index": 5
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 4
+          },
+          "index": 6
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 5
+          },
+          "index": 7
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "100",
+              "c": 0,
+              "node": "b"
+            },
+            "offset": 0
+          },
+          "index": 4
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "101",
+              "c": 0,
+              "node": "c"
+            },
+            "offset": 0
+          },
+          "index": 1
+        }
+      ],
+      "final_state": {
+        "frags": {
+          "HLC{ts:1 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "a😀b🌍c😀",
+              "length": 6,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              }
+            }
+          ],
+          "HLC{ts:100 c:0 node:b}": [
+            {
+              "origin": {
+                "ts": "100",
+                "c": 0,
+                "node": "b"
+              },
+              "start": 0,
+              "content": "X",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                },
+                "offset": 2
+              }
+            }
+          ],
+          "HLC{ts:101 c:0 node:c}": [
+            {
+              "origin": {
+                "ts": "101",
+                "c": 0,
+                "node": "c"
+              },
+              "start": 0,
+              "content": "Y",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                },
+                "offset": 0
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "astral_typing_coalesces",
+      "records": [
+        {
+          "node_id": "a",
+          "hlc": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "op": {
+            "op": "insert",
+            "ref": {
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "offset": 0
+            },
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "content": "😀"
+          }
+        },
+        {
+          "node_id": "a",
+          "hlc": {
+            "ts": "2",
+            "c": 0,
+            "node": "a"
+          },
+          "op": {
+            "op": "insert",
+            "ref": {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "offset": 0
+            },
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "content": "🌍"
+          }
+        },
+        {
+          "node_id": "a",
+          "hlc": {
+            "ts": "3",
+            "c": 0,
+            "node": "a"
+          },
+          "op": {
+            "op": "insert",
+            "ref": {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "offset": 1
+            },
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "content": "a😀"
+          }
+        },
+        {
+          "node_id": "a",
+          "hlc": {
+            "ts": "4",
+            "c": 0,
+            "node": "a"
+          },
+          "op": {
+            "op": "insert",
+            "ref": {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "offset": 3
+            },
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "content": "b"
+          }
+        },
+        {
+          "node_id": "a",
+          "hlc": {
+            "ts": "5",
+            "c": 0,
+            "node": "a"
+          },
+          "op": {
+            "op": "delete",
+            "ref": {
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "offset": 0
+            },
+            "origin": {
+              "ts": "0",
+              "c": 0,
+              "node": ""
+            },
+            "spans": [
+              {
+                "origin": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                },
+                "start": 1,
+                "length": 2
+              }
+            ]
+          }
+        }
+      ],
+      "expected_value": "😀😀b",
+      "expected_len": 3,
+      "expected_delta": [
+        {
+          "insert": "😀😀b"
+        }
+      ],
+      "ref_at": [
+        {
+          "origin": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "offset": 0
+        },
+        {
+          "origin": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "offset": 3
+        },
+        {
+          "origin": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "offset": 4
+        }
+      ],
+      "index_of": [
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 0
+          },
+          "index": 0
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 1
+          },
+          "index": 1
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 2
+          },
+          "index": 1
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 3
+          },
+          "index": 1
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 4
+          },
+          "index": 2
+        }
+      ],
+      "final_state": {
+        "frags": {
+          "HLC{ts:1 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "😀",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              }
+            },
+            {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 1,
+              "content": "🌍a",
+              "length": 2,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "tombstone": true
+            },
+            {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 3,
+              "content": "😀b",
+              "length": 2,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "astral_delete_format_anchor",
+      "records": [
+        {
+          "node_id": "a",
+          "hlc": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "op": {
+            "op": "insert",
+            "ref": {
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "offset": 0
+            },
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "content": "x😀😀y🌍z"
+          }
+        },
+        {
+          "node_id": "a",
+          "hlc": {
+            "ts": "2",
+            "c": 0,
+            "node": "a"
+          },
+          "op": {
+            "op": "delete",
+            "ref": {
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "offset": 0
+            },
+            "origin": {
+              "ts": "0",
+              "c": 0,
+              "node": ""
+            },
+            "spans": [
+              {
+                "origin": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                },
+                "start": 1,
+                "length": 3
+              }
+            ]
+          }
+        },
+        {
+          "node_id": "b",
+          "hlc": {
+            "ts": "200",
+            "c": 0,
+            "node": "b"
+          },
+          "op": {
+            "op": "insert",
+            "ref": {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "offset": 2
+            },
+            "origin": {
+              "ts": "200",
+              "c": 0,
+              "node": "b"
+            },
+            "content": "Q"
+          }
+        },
+        {
+          "node_id": "c",
+          "hlc": {
+            "ts": "300",
+            "c": 0,
+            "node": "c"
+          },
+          "op": {
+            "op": "format",
+            "ref": {
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "offset": 0
+            },
+            "origin": {
+              "ts": "0",
+              "c": 0,
+              "node": ""
+            },
+            "spans": [
+              {
+                "origin": {
+                  "ts": "200",
+                  "c": 0,
+                  "node": "b"
+                },
+                "start": 0,
+                "length": 1
+              },
+              {
+                "origin": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                },
+                "start": 4,
+                "length": 1
+              }
+            ],
+            "attrs": {
+              "italic": true
+            }
+          }
+        },
+        {
+          "node_id": "c",
+          "hlc": {
+            "ts": "301",
+            "c": 0,
+            "node": "c"
+          },
+          "op": {
+            "op": "format",
+            "ref": {
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "offset": 0
+            },
+            "origin": {
+              "ts": "0",
+              "c": 0,
+              "node": ""
+            },
+            "spans": [
+              {
+                "origin": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                },
+                "start": 0,
+                "length": 1
+              }
+            ],
+            "attrs": {
+              "italic": null
+            }
+          }
+        }
+      ],
+      "expected_value": "xQ🌍z",
+      "expected_len": 4,
+      "expected_delta": [
+        {
+          "insert": "x"
+        },
+        {
+          "insert": "Q🌍",
+          "attributes": {
+            "italic": true
+          }
+        },
+        {
+          "insert": "z"
+        }
+      ],
+      "ref_at": [
+        {
+          "origin": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "offset": 0
+        },
+        {
+          "origin": {
+            "ts": "200",
+            "c": 0,
+            "node": "b"
+          },
+          "offset": 0
+        },
+        {
+          "origin": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "offset": 4
+        },
+        {
+          "origin": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "offset": 5
+        }
+      ],
+      "index_of": [
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 0
+          },
+          "index": 0
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 1
+          },
+          "index": 1
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 2
+          },
+          "index": 1
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 3
+          },
+          "index": 2
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 4
+          },
+          "index": 2
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 5
+          },
+          "index": 3
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "200",
+              "c": 0,
+              "node": "b"
+            },
+            "offset": 0
+          },
+          "index": 1
+        }
+      ],
+      "final_state": {
+        "frags": {
+          "HLC{ts:1 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "x",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "attrs": {
+                "italic": {
+                  "value": null,
+                  "hlc": {
+                    "ts": "301",
+                    "c": 0,
+                    "node": "c"
+                  },
+                  "node_id": "c"
+                }
+              }
+            },
+            {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 1,
+              "content": "😀😀y",
+              "length": 3,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "tombstone": true
+            },
+            {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 4,
+              "content": "🌍",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "attrs": {
+                "italic": {
+                  "value": true,
+                  "hlc": {
+                    "ts": "300",
+                    "c": 0,
+                    "node": "c"
+                  },
+                  "node_id": "c"
+                }
+              }
+            },
+            {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 5,
+              "content": "z",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              }
+            }
+          ],
+          "HLC{ts:200 c:0 node:b}": [
+            {
+              "origin": {
+                "ts": "200",
+                "c": 0,
+                "node": "b"
+              },
+              "start": 0,
+              "content": "Q",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                },
+                "offset": 2
+              },
+              "attrs": {
+                "italic": {
+                  "value": true,
+                  "hlc": {
+                    "ts": "300",
+                    "c": 0,
+                    "node": "c"
+                  },
+                  "node_id": "c"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "astral_concurrent_after_emoji",
+      "records": [
+        {
+          "node_id": "a",
+          "hlc": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "op": {
+            "op": "insert",
+            "ref": {
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "offset": 0
+            },
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "content": "😀😀"
+          }
+        },
+        {
+          "node_id": "n1",
+          "hlc": {
+            "ts": "100",
+            "c": 0,
+            "node": "n1"
+          },
+          "op": {
+            "op": "insert",
+            "ref": {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "offset": 0
+            },
+            "origin": {
+              "ts": "100",
+              "c": 0,
+              "node": "n1"
+            },
+            "content": "X"
+          }
+        },
+        {
+          "node_id": "n2",
+          "hlc": {
+            "ts": "101",
+            "c": 0,
+            "node": "n2"
+          },
+          "op": {
+            "op": "insert",
+            "ref": {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "offset": 0
+            },
+            "origin": {
+              "ts": "101",
+              "c": 0,
+              "node": "n2"
+            },
+            "content": "Y"
+          }
+        }
+      ],
+      "expected_value": "😀YX😀",
+      "expected_len": 4,
+      "expected_delta": [
+        {
+          "insert": "😀YX😀"
+        }
+      ],
+      "ref_at": [
+        {
+          "origin": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "offset": 0
+        },
+        {
+          "origin": {
+            "ts": "101",
+            "c": 0,
+            "node": "n2"
+          },
+          "offset": 0
+        },
+        {
+          "origin": {
+            "ts": "100",
+            "c": 0,
+            "node": "n1"
+          },
+          "offset": 0
+        },
+        {
+          "origin": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "offset": 1
+        }
+      ],
+      "index_of": [
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 0
+          },
+          "index": 0
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "offset": 1
+          },
+          "index": 3
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "100",
+              "c": 0,
+              "node": "n1"
+            },
+            "offset": 0
+          },
+          "index": 2
+        },
+        {
+          "ref": {
+            "origin": {
+              "ts": "101",
+              "c": 0,
+              "node": "n2"
+            },
+            "offset": 0
+          },
+          "index": 1
+        }
+      ],
+      "final_state": {
+        "frags": {
+          "HLC{ts:1 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "😀😀",
+              "length": 2,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              }
+            }
+          ],
+          "HLC{ts:100 c:0 node:n1}": [
+            {
+              "origin": {
+                "ts": "100",
+                "c": 0,
+                "node": "n1"
+              },
+              "start": 0,
+              "content": "X",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                },
+                "offset": 0
+              }
+            }
+          ],
+          "HLC{ts:101 c:0 node:n2}": [
+            {
+              "origin": {
+                "ts": "101",
+                "c": 0,
+                "node": "n2"
+              },
+              "start": 0,
+              "content": "Y",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                },
+                "offset": 0
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "set_string": [
+    {
+      "name": "set_string_astral_insert",
+      "setup": [
+        {
+          "node_id": "a",
+          "hlc": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "op": {
+            "op": "insert",
+            "ref": {
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "offset": 0
+            },
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "content": "a😀b"
+          }
+        }
+      ],
+      "steps": [
+        {
+          "value": "a😀😀b",
+          "node_id": "a",
+          "clocks": [
+            {
+              "ts": "10",
+              "c": 0,
+              "node": "a"
+            }
+          ],
+          "ops": [
+            {
+              "op": "insert",
+              "ref": {
+                "origin": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                },
+                "offset": 1
+              },
+              "origin": {
+                "ts": "10",
+                "c": 0,
+                "node": "a"
+              },
+              "content": "😀"
+            }
+          ]
+        },
+        {
+          "value": "a😀😀b!",
+          "node_id": "a",
+          "clocks": [
+            {
+              "ts": "20",
+              "c": 0,
+              "node": "a"
+            }
+          ],
+          "ops": [
+            {
+              "op": "insert",
+              "ref": {
+                "origin": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                },
+                "offset": 2
+              },
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "content": "!"
+            }
+          ]
+        },
+        {
+          "value": "😀a😀😀b!",
+          "node_id": "a",
+          "clocks": [
+            {
+              "ts": "30",
+              "c": 0,
+              "node": "a"
+            }
+          ],
+          "ops": [
+            {
+              "op": "insert",
+              "ref": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "origin": {
+                "ts": "30",
+                "c": 0,
+                "node": "a"
+              },
+              "content": "😀"
+            }
+          ]
+        }
+      ],
+      "expected_value": "😀a😀😀b!",
+      "final_state": {
+        "frags": {
+          "HLC{ts:1 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "a😀b!",
+              "length": 4,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              }
+            }
+          ],
+          "HLC{ts:10 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": "10",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "😀",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                },
+                "offset": 1
+              }
+            }
+          ],
+          "HLC{ts:30 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": "30",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "😀",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "set_string_astral_replace",
+      "setup": [
+        {
+          "node_id": "a",
+          "hlc": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "op": {
+            "op": "insert",
+            "ref": {
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "offset": 0
+            },
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "content": "a😀😀b"
+          }
+        }
+      ],
+      "steps": [
+        {
+          "value": "a🌍b",
+          "node_id": "a",
+          "clocks": [
+            {
+              "ts": "9",
+              "c": 0,
+              "node": "a"
+            },
+            {
+              "ts": "10",
+              "c": 0,
+              "node": "a"
+            }
+          ],
+          "ops": [
+            {
+              "op": "delete",
+              "ref": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "spans": [
+                {
+                  "origin": {
+                    "ts": "1",
+                    "c": 0,
+                    "node": "a"
+                  },
+                  "start": 1,
+                  "length": 2
+                }
+              ]
+            },
+            {
+              "op": "insert",
+              "ref": {
+                "origin": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                },
+                "offset": 0
+              },
+              "origin": {
+                "ts": "10",
+                "c": 0,
+                "node": "a"
+              },
+              "content": "🌍"
+            }
+          ]
+        },
+        {
+          "value": "a🌍",
+          "node_id": "a",
+          "clocks": [
+            {
+              "ts": "19",
+              "c": 0,
+              "node": "a"
+            }
+          ],
+          "ops": [
+            {
+              "op": "delete",
+              "ref": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "spans": [
+                {
+                  "origin": {
+                    "ts": "1",
+                    "c": 0,
+                    "node": "a"
+                  },
+                  "start": 3,
+                  "length": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "value": "🌍",
+          "node_id": "a",
+          "clocks": [
+            {
+              "ts": "29",
+              "c": 0,
+              "node": "a"
+            }
+          ],
+          "ops": [
+            {
+              "op": "delete",
+              "ref": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "spans": [
+                {
+                  "origin": {
+                    "ts": "1",
+                    "c": 0,
+                    "node": "a"
+                  },
+                  "start": 0,
+                  "length": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "value": "",
+          "node_id": "a",
+          "clocks": [
+            {
+              "ts": "39",
+              "c": 0,
+              "node": "a"
+            }
+          ],
+          "ops": [
+            {
+              "op": "delete",
+              "ref": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "spans": [
+                {
+                  "origin": {
+                    "ts": "10",
+                    "c": 0,
+                    "node": "a"
+                  },
+                  "start": 0,
+                  "length": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "value": "😀",
+          "node_id": "a",
+          "clocks": [
+            {
+              "ts": "50",
+              "c": 0,
+              "node": "a"
+            }
+          ],
+          "ops": [
+            {
+              "op": "insert",
+              "ref": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "origin": {
+                "ts": "50",
+                "c": 0,
+                "node": "a"
+              },
+              "content": "😀"
+            }
+          ]
+        }
+      ],
+      "expected_value": "😀",
+      "final_state": {
+        "frags": {
+          "HLC{ts:1 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "a",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "tombstone": true
+            },
+            {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 1,
+              "content": "😀😀",
+              "length": 2,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "tombstone": true
+            },
+            {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 3,
+              "content": "b",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "tombstone": true
+            }
+          ],
+          "HLC{ts:10 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": "10",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "🌍",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                },
+                "offset": 0
+              },
+              "tombstone": true
+            }
+          ],
+          "HLC{ts:50 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": "50",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "😀",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "set_string_mixed",
+      "setup": [
+        {
+          "node_id": "a",
+          "hlc": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "op": {
+            "op": "insert",
+            "ref": {
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "offset": 0
+            },
+            "origin": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "content": "héllo🌍 world"
+          }
+        }
+      ],
+      "steps": [
+        {
+          "value": "héllo🌍 there 😀",
+          "node_id": "a",
+          "clocks": [
+            {
+              "ts": "9",
+              "c": 0,
+              "node": "a"
+            },
+            {
+              "ts": "10",
+              "c": 0,
+              "node": "a"
+            }
+          ],
+          "ops": [
+            {
+              "op": "delete",
+              "ref": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "spans": [
+                {
+                  "origin": {
+                    "ts": "1",
+                    "c": 0,
+                    "node": "a"
+                  },
+                  "start": 7,
+                  "length": 5
+                }
+              ]
+            },
+            {
+              "op": "insert",
+              "ref": {
+                "origin": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                },
+                "offset": 6
+              },
+              "origin": {
+                "ts": "10",
+                "c": 0,
+                "node": "a"
+              },
+              "content": "there 😀"
+            }
+          ]
+        },
+        {
+          "value": "héllo 😀",
+          "node_id": "a",
+          "clocks": [
+            {
+              "ts": "19",
+              "c": 0,
+              "node": "a"
+            }
+          ],
+          "ops": [
+            {
+              "op": "delete",
+              "ref": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "origin": {
+                "ts": "0",
+                "c": 0,
+                "node": ""
+              },
+              "spans": [
+                {
+                  "origin": {
+                    "ts": "1",
+                    "c": 0,
+                    "node": "a"
+                  },
+                  "start": 5,
+                  "length": 2
+                },
+                {
+                  "origin": {
+                    "ts": "10",
+                    "c": 0,
+                    "node": "a"
+                  },
+                  "start": 0,
+                  "length": 5
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "expected_value": "héllo 😀",
+      "final_state": {
+        "frags": {
+          "HLC{ts:1 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "héllo",
+              "length": 5,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              }
+            },
+            {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 5,
+              "content": "🌍 ",
+              "length": 2,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "tombstone": true
+            },
+            {
+              "origin": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 7,
+              "content": "world",
+              "length": 5,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "tombstone": true
+            }
+          ],
+          "HLC{ts:10 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": "10",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "there",
+              "length": 5,
+              "parent": {
+                "origin": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                },
+                "offset": 6
+              },
+              "tombstone": true
+            },
+            {
+              "origin": {
+                "ts": "10",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 5,
+              "content": " 😀",
+              "length": 2,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

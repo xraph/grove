@@ -50,8 +50,10 @@ func write(path string, v any) {
 	must(0, os.WriteFile(path, append(data, '\n'), 0o644))
 }
 
-// writeExtra is the hook later tasks extend (Task 5 adds apply_golden.json).
-func writeExtra(string) {}
+// writeExtra is the hook later tasks extend.
+func writeExtra(out string) {
+	writeTextGolden(out)
+}
 
 func wireCases() []wireCase {
 	big := h(1712345678901234567, 3, "node-a")
