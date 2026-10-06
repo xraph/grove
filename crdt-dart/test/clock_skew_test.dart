@@ -71,6 +71,41 @@ void main() {
       );
     });
 
+    test('rejects dates and times that do not exist', () {
+      expect(parseHttpDate('Mon, 31 Feb 2026 08:49:37 GMT'), isNull);
+      expect(parseHttpDate('Sun, 29 Feb 2026 08:49:37 GMT'), isNull);
+      expect(parseHttpDate('Thu, 31 Apr 2026 08:49:37 GMT'), isNull);
+      expect(parseHttpDate('Sun, 00 Nov 1994 08:49:37 GMT'), isNull);
+      expect(parseHttpDate('Sun, 32 Nov 1994 08:49:37 GMT'), isNull);
+      expect(parseHttpDate('Sun, 06 Nov 1994 24:00:00 GMT'), isNull);
+      expect(parseHttpDate('Sun, 06 Nov 1994 25:61:61 GMT'), isNull);
+      expect(parseHttpDate('Sun, 06 Nov 1994 08:60:00 GMT'), isNull);
+      expect(parseHttpDate('Sun, 06 Nov 1994 08:49:61 GMT'), isNull);
+    });
+
+    test('keeps a real leap day', () {
+      expect(
+        parseHttpDate('Tue, 29 Feb 2028 12:00:00 GMT'),
+        DateTime.utc(2028, 2, 29, 12),
+      );
+    });
+
+    // RFC 7231 allows 23:59:60 for a leap second.
+    test('reads second 60 as the start of the next minute', () {
+      expect(
+        parseHttpDate('Sat, 31 Dec 2016 23:59:60 GMT'),
+        DateTime.utc(2017),
+      );
+      expect(
+        parseHttpDate('Sun, 06 Nov 1994 08:49:60 GMT'),
+        DateTime.utc(1994, 11, 6, 8, 50),
+      );
+    });
+
+    test('rejects a weekday that is not one', () {
+      expect(parseHttpDate('Xyz, 06 Nov 1994 08:49:37 GMT'), isNull);
+    });
+
     test('rejects an unknown month, the obsolete formats and a zone', () {
       expect(parseHttpDate('Sun, 06 Foo 1994 08:49:37 GMT'), isNull);
       expect(parseHttpDate('Sunday, 06-Nov-94 08:49:37 GMT'), isNull);
@@ -206,6 +241,121 @@ void main() {
       final now = ClockSkew().nowMs();
       final after = DateTime.now().millisecondsSinceEpoch;
       expect(now, inInclusiveRange(before, after));
+    });
+  });
+
+  group('ClockSkew bounds', () {
+    final local = DateTime.utc(2026, 10, 4, 15).millisecondsSinceEpoch;
+    HLC at(BigInt ms) => HLC(ms * BigInt.from(1000000), 0, 's');
+
+    test('a huge latest_hlc is ignored and leaves the offset alone', () {
+      final skew = ClockSkew(systemNowMs: () => local);
+      skew.observeHlc(HLC(BigInt.from(10).pow(26), 0, 's'));
+      expect(skew.corrected, isFalse);
+      expect(skew.offset, Duration.zero);
+      expect(skew.nowMs(), local);
+
+      skew.observe(DateTime.utc(2026, 10, 4, 12));
+      final before = skew.offset;
+      skew.observeHlc(HLC(BigInt.from(10).pow(26), 0, 's'));
+      expect(skew.offset, before);
+    });
+
+    test('a latest_hlc beyond 64 bits is ignored', () {
+      final skew = ClockSkew(systemNowMs: () => local)
+        ..observeHlc(HLC(BigInt.one << 80, 0, 's'));
+      expect(skew.corrected, isFalse);
+      expect(skew.nowMs(), local);
+    });
+
+    test('a negative latest_hlc is ignored', () {
+      final skew = ClockSkew(systemNowMs: () => local)
+        ..observeHlc(HLC(-BigInt.from(10).pow(18), 0, 's'))
+        ..observeHlc(HLC(-BigInt.one, 0, 's'));
+      expect(skew.corrected, isFalse);
+      expect(skew.offset, Duration.zero);
+    });
+
+    test('a negative latest_hlc does not move a corrected offset', () {
+      final skew = ClockSkew(systemNowMs: () => local)
+        ..observe(DateTime.utc(2026, 10, 4, 12));
+      final before = skew.offset;
+      skew.observeHlc(HLC(-BigInt.from(10).pow(25), 0, 's'));
+      expect(skew.offset, before);
+    });
+
+    test('a gap just inside 24 hours is believed, just outside is not', () {
+      final inside = ClockSkew(systemNowMs: () => local)
+        ..observeHlc(at(BigInt.from(local) + BigInt.from(24 * 3600 * 1000)));
+      expect(inside.offset, const Duration(hours: 24));
+
+      final outside = ClockSkew(
+        systemNowMs: () => local,
+      )..observeHlc(at(BigInt.from(local) + BigInt.from(24 * 3600 * 1000 + 1)));
+      expect(outside.corrected, isFalse);
+
+      final behind = ClockSkew(
+        systemNowMs: () => local,
+      )..observeHlc(at(BigInt.from(local) - BigInt.from(24 * 3600 * 1000 + 1)));
+      expect(behind.corrected, isFalse);
+    });
+
+    test('a Date header two days off is ignored', () {
+      final skew = ClockSkew(systemNowMs: () => local)
+        ..observe(DateTime.utc(2026, 10, 2, 15));
+      expect(skew.corrected, isFalse);
+      expect(skew.nowMs(), local);
+    });
+
+    test('the bound is configurable', () {
+      final skew = ClockSkew(
+        maxOffset: const Duration(hours: 1),
+        systemNowMs: () => local,
+      )..observe(DateTime.utc(2026, 10, 4, 12));
+      expect(skew.corrected, isFalse);
+    });
+  });
+
+  group('ClockSkew hysteresis', () {
+    // The device clock reads 12:00:00.000, so a Date header of 12:00:s reads
+    // as s + 0.5 seconds ahead once centred.
+    final local = DateTime.utc(2026, 10, 4, 12).millisecondsSinceEpoch;
+    DateTime ahead(int seconds) => DateTime.utc(2026, 10, 4, 12, 0, seconds);
+
+    test(
+      'a gap flapping around the threshold does not flip the correction',
+      () {
+        final skew = ClockSkew(systemNowMs: () => local);
+        skew.observe(ahead(31));
+        expect(skew.corrected, isTrue);
+        final applied = skew.offset;
+        // 29.5 s is below the 30 s that applies a correction but above the
+        // 25 s that clears one.
+        for (final s in [29, 31, 29, 29, 31]) {
+          skew.observe(ahead(s));
+          expect(skew.corrected, isTrue, reason: 'reading $s');
+          expect(skew.offset, applied);
+        }
+      },
+    );
+
+    test('a gap below 25 seconds clears the correction', () {
+      final skew = ClockSkew(systemNowMs: () => local)..observe(ahead(31));
+      skew.observe(ahead(26));
+      expect(skew.corrected, isTrue);
+      skew.observe(ahead(24));
+      expect(skew.corrected, isFalse);
+      expect(skew.offset, Duration.zero);
+    });
+
+    test('once cleared, 29 seconds does not apply it again', () {
+      final skew = ClockSkew(systemNowMs: () => local)
+        ..observe(ahead(31))
+        ..observe(ahead(5));
+      skew.observe(ahead(29));
+      expect(skew.corrected, isFalse);
+      skew.observe(ahead(30));
+      expect(skew.corrected, isTrue);
     });
   });
 }

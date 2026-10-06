@@ -87,6 +87,16 @@ void main() {
       expect(b.attempt, 5000);
     });
 
+    test(
+      'a random source outside [0, 1) is clamped to the ceiling and zero',
+      () {
+        final over = Backoff(initialDelay: ms(100), random: () => 2.5);
+        final under = Backoff(initialDelay: ms(100), random: () => -1);
+        expect(over.next(), ms(100));
+        expect(under.next(), Duration.zero);
+      },
+    );
+
     test('a zero initial delay stays zero', () {
       final b = Backoff(initialDelay: Duration.zero, jitter: false);
       for (var i = 0; i < 2000; i++) {

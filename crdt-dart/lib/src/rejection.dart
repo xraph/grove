@@ -87,7 +87,10 @@ final class HookRejection extends PushRejection {
   String get kind => 'hook';
 }
 
-/// Any other failure with a response.
+/// A 400 or 422 with no recognized per-change text, or a failure the engine
+/// reports itself (a persistent 500 it gave up on).
+///
+/// [classifyPushError] builds one only for a 400 or 422.
 final class UnclassifiedRejection extends PushRejection {
   /// Creates the rejection.
   const UnclassifiedRejection(this.status, super.reason);
@@ -121,9 +124,32 @@ final _changeIndex = RegExp(r'crdt: change\[(\d{1,15})\]: (.*)$', dotAll: true);
 const _hookPrefix = 'crdt: inbound change hook: ';
 
 /// Classifies a failed push from its HTTP [status] (0 for a WebSocket error
-/// frame) and decoded [body].
+/// frame) and decoded [body], or returns null when the failure is not a
+/// verdict on the changes.
 ///
-/// Rules, in order:
+/// A null result means "try again, do not blame a change": the changes stay
+/// pushable. Only a status that carries a per-change verdict can produce a
+/// rejection, so a credential or throttling failure can never mark a change
+/// rejected:
+///
+///  * 401 and 403 are auth: refresh credentials, then retry. Null.
+///  * 408, 429 and 5xx other than 500 (502, 503, 504) are transient: back
+///    off and retry. Null.
+///  * 404, 410 and 413 are for the engine (dataset gone, batch too large).
+///    Null.
+///  * 400 and 422 are verdicts on the request: a recognized per-change
+///    string classifies as below, anything else is an
+///    [UnclassifiedRejection] of kind `bad_request`.
+///  * 500 and 0 are how Go reports a failed push. Go answers every
+///    deterministic failure (validation, hook rejection) with a 500, and the
+///    WebSocket handler sends the same text in an error frame (status 0). A
+///    recognized per-change string classifies as below. A 500 or an error
+///    frame without one is null: it may be a crash or a dropped dependency,
+///    and the engine decides when to give up on it.
+///
+/// A recognized string is one of these, and where more than one appears the
+/// pattern that starts first wins (the rules are listed in order of
+/// precedence when they do not overlap):
 ///
 ///  1. `crdt: push exceeds max changes (n > m)` is a
 ///     [BatchTooLargeRejection] with limit m.
@@ -131,14 +157,13 @@ const _hookPrefix = 'crdt: inbound change hook: ';
 ///     contains `HLC timestamp drift too large`, else a [ValidationRejection].
 ///  3. A message containing `crdt: inbound change hook: ` is a
 ///     [HookRejection] carrying the text after it.
-///  4. Anything else is an [UnclassifiedRejection].
 ///
-/// Where more than one pattern appears in a message, the one that starts
-/// first wins. A hook's own reason is free text and may quote another
-/// pattern (a hook that wraps a validation error); the server's prefix always
-/// comes first, so the hook rule still wins, and the engine never blames the
-/// wrong index.
-PushRejection classifyPushError(int status, Object? body) {
+/// A hook's own reason is free text and may quote another pattern (a hook
+/// that wraps a validation error). The server's prefix always comes first, so
+/// the hook rule still wins, and the engine never blames the wrong index.
+PushRejection? classifyPushError(int status, Object? body) {
+  final isRequestVerdict = status == 400 || status == 422;
+  if (!isRequestVerdict && status != 500 && status != 0) return null;
   final msg = serverMessage(body) ?? '';
   final max = _maxChanges.firstMatch(msg);
   final idx = _changeIndex.firstMatch(msg);
@@ -157,5 +182,5 @@ PushRejection classifyPushError(int status, Object? body) {
         ? DriftRejection(index, inner)
         : ValidationRejection(index, inner);
   }
-  return UnclassifiedRejection(status, msg);
+  return isRequestVerdict ? UnclassifiedRejection(status, msg) : null;
 }
