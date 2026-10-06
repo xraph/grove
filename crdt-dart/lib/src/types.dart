@@ -4,8 +4,12 @@ import 'go_json.dart';
 import 'hlc.dart';
 import 'wire_helpers.dart';
 
-/// Encodes a wire object exactly as Go would. Every request body and
-/// WebSocket frame goes through this.
+/// Encodes a wire object with Go's `json.Marshal` value and string rules
+/// (number formatting, HTML escaping, lone surrogates). Object keys come out
+/// sorted, as Go sorts map keys, but Go writes struct fields in declaration
+/// order, so the bytes equal Go's only after both sides are canonicalised
+/// (parsed and re-marshalled). Every request body and WebSocket frame goes
+/// through this.
 String encodeWire(Object? json) => goMarshal(json);
 
 /// A JSON value present on the wire, possibly `null`. A `JsonValue?` field
@@ -98,7 +102,6 @@ enum TextOpType {
   /// Sets attributes on spans.
   format,
 }
-
 
 JsonValue? _present(Map<String, Object?> m, String k) => m.containsKey(k) ? JsonValue(m[k]) : null;
 
@@ -233,7 +236,9 @@ final class TextRef {
   /// The origin clock of the run.
   final HLC origin;
 
-  /// The offset in code units within the run.
+  /// The offset within the run, in Unicode code points (runes), as Go counts
+  /// them. A Dart string is UTF-16, so an astral character is one unit here
+  /// and two UTF-16 code units in [TextFragment.content].
   final int offset;
 
   /// Go wire form.
@@ -261,10 +266,10 @@ final class TextSpan {
   /// The origin clock of the run.
   final HLC origin;
 
-  /// The start offset within the run.
+  /// The start offset within the run, in runes.
   final int start;
 
-  /// The length in code units.
+  /// The length in Unicode code points (runes), as Go counts them.
   final int length;
 
   /// Go wire form.
@@ -323,13 +328,14 @@ final class TextFragment {
   /// The origin clock of the run this fragment belongs to.
   HLC origin;
 
-  /// The start offset within the run.
+  /// The start offset within the run, in runes.
   int start;
 
   /// The text of the fragment.
   String content;
 
-  /// The length in code units.
+  /// The length in Unicode code points (runes), as Go counts them, not the
+  /// UTF-16 length of [content].
   int length;
 
   /// Where the run was inserted.

@@ -1,5 +1,7 @@
 import 'package:meta/meta.dart';
 
+import 'wire_helpers.dart';
+
 /// Compares two strings by Unicode code point, which is Go's byte order for
 /// UTF-8 strings. Returns -1, 0 or 1.
 ///
@@ -95,7 +97,7 @@ final class HLC implements Comparable<HLC> {
   /// [FormatException].
   static HLC fromJson(Object? json) {
     if (json == null) return zero;
-    final m = json as Map<String, Object?>;
+    final m = wireObj(json);
     final raw = m['ts'];
     final BigInt ts = switch (raw) {
       null => BigInt.zero,
@@ -105,7 +107,7 @@ final class HLC implements Comparable<HLC> {
       final double d => BigInt.from(d),
       _ => throw FormatException('crdt: hlc ts $raw'),
     };
-    return HLC(ts, _parseCounter(m['c']), m['node'] as String? ?? '');
+    return HLC(ts, _parseCounter(m['c']), wireStr(m, 'node'));
   }
 
   @override

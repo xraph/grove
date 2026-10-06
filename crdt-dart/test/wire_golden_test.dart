@@ -128,6 +128,22 @@ void main() {
       };
       expect(() => ChangeRecord.fromJson(bad), throwsFormatException);
     });
+    test('a wrong-typed hlc or node is a FormatException, not a TypeError', () {
+      for (final hlc in <Object?>[5, 'x', true, <Object?>[]]) {
+        expect(() => ChangeRecord.fromJson({...golden('change_lww'), 'hlc': hlc}), throwsFormatException, reason: '$hlc');
+      }
+      for (final bad in <Map<String, Object?>>[
+        {'ts': '1', 'c': 0, 'node': 3},
+        {'ts': '1', 'c': 0, 'node': <Object?>[]},
+        {'ts': true, 'c': 0, 'node': 'n'},
+        {'ts': '1', 'c': 'x', 'node': 'n'},
+      ]) {
+        expect(() => HLC.fromJson(bad), throwsFormatException, reason: '$bad');
+      }
+    });
+    test('a date-only time is not RFC 3339', () {
+      expect(() => PresenceState.fromJson({...golden('presence_state'), 'updated_at': '2026-10-04'}), throwsFormatException);
+    });
     test('a value of the wrong JSON type is a FormatException', () {
       expect(() => ChangeRecord.fromJson({...golden('change_lww'), 'pk': 5}), throwsFormatException);
       expect(() => ChangeRecord.fromJson({...golden('change_lww'), 'tombstone': 'yes'}), throwsFormatException);
