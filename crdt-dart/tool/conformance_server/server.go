@@ -138,8 +138,9 @@ func sinceFromQuery(r *http.Request) crdt.HLC {
 	return since
 }
 
-// streamSSE mirrors the extension's handleStream: changes, presence, and a
-// keep-alive comment.
+// streamSSE mirrors the extension's handleStream: changes and presence. It
+// also sends a keep-alive comment every 15 seconds, which the extension does
+// not do at grove v1.7.0 (streamKeepAlive is set and never read).
 func (s *server) streamSSE(w http.ResponseWriter, r *http.Request, tables []string, since crdt.HLC, withPresence bool) {
 	ch, err := s.ctrl.StreamChangesSince(r.Context(), tables, since)
 	w.Header().Set("Content-Type", "text/event-stream")
