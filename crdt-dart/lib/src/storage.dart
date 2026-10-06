@@ -9,7 +9,11 @@ import 'types.dart';
 /// changes carrying their rejection marks.
 abstract interface class ReplicaStorage {
   /// Every persisted document, by table then primary key.
-  Future<Map<String, Map<String, DocumentState>>> loadState();
+  ///
+  /// A document that cannot be decoded throws a [FormatException] naming its
+  /// key. When [onUnreadable] is given, that exception goes to it instead and
+  /// the document is skipped, so one corrupt document does not hide the rest.
+  Future<Map<String, Map<String, DocumentState>>> loadState({void Function(FormatException error)? onUnreadable});
 
   /// Persists one document.
   Future<void> saveDocument(String table, String pk, DocumentState doc);
@@ -65,7 +69,8 @@ final class MemoryReplicaStorage implements ReplicaStorage {
   const MemoryReplicaStorage();
 
   @override
-  Future<Map<String, Map<String, DocumentState>>> loadState() async => {};
+  Future<Map<String, Map<String, DocumentState>>> loadState({void Function(FormatException error)? onUnreadable}) async =>
+      {};
 
   @override
   Future<void> saveDocument(String table, String pk, DocumentState doc) async {}
@@ -231,11 +236,19 @@ final class KeyValueReplicaStorage implements AtomicReplicaStorage, SyncCursorSt
   String _encodePending(List<PendingChange> changes) => encodeWire([for (final c in changes) c.toJson()]);
 
   @override
-  Future<Map<String, Map<String, DocumentState>>> loadState() async {
+  Future<Map<String, Map<String, DocumentState>>> loadState({void Function(FormatException error)? onUnreadable}) async {
     final out = <String, Map<String, DocumentState>>{};
+    void unreadable(FormatException error) {
+      if (onUnreadable == null) throw error;
+      onUnreadable(error);
+    }
+
     for (final e in (await kv.scan(_docPrefix)).entries) {
       final parts = e.key.substring(_docPrefix.length).split('/');
-      if (parts.length != 2) throw FormatException('crdt: malformed document key "${e.key}"');
+      if (parts.length != 2) {
+        unreadable(FormatException('crdt: malformed document key "${e.key}"'));
+        continue;
+      }
       final String table;
       final String pk;
       final DocumentState doc;
@@ -244,10 +257,12 @@ final class KeyValueReplicaStorage implements AtomicReplicaStorage, SyncCursorSt
         pk = Uri.decodeComponent(parts[1]);
         doc = DocumentState.fromJson(jsonDecode(e.value));
       } on FormatException catch (err) {
-        throw FormatException('crdt: stored document "${e.key}" is unreadable: ${err.message}');
+        unreadable(FormatException('crdt: stored document "${e.key}" is unreadable: ${err.message}'));
+        continue;
       } on ArgumentError catch (err) {
         // Uri.decodeComponent throws an ArgumentError for a bad percent-escape.
-        throw FormatException('crdt: stored document "${e.key}" is unreadable: ${err.message}');
+        unreadable(FormatException('crdt: stored document "${e.key}" is unreadable: ${err.message}'));
+        continue;
       }
       (out[table] ??= {})[pk] = doc;
     }

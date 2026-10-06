@@ -177,4 +177,19 @@ void main() {
       expect(u.redo(), isNull);
     });
   });
+
+  test('pushUndo adds an entry without clearing redo, and trims to maxHistory', () {
+    final u = UndoManager(maxHistory: 2)
+      ..record(change(1), null)
+      ..record(change(2), null);
+    final e = u.undo()!;
+    u.pushUndo(UndoEntry(change: change(3), previousState: null, timestamp: 0));
+    expect(u.canRedo, isTrue);
+    expect(u.redoCount, 1);
+    expect(u.undoCount, 2);
+    expect(u.undo()!.change.hlc.ts, BigInt.from(3));
+    expect(u.undo()!.change.hlc.ts, BigInt.one);
+    expect(u.redo(), isNotNull);
+    expect(e.change.hlc.ts, BigInt.two);
+  });
 }

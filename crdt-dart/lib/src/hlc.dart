@@ -73,6 +73,11 @@ final class HLC implements Comparable<HLC> {
   /// The node that produced this value.
   final String node;
 
+  /// The Go `HLC.String()` form, built once: list walks and set keys ask for
+  /// it per node on every read, and a 19-digit [BigInt] is slow to print on
+  /// the web.
+  late final String _goString = 'HLC{ts:$ts c:$c node:$node}';
+
   /// Whether this is the zero value.
   bool get isZero => ts == BigInt.zero && c == 0 && node.isEmpty;
 
@@ -122,7 +127,7 @@ final class HLC implements Comparable<HLC> {
 }
 
 /// The Go `HLC.String()` form, used as a map key throughout the protocol.
-String hlcString(HLC h) => 'HLC{ts:${h.ts} c:${h.c} node:${h.node}}';
+String hlcString(HLC h) => h._goString;
 
 /// Returns [a] when it is strictly after [b], otherwise [b].
 HLC hlcMax(HLC a, HLC b) => a.isAfter(b) ? a : b;

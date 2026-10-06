@@ -26,6 +26,46 @@ String goMarshal(Object? value) {
 /// The OR-set key for [element]: its Go JSON encoding.
 String setElementKey(Object? element) => goMarshal(element);
 
+/// [s] as Go holds it after decoding JSON: every unpaired surrogate becomes
+/// U+FFFD. Returns [s] itself when it has no unpaired surrogate.
+String goString(String s) {
+  for (var i = 0; i < s.length; i++) {
+    final u = s.codeUnitAt(i);
+    if (u < 0xD800 || u > 0xDFFF) continue;
+    if (u <= 0xDBFF && i + 1 < s.length) {
+      final next = s.codeUnitAt(i + 1);
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        i++;
+        continue;
+      }
+    }
+    return String.fromCharCodes([for (final r in s.runes) r >= 0xD800 && r <= 0xDFFF ? 0xFFFD : r]);
+  }
+  return s;
+}
+
+/// A deep copy of the JSON value [v] as Go would hold it: every string and
+/// object key passes through [goString], and every map and list is new, so
+/// the copy shares nothing mutable with [v].
+///
+/// When two object keys become equal after the replacement, the later one
+/// wins, as it does when Go decodes the object. Throws an [ArgumentError] for
+/// a value that is not JSON (a non-finite number, a non-string key, or any
+/// other object). A [BigInt] and a [RawJson] are kept as they are.
+Object? goJsonCopy(Object? v) => switch (v) {
+      null || bool() || BigInt() || RawJson() => v,
+      final num n => n.isFinite ? n : throw ArgumentError.value(v, 'value', 'not JSON: a non-finite number'),
+      final String s => goString(s),
+      final List<Object?> l => <Object?>[for (final e in l) goJsonCopy(e)],
+      final Map<Object?, Object?> m => <String, Object?>{
+          for (final e in m.entries) _jsonKey(e.key): goJsonCopy(e.value),
+        },
+      _ => throw ArgumentError.value(v, 'value', 'not a JSON value (${v.runtimeType})'),
+    };
+
+String _jsonKey(Object? k) =>
+    k is String ? goString(k) : throw ArgumentError.value(k, 'key', 'a JSON object key must be a string');
+
 /// Deep JSON equality where `1` and `1.0` are equal.
 bool jsonDeepEquals(Object? a, Object? b) => jsonDeepEquality.equals(a, b);
 

@@ -253,6 +253,23 @@ void main() {
       await expectLater(KeyValueReplicaStorage(kv).loadState(), throwsFormatException);
     });
 
+    test('with onUnreadable, an unreadable document is reported by key and skipped', () async {
+      final kv = MapReplicaKeyValue();
+      final s = KeyValueReplicaStorage(kv);
+      await s.saveDocument('t', 'good', doc('good', table: 't'));
+      kv.entries['doc/t/bad'] = '{"table": 5}';
+      kv.entries['doc/t/%ZZ'] = '{}';
+      kv.entries['doc/extra/part/x'] = '{}';
+      final errors = <FormatException>[];
+      final loaded = await s.loadState(onUnreadable: errors.add);
+      expect(loaded['t']!.keys, ['good']);
+      expect(errors.map((e) => e.message), [
+        contains('doc/extra/part/x'),
+        contains('doc/t/%ZZ'),
+        contains('doc/t/bad'),
+      ]);
+    });
+
     test('a bad percent-escape in a stored key is a FormatException that names the key', () async {
       for (final bad in ['doc/%/1', 'doc/%ZZ/1', 'doc/t/%C3']) {
         final kv = MapReplicaKeyValue()..entries[bad] = '{}';

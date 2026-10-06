@@ -109,4 +109,27 @@ void main() {
     expect(formatRfc3339Nano(DateTime.utc(2026, 10, 4, 12)), '2026-10-04T12:00:00Z');
     expect(formatRfc3339Nano(DateTime.utc(2026, 10, 4, 12, 0, 0, 120)), '2026-10-04T12:00:00.12Z');
   });
+
+  group('goString and goJsonCopy', () {
+    test('goString replaces only unpaired surrogates and returns a clean string itself', () {
+      const clean = 'plain \u{1F30D}';
+      expect(goString(clean), same(clean));
+      expect(goString('a\ud800b\udc00\u{1F30D}'), 'a�b�\u{1F30D}');
+    });
+
+    test('goJsonCopy deep-copies, normalizes strings and keys, and refuses non-JSON', () {
+      final inner = <Object?>['x\ud800'];
+      final src = <String, Object?>{'k\udc00': inner, 'n': 1.5, 'b': true, 'z': null};
+      final copy = goJsonCopy(src)! as Map<String, Object?>;
+      expect(copy, {'k�': ['x�'], 'n': 1.5, 'b': true, 'z': null});
+      inner.add('later');
+      expect(copy['k�'], ['x�']);
+      expect(goJsonCopy({'a\ud800': 1, 'a\udc00': 2}), {'a�': 2});
+      expect(() => goJsonCopy(double.infinity), throwsArgumentError);
+      expect(() => goJsonCopy({1: 'x'}), throwsArgumentError);
+      expect(() => goJsonCopy(Object()), throwsArgumentError);
+      const raw = RawJson('"a<b"');
+      expect(goJsonCopy(raw), same(raw));
+    });
+  });
 }

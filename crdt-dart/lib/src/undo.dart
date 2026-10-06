@@ -122,6 +122,17 @@ final class UndoManager {
     _trim(_redo);
   }
 
+  /// Puts [entry] on the undo stack without clearing redo.
+  ///
+  /// For a store whose redo replays a change with a new clock. It takes the
+  /// entry off the redo stack, replays it, and pushes an entry holding the
+  /// replayed change, so the next undo compensates the change that was
+  /// actually made. [record] would clear the rest of the redo stack.
+  void pushUndo(UndoEntry entry) {
+    _undo.add(entry);
+    _trim(_undo);
+  }
+
   /// Clears both stacks.
   void clear() {
     _undo.clear();
