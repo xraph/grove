@@ -2,6 +2,7 @@
 library;
 
 export 'src/apply.dart';
+export 'src/compact.dart';
 export 'src/go_json.dart';
 export 'src/hlc.dart';
 export 'src/merge.dart';

@@ -79,6 +79,7 @@ type mergeStateCase struct {
 // apply and merge-state goldens.
 func writeExtra(out string) {
 	writeTextGolden(out)
+	writeCompactGolden(out)
 	writeCompact(filepath.Join(out, "apply_golden.json"), map[string]any{
 		"apply":       applyCases(),
 		"merge_state": mergeStateCases(),
