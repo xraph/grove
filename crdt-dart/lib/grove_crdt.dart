@@ -1,8 +1,10 @@
 /// Dart client for Grove's CRDT sync protocol.
 library;
 
+export 'src/apply.dart';
 export 'src/go_json.dart';
 export 'src/hlc.dart';
+export 'src/merge.dart';
 export 'src/presence_types.dart';
 export 'src/protocol.dart';
 export 'src/sync_types.dart';

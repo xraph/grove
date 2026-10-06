@@ -50,9 +50,64 @@ func write(path string, v any) {
 	must(0, os.WriteFile(path, append(data, '\n'), 0o644))
 }
 
-// writeExtra is the hook later tasks extend.
+type applyStep struct {
+	Change json.RawMessage `json:"change"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  string          `json:"error,omitempty"`
+}
+
+type applyCase struct {
+	Name  string      `json:"name"`
+	Steps []applyStep `json:"steps"`
+	// NondeterministicValue marks a case whose document states hold a leaf
+	// and a nested path under it. Go's Resolve walks a map, so which of the
+	// two wins in the resolved "value" changes from run to run. The fixture
+	// leaves that top-level "value" out, and the Dart test drops it from its
+	// own result before comparing.
+	NondeterministicValue bool `json:"nondeterministic_value,omitempty"`
+}
+
+type mergeStateCase struct {
+	Name   string          `json:"name"`
+	Local  json.RawMessage `json:"local"`
+	Remote json.RawMessage `json:"remote"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  string          `json:"error,omitempty"`
+}
+
+// writeExtra writes the fixtures later tasks add: the text goldens and the
+// apply and merge-state goldens.
 func writeExtra(out string) {
 	writeTextGolden(out)
+	writeCompact(filepath.Join(out, "apply_golden.json"), map[string]any{
+		"apply":       applyCases(),
+		"merge_state": mergeStateCases(),
+	})
+}
+
+func ch(field string, typ crdt.CRDTType, clock crdt.HLC) crdt.ChangeRecord {
+	return crdt.ChangeRecord{Table: "t", PK: "1", Field: field, CRDTType: typ, HLC: clock, NodeID: clock.NodeID}
+}
+
+// run applies changes from an empty field, marshalling each step at once:
+// ApplyChange mutates text and document state in place, so a pointer kept
+// for later would show a later state.
+func run(name string, changes ...crdt.ChangeRecord) applyCase {
+	var local *crdt.FieldState
+	ac := applyCase{Name: name}
+	for i := range changes {
+		c := changes[i]
+		step := applyStep{Change: must(json.Marshal(c))}
+		res, err := crdt.ApplyChange(nil, local, &c)
+		if err != nil {
+			step.Error = err.Error()
+		} else {
+			local = res
+			step.Result = must(json.Marshal(res))
+		}
+		ac.Steps = append(ac.Steps, step)
+	}
+	return ac
 }
 
 func wireCases() []wireCase {
@@ -238,4 +293,281 @@ func goJSONCases() []goJSONCase {
 		out = append(out, goJSONCase{Input: in, Output: string(must(json.Marshal(v)))})
 	}
 	return out
+}
+
+// writeCompact writes v as compact JSON, for fixtures big enough that
+// indentation would dominate their size.
+func writeCompact(path string, v any) {
+	data := must(json.Marshal(v))
+	must(0, os.WriteFile(path, append(data, '\n'), 0o644))
+}
+
+// nondeterministic drops each step's top-level "value", which Go computes by
+// walking a map when a leaf and a nested path collide.
+func nondeterministic(c applyCase) applyCase {
+	c.NondeterministicValue = true
+	for i := range c.Steps {
+		if c.Steps[i].Result == nil {
+			continue
+		}
+		var m map[string]json.RawMessage
+		must(0, json.Unmarshal(c.Steps[i].Result, &m))
+		delete(m, "value")
+		c.Steps[i].Result = must(json.Marshal(m))
+	}
+	return c
+}
+
+func applyCases() []applyCase {
+	lww := func(v string, clock crdt.HLC) crdt.ChangeRecord {
+		c := ch("title", crdt.TypeLWW, clock)
+		c.Value = json.RawMessage(v)
+		return c
+	}
+	counter := func(inc, dec int64, clock crdt.HLC) crdt.ChangeRecord {
+		c := ch("views", crdt.TypeCounter, clock)
+		c.CounterDelta = &crdt.CounterDelta{Increment: inc, Decrement: dec}
+		return c
+	}
+	// Set elements are written canonically (Go json.Marshal form): Dart
+	// re-derives keys from decoded values, and the server never relays set
+	// ops (pulled sets carry full state), so raw bytes never reach Dart.
+	set := func(op crdt.SetOp, elems string, tags []crdt.Tag, clock crdt.HLC) crdt.ChangeRecord {
+		c := ch("tags", crdt.TypeSet, clock)
+		c.SetOp = &crdt.SetOperation{Op: op, Elements: json.RawMessage(elems), Tags: tags}
+		return c
+	}
+	list := func(op crdt.ListOpType, node, parent crdt.HLC, value string, clock crdt.HLC) crdt.ChangeRecord {
+		c := ch("items", crdt.TypeList, clock)
+		c.ListOp = &crdt.ListOp{Op: op, NodeID: node, ParentID: parent}
+		if value != "" {
+			c.ListOp.Value = json.RawMessage(value)
+		}
+		return c
+	}
+	docPath := func(path, value string, tombstone bool, clock crdt.HLC) crdt.ChangeRecord {
+		c := ch("meta", crdt.TypeDocument, clock)
+		c.Value = json.RawMessage(`{"path":"` + path + `","value":` + value + `}`)
+		c.Tombstone = tombstone
+		return c
+	}
+	text := func(op *crdt.TextOp, clock crdt.HLC) crdt.ChangeRecord {
+		c := ch("body", crdt.TypeText, clock)
+		c.TextOp = op
+		return c
+	}
+	docRaw := func(value string, clock crdt.HLC) crdt.ChangeRecord {
+		c := ch("meta", crdt.TypeDocument, clock)
+		c.Value = json.RawMessage(value)
+		return c
+	}
+	carrier := func(field string, typ crdt.CRDTType, fs *crdt.FieldState, clock crdt.HLC) crdt.ChangeRecord {
+		c := ch(field, typ, clock)
+		c.State = fs
+		return c
+	}
+	counterState := func(inc, dec map[string]int64, clock crdt.HLC) crdt.ChangeRecord {
+		cs := crdt.NewPNCounterState()
+		for k, v := range inc {
+			cs.Increments[k] = v
+		}
+		for k, v := range dec {
+			cs.Decrements[k] = v
+		}
+		return carrier("views", crdt.TypeCounter, cs.ToFieldState(clock, clock.NodeID), clock)
+	}
+	listCarrier := func(clock crdt.HLC, tombstone bool) crdt.ChangeRecord {
+		l := crdt.NewRGAListState()
+		must(0, l.Insert("x", crdt.HLC{}, "a", h(1, 0, "a")))
+		must(0, l.Insert("y", h(1, 0, "a"), clock.NodeID, clock))
+		must(0, l.Insert("z", crdt.HLC{}, "b", h(1, 1, "b")))
+		if tombstone {
+			l.Delete(h(1, 0, "a"))
+		}
+		return carrier("items", crdt.TypeList, l.ToFieldState(clock, clock.NodeID), clock)
+	}
+	textCarrier := func(clock crdt.HLC, node, content string, format bool) crdt.ChangeRecord {
+		ts := crdt.NewTextState()
+		must(ts.Insert(crdt.TextRef{}, content, node, clock))
+		if format {
+			r0, _ := ts.RefAt(0)
+			must(ts.Format(r0, 2, map[string]json.RawMessage{"bold": json.RawMessage(`true`)}, node, h(clock.Timestamp+1, 0, node)))
+			r1, _ := ts.RefAt(1)
+			must(ts.Delete(r1, 1))
+		}
+		return carrier("body", crdt.TypeText, ts.ToFieldState(clock, node), clock)
+	}
+	lwwCarrier := func(v string, clock crdt.HLC) crdt.ChangeRecord {
+		fs := &crdt.FieldState{Type: crdt.TypeLWW, HLC: clock, NodeID: clock.NodeID, Value: json.RawMessage(v)}
+		return carrier("title", crdt.TypeLWW, fs, clock)
+	}
+	docNested := func(clock crdt.HLC, node string) crdt.ChangeRecord {
+		d := crdt.NewDocumentCRDTState()
+		must(0, d.SetField("shared", "from "+node, clock, node))
+		must(0, d.SetField("deep.leaf", node, clock, node))
+		tags := crdt.NewORSetState()
+		must(0, tags.Add("t-"+node, node, clock))
+		must(0, tags.Add("t<>", node, clock))
+		d.SetFieldState("tags", tags.ToFieldState(clock, node))
+		items := crdt.NewRGAListState()
+		must(0, items.Insert(node, crdt.HLC{}, node, clock))
+		d.SetFieldState("items", items.ToFieldState(clock, node))
+		// "mixed" is an lww on one side and a counter on the other: a type
+		// mismatch inside a document resolves by the higher HLC.
+		if node == "a" {
+			must(0, d.SetField("mixed", 1, clock, node))
+		} else {
+			c := crdt.NewPNCounterState()
+			c.Increment(node, 9)
+			d.SetFieldState("mixed", c.ToFieldState(clock, node))
+		}
+		return carrier("meta", crdt.TypeDocument, d.ToFieldState(clock, node), clock)
+	}
+
+	// Text ops come from Go's own local edit API so they are valid by
+	// construction, then replay through ApplyChange from an empty field.
+	src := crdt.NewTextState()
+	t1 := h(1, 0, "a")
+	ins := must(src.Insert(crdt.TextRef{}, "hello world", "a", t1))
+	ref6, _ := src.RefAt(6)
+	t2 := h(2, 0, "a")
+	del := must(src.Delete(ref6, 5))
+	ref0, _ := src.RefAt(0)
+	t3 := h(3, 0, "a")
+	format := must(src.Format(ref0, 5, map[string]json.RawMessage{"bold": json.RawMessage(`true`)}, "a", t3))
+	t4 := h(4, 0, "b")
+	ref5, _ := src.RefAt(5)
+	ins2 := must(src.Insert(ref5, "there", "b", t4))
+
+	docState := func(node string, clock crdt.HLC, inc int64) crdt.ChangeRecord {
+		d := crdt.NewDocumentCRDTState()
+		must(0, d.SetField("title", "from "+node, clock, node))
+		views := crdt.NewPNCounterState()
+		views.Increment(node, inc)
+		d.SetFieldState("views", views.ToFieldState(clock, node))
+		c := ch("meta", crdt.TypeDocument, clock)
+		c.State = d.ToFieldState(clock, node)
+		return c
+	}
+
+	return []applyCase{
+		run("lww_newer_wins",
+			lww(`"v1"`, h(10, 0, "a")), lww(`"v0"`, h(5, 0, "b")), lww(`"v2"`, h(10, 0, "b"))),
+		run("counter_cumulative",
+			counter(3, 0, h(1, 0, "a")), counter(2, 1, h(2, 0, "b")), counter(5, 0, h(3, 0, "a")), counter(3, 0, h(1, 0, "a"))),
+		run("set_add_remove",
+			set(crdt.SetOpAdd, `["x","y"]`, nil, h(1, 0, "a")),
+			set(crdt.SetOpRemove, `["x"]`, []crdt.Tag{{NodeID: "a", HLC: h(1, 0, "a")}}, h(2, 0, "a")),
+			set(crdt.SetOpAdd, `["x"]`, nil, h(3, 0, "b")),
+			set(crdt.SetOpRemove, `["y"]`, nil, h(4, 0, "b")),
+			set(crdt.SetOpAdd, `[{"j":"\u003c","k":1}]`, nil, h(5, 0, "a"))),
+		run("set_state_carrier", func() crdt.ChangeRecord { c := ch("tags", crdt.TypeSet, h(2, 0, "a")); c.State = setField(); return c }()),
+		run("list_ops",
+			list(crdt.ListOpInsert, crdt.HLC{}, crdt.HLC{}, `"a"`, h(1, 0, "a")),
+			list(crdt.ListOpInsert, h(2, 0, "a"), h(1, 0, "a"), `"b"`, h(2, 0, "a")),
+			list(crdt.ListOpDelete, h(9, 0, "c"), crdt.HLC{}, "", h(10, 0, "c")),
+			list(crdt.ListOpInsert, h(9, 0, "c"), h(2, 0, "a"), `"late"`, h(9, 0, "c")),
+			list(crdt.ListOpMove, h(1, 0, "a"), h(2, 0, "a"), `"a"`, h(11, 0, "b"))),
+		run("text_ops", text(ins, t1), text(del, t2), text(format, t3), text(ins2, t4)),
+		run("document_paths",
+			docPath("a.b", `1`, false, h(2, 0, "a")),
+			docPath("a.b", `0`, false, h(1, 0, "b")),
+			docPath("a.c", `"x"`, false, h(3, 0, "a")),
+			docPath("a.b", `null`, true, h(4, 0, "b")),
+			docPath("a.c", `null`, true, h(2, 5, "b"))),
+		run("document_state_carrier", docState("a", h(1, 0, "a"), 2), docState("b", h(2, 0, "b"), 3)),
+		run("type_mismatch", lww(`"v"`, h(1, 0, "a")), counter(1, 0, h(2, 0, "a"))),
+		run("counter_missing_delta", ch("views", crdt.TypeCounter, h(1, 0, "a"))),
+		run("set_missing_op", ch("tags", crdt.TypeSet, h(1, 0, "a"))),
+		run("list_missing_op", ch("items", crdt.TypeList, h(1, 0, "a"))),
+		run("text_missing_op", ch("body", crdt.TypeText, h(1, 0, "a"))),
+		run("untyped_change", ch("x", "", h(1, 0, "a"))),
+		run("text_empty_insert", text(&crdt.TextOp{Op: crdt.TextOpInsert}, h(1, 0, "a"))),
+		run("state_type_mismatch", func() crdt.ChangeRecord {
+			c := ch("title", crdt.TypeLWW, h(1, 0, "a"))
+			c.State = crdt.NewPNCounterState().ToFieldState(h(1, 0, "a"), "a")
+			return c
+		}()),
+		run("document_change_errors",
+			ch("meta", crdt.TypeDocument, h(1, 0, "a")),
+			docRaw(`null`, h(2, 0, "a")),
+			docRaw(`"x"`, h(3, 0, "a")),
+			docRaw(`[1]`, h(4, 0, "a")),
+			docRaw(`7`, h(5, 0, "a")),
+			docRaw(`true`, h(6, 0, "a")),
+			docRaw(`{"path":1,"value":1}`, h(7, 0, "a")),
+			docRaw(`{"path":"","value":1}`, h(8, 0, "a")),
+			docRaw(`{"value":1}`, h(9, 0, "a"))),
+		run("document_path_keys",
+			docRaw(`{"Path":"a.b","VALUE":3}`, h(1, 0, "a")),
+			docRaw(`{"path":"x","path":"c.d","value":4}`, h(2, 0, "a")),
+			docRaw(`{"path":"c.e"}`, h(3, 0, "a")),
+			docRaw(`{"path":"c.f","value":null}`, h(4, 0, "a")),
+			docRaw(`{"path":"c.g","value":1,"Value":2}`, h(5, 0, "a")),
+			docRaw(`{"path":"c.h","value":3,"PATH":null}`, h(6, 0, "a"))),
+		nondeterministic(run("document_tombstone_prefix",
+			docPath("a", `1`, false, h(1, 0, "a")),
+			docPath("a.b", `2`, false, h(2, 0, "a")),
+			docPath("a.b.c", `3`, false, h(3, 0, "a")),
+			docPath("ab", `4`, false, h(4, 0, "a")),
+			docPath("a", `null`, true, h(5, 0, "a")),
+			docPath("zz", `null`, true, h(6, 0, "a")))),
+		run("counter_state_carrier",
+			counterState(map[string]int64{"a": 4}, map[string]int64{"a": 1}, h(1, 0, "a")),
+			counterState(map[string]int64{"a": 2, "b": 5}, nil, h(2, 0, "b")),
+			counter(1, 0, h(3, 0, "c"))),
+		run("list_state_carrier", listCarrier(h(3, 0, "a"), false), listCarrier(h(2, 0, "b"), true)),
+		run("text_state_carrier", textCarrier(h(1, 0, "a"), "a", "alpha", false), textCarrier(h(2, 0, "b"), "b", "beta", true)),
+		run("lww_state_carrier",
+			lwwCarrier(`{"n":1}`, h(5, 0, "a")), lwwCarrier(`"old"`, h(4, 0, "b")), lwwCarrier(`null`, h(5, 0, "z"))),
+		run("document_nested_types", docNested(h(1, 0, "a"), "a"), docNested(h(2, 0, "b"), "b")),
+	}
+}
+
+func mergeStateCases() []mergeStateCase {
+	field := func(v string, clock crdt.HLC) *crdt.FieldState {
+		return must(crdt.NewLWWRegister(v, clock, clock.NodeID)).ToFieldState()
+	}
+	mk := func(name string, local, remote *crdt.State) mergeStateCase {
+		l, r := must(json.Marshal(local)), must(json.Marshal(remote))
+		res, err := crdt.NewMergeEngine().MergeState(local, remote)
+		if err != nil {
+			return mergeStateCase{Name: name, Local: l, Remote: r, Error: err.Error()}
+		}
+		return mergeStateCase{Name: name, Local: l, Remote: r, Result: must(json.Marshal(res))}
+	}
+	s := func(fields map[string]*crdt.FieldState, tomb bool, tombHLC crdt.HLC) *crdt.State {
+		st := crdt.NewState("t", "1")
+		for k, v := range fields {
+			st.Fields[k] = v
+		}
+		st.Tombstone, st.TombstoneHLC = tomb, tombHLC
+		return st
+	}
+	return []mergeStateCase{
+		mk("remote_tombstone_newer_than_fields",
+			s(map[string]*crdt.FieldState{"title": field("a", h(1, 0, "a"))}, false, crdt.HLC{}),
+			s(nil, true, h(5, 0, "b"))),
+		mk("remote_tombstone_older_than_a_field",
+			s(map[string]*crdt.FieldState{"title": field("a", h(9, 0, "a"))}, false, crdt.HLC{}),
+			s(nil, true, h(5, 0, "b"))),
+		mk("both_tombstoned",
+			s(nil, true, h(3, 0, "a")),
+			s(nil, true, h(7, 0, "b"))),
+		mk("type_mismatch_errors",
+			s(map[string]*crdt.FieldState{"x": field("a", h(1, 0, "a"))}, false, crdt.HLC{}),
+			s(map[string]*crdt.FieldState{"x": crdt.NewPNCounterState().ToFieldState(h(2, 0, "b"), "b")}, false, crdt.HLC{})),
+		mk("local_tombstone_older_than_remote_field",
+			s(nil, true, h(5, 0, "a")),
+			s(map[string]*crdt.FieldState{"title": field("b", h(6, 0, "b"))}, false, crdt.HLC{})),
+		mk("local_tombstone_newer_than_remote_fields",
+			s(nil, true, h(8, 0, "a")),
+			s(map[string]*crdt.FieldState{"title": field("b", h(6, 0, "b"))}, false, crdt.HLC{})),
+		mk("equal_tombstone_clock_loses_to_field",
+			s(nil, true, h(6, 0, "b")),
+			s(map[string]*crdt.FieldState{"title": field("b", h(6, 0, "b"))}, false, crdt.HLC{})),
+		mk("fields_union",
+			s(map[string]*crdt.FieldState{"title": field("a", h(1, 0, "a"))}, false, crdt.HLC{}),
+			s(map[string]*crdt.FieldState{"note": field("n", h(2, 0, "b"))}, false, crdt.HLC{})),
+	}
 }
