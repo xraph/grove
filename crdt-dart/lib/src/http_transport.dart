@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'package:meta/meta.dart';
 
 import 'auth.dart';
+import 'auth_read.dart';
 import 'backoff.dart';
 import 'clock_skew.dart';
 import 'envelope.dart';
@@ -187,7 +188,7 @@ base class HttpTransport implements Transport, PresenceTransport {
       // Read for every attempt: a cancellation thrown here ends the request,
       // and nothing from an earlier attempt is reused. Not inside `_attempt`,
       // so it is never mistaken for a network error.
-      final authHeaders = await _readAuth();
+      final authHeaders = await readAuthHeaders(_auth);
       final outcome = await _attempt(method, path, url, {
         'accept': 'application/json',
         if (body != null) 'content-type': 'application/json',
@@ -234,36 +235,16 @@ base class HttpTransport implements Transport, PresenceTransport {
     }
   }
 
-  Future<Map<String, String>> _readAuth() async {
-    try {
-      return await _auth?.getHeaders() ?? const {};
-    } on Exception catch (error, stack) {
-      Error.throwWithStackTrace(
-        _asAuthError(error, 'reading credentials'),
-        stack,
-      );
-    }
-  }
-
   Future<bool> _refresh(Future<bool> Function() refresh) async {
     try {
       return await refresh();
     } on Exception catch (error, stack) {
       Error.throwWithStackTrace(
-        _asAuthError(error, 'refreshing credentials'),
+        asAuthError(error, 'refreshing credentials'),
         stack,
       );
     }
   }
-
-  /// A cancellation passes through as thrown. Any other exception from the
-  /// credentials or the refresh callback is wrapped in an [AuthError], which
-  /// no retry layer retries (a `NetworkError` from an identity provider must
-  /// not look like a transport failure to `withRetry`).
-  static Exception _asAuthError(Exception error, String doing) =>
-      error is CrdtError && error.code == CrdtErrorCode.cancelled
-      ? error
-      : AuthError('CRDT auth failed while $doing: $error', cause: error);
 
   /// One attempt: the response, or the [NetworkError] that stopped it.
   ///

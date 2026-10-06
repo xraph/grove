@@ -16,6 +16,7 @@ import 'backoff.dart';
 import 'errors.dart';
 import 'hlc.dart';
 import 'presence_types.dart';
+import 'redact.dart';
 import 'rejection.dart';
 import 'sync_types.dart';
 import 'transport.dart';
@@ -335,7 +336,7 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
 
   /// The endpoint with its query values hidden.
   @override
-  String toString() => 'WebSocketTransport(${_redactUrl(url)})';
+  String toString() => 'WebSocketTransport(${redactUrl(url)})';
 
   // --- Internals ---
 
@@ -616,43 +617,15 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
     );
   }
 
-  /// [text] with every secret removed.
-  ///
-  /// First by parsing: each URL in the text is rebuilt with every query value
-  /// replaced by `REDACTED` and its credentials dropped, so a URL the
-  /// transport has never seen (a web connect URL carrying the auth values, an
-  /// `http://` form of the endpoint) is covered. Then the known secrets, the
-  /// endpoint's query values and the auth header values, are removed wherever
-  /// they still appear, case-insensitively, raw and form-encoded, longest
-  /// first so that a secret that contains another is removed whole. Secrets
-  /// shorter than three characters are not removed from free text.
-  String _redact(String text, Map<String, String> headers) {
-    var out = text.replaceAllMapped(_urlPattern, (m) {
-      final raw = m[0]!;
-      final core = raw.replaceFirst(RegExp(r'[.,;:)\]}]+$'), '');
-      final uri = Uri.tryParse(core);
-      final redacted = uri == null ? '<url REDACTED>' : _redactUrl(uri);
-      return '$redacted${raw.substring(core.length)}';
-    });
-    final secrets = <String>{
+  /// [text] with every secret removed: see [redactText]. The secrets are the
+  /// endpoint's query values and the auth header values.
+  String _redact(String text, Map<String, String> headers) => redactText(
+    text,
+    secrets: [
       for (final values in url.queryParametersAll.values) ...values,
       ...headers.values,
-    }.where((s) => s.length >= 3);
-    final forms = <String>{
-      for (final s in secrets) ...{
-        s,
-        Uri.encodeQueryComponent(s),
-        Uri.encodeComponent(s),
-      },
-    }.toList()..sort((a, b) => b.length.compareTo(a.length));
-    for (final form in forms) {
-      out = out.replaceAll(
-        RegExp(RegExp.escape(form), caseSensitive: false),
-        'REDACTED',
-      );
-    }
-    return out;
-  }
+    ],
+  );
 
   /// The socket is open: listen to it, keep it alive and, if a subscription
   /// is waiting, subscribe on it.
@@ -899,23 +872,6 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
     final last = _lastHlc;
     if (last == null || hlc.isAfter(last)) _lastHlc = hlc;
   }
-}
-
-/// Matches a URL in free text: a scheme, `://`, then anything up to a space or
-/// a quote.
-final _urlPattern = RegExp(r'''[A-Za-z][A-Za-z0-9+.\-]*://[^\s'"<>]+''');
-
-/// [url] without credentials or fragment, rebuilt with every query value
-/// replaced by `REDACTED`.
-String _redactUrl(Uri url) {
-  final port = url.hasPort ? ':${url.port}' : '';
-  final keys = url.hasQuery && url.query.isNotEmpty
-      ? url.queryParametersAll.keys
-      : const <String>[];
-  final query = keys.isEmpty
-      ? ''
-      : '?${[for (final k in keys) '${Uri.encodeQueryComponent(k)}=REDACTED'].join('&')}';
-  return '${url.scheme}://${url.host}$port${url.path}$query';
 }
 
 /// A copy of an error that held a secret: its type and its redacted text.
