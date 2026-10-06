@@ -1,0 +1,78 @@
+[
+  {
+    "input": "\"a\u003cb\u003e\u0026c\"",
+    "output": "\"a\\u003cb\\u003e\\u0026c\""
+  },
+  {
+    "input": "\"\u2028\u2029\"",
+    "output": "\"\\u2028\\u2029\""
+  },
+  {
+    "input": "\"line\\nbreak\\ttab\\\"quote\\\\\"",
+    "output": "\"line\\nbreak\\ttab\\\"quote\\\\\""
+  },
+  {
+    "input": "\"\\u0001\\u001f\\b\\f\"",
+    "output": "\"\\u0001\\u001f\\b\\f\""
+  },
+  {
+    "input": "\"\\u007f\"",
+    "output": "\"\""
+  },
+  {
+    "input": "\"héllo 😀\"",
+    "output": "\"héllo 😀\""
+  },
+  {
+    "input": "{\"b\":1,\"a\":[true,false,null],\"c\":{\"z\":\"\",\"y\":0}}",
+    "output": "{\"a\":[true,false,null],\"b\":1,\"c\":{\"y\":0,\"z\":\"\"}}"
+  },
+  {
+    "input": "{\"é\":1,\"e\":2,\"Z\":3}",
+    "output": "{\"Z\":3,\"e\":2,\"é\":1}"
+  },
+  {
+    "input": "0.1",
+    "output": "0.1"
+  },
+  {
+    "input": "100",
+    "output": "100"
+  },
+  {
+    "input": "1e20",
+    "output": "100000000000000000000"
+  },
+  {
+    "input": "1e21",
+    "output": "1e+21"
+  },
+  {
+    "input": "1.5e-7",
+    "output": "1.5e-7"
+  },
+  {
+    "input": "1e-7",
+    "output": "1e-7"
+  },
+  {
+    "input": "0.000001",
+    "output": "0.000001"
+  },
+  {
+    "input": "-3.25",
+    "output": "-3.25"
+  },
+  {
+    "input": "[]",
+    "output": "[]"
+  },
+  {
+    "input": "{}",
+    "output": "{}"
+  },
+  {
+    "input": "[1,\"1\",1.5]",
+    "output": "[1,\"1\",1.5]"
+  }
+]
