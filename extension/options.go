@@ -193,6 +193,18 @@ func WithCRDT(plugin *crdt.Plugin, scope ...hook.Scope) ExtOption {
 	}
 }
 
+// WithCRDTEntity names the client entity whose records live in a CRDT table,
+// so the sync routes declare it in x-forge-sync and generated clients can
+// sync it. Repeat it for each synced table.
+//
+//	groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents"}}),
+//	groveext.WithCRDTEntity("documents", "Document"),
+func WithCRDTEntity(table, entity string) ExtOption {
+	return func(e *Extension) {
+		e.crdtEntities = append(e.crdtEntities, crdtEntity{table: table, entity: entity})
+	}
+}
+
 // WithCRDTDatabase attaches the CRDT plugin to a specific named database
 // instead of the default. Requires WithCRDT and multi-DB mode.
 func WithCRDTDatabase(dbName string) ExtOption {

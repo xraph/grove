@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/xraph/forge"
 	"github.com/xraph/vessel"
@@ -55,6 +56,7 @@ type Extension struct {
 	syncer             *crdt.Syncer
 	syncControllerOpts []crdt.SyncControllerOption
 	syncController     *crdt.SyncController // initialized during registerCRDT
+	crdtEntities       []crdtEntity         // client entity per CRDT table, for x-forge-sync
 
 	// driverFactories overrides driver construction for specific
 	// driver names. Populated by WithDriverFactory; keyed on driver
@@ -408,7 +410,22 @@ func (e *Extension) registerCRDT(fapp forge.App) error {
 
 	ctrl := crdt.NewSyncController(e.crdtPlugin, e.syncControllerOpts...)
 	e.syncController = ctrl
-	forgeCtrl := &crdtForgeController{ctrl: ctrl, basePath: e.config.BasePath}
+	forgeCtrl := &crdtForgeController{ctrl: ctrl, basePath: e.config.BasePath, entities: e.crdtEntities}
+
+	for _, table := range e.crdtHookScope.Tables {
+		mapped := false
+		for _, m := range e.crdtEntities {
+			if m.table == table {
+				mapped = true
+				break
+			}
+		}
+		if !mapped {
+			e.Logger().Warn("grove: crdt table has no client entity; x-forge-sync omitted",
+				forge.F("table", table),
+			)
+		}
+	}
 
 	if err := fapp.RegisterController(forgeCtrl); err != nil {
 		return fmt.Errorf("grove: register crdt controller: %w", err)
@@ -681,7 +698,31 @@ func (e *Extension) initDB() error {
 // It registers sync routes (pull, push, stream) on the Forge router.
 type crdtForgeController struct {
 	ctrl     *crdt.SyncController
-	basePath string // URL prefix for routes (default: "/sync")
+	basePath string       // URL prefix for routes (default: "/sync")
+	entities []crdtEntity // client entities declared on the sync routes
+
+	// keepAlive is the idle interval after which the SSE stream sends a
+	// comment frame. Zero means defaultStreamKeepAlive; tests shorten it.
+	keepAlive time.Duration
+}
+
+// defaultStreamKeepAlive is how long the SSE stream may sit idle before it
+// sends a comment frame, so proxies and clients do not drop it as dead.
+const defaultStreamKeepAlive = 15 * time.Second
+
+// crdtEntity maps a CRDT table to the client entity it backs.
+type crdtEntity struct {
+	table  string
+	entity string
+}
+
+// syncOpts declares every mapped entity on one sync route.
+func (c *crdtForgeController) syncOpts(role string) []forge.RouteOption {
+	opts := make([]forge.RouteOption, 0, len(c.entities))
+	for _, m := range c.entities {
+		opts = append(opts, forge.WithSync(forge.SyncProtocolGroveCRDT, m.entity, m.table, forge.SyncRole(role)))
+	}
+	return opts
 }
 
 // Ensure compile-time interface compliance.
@@ -701,34 +742,34 @@ func (c *crdtForgeController) Routes(r forge.Router) error {
 	sync := r.Group(base)
 
 	// POST /sync/pull — remote nodes pull changes from this node.
-	if err := sync.POST("/pull", c.handlePull,
+	if err := sync.POST("/pull", c.handlePull, append([]forge.RouteOption{
 		forge.WithName("crdt.pull"),
 		forge.WithTags("crdt", "sync"),
-	); err != nil {
+	}, c.syncOpts(forge.SyncRolePull)...)...); err != nil {
 		return fmt.Errorf("crdt: register pull route: %w", err)
 	}
 
 	// POST /sync/push — remote nodes push changes to this node.
-	if err := sync.POST("/push", c.handlePush,
+	if err := sync.POST("/push", c.handlePush, append([]forge.RouteOption{
 		forge.WithName("crdt.push"),
 		forge.WithTags("crdt", "sync"),
-	); err != nil {
+	}, c.syncOpts(forge.SyncRolePush)...)...); err != nil {
 		return fmt.Errorf("crdt: register push route: %w", err)
 	}
 
 	// GET /sync/stream — SSE stream of real-time changes (Forge SSE transport).
-	if err := sync.EventStream("/stream", c.handleStream,
+	if err := sync.EventStream("/stream", c.handleStream, append([]forge.RouteOption{
 		forge.WithName("crdt.stream"),
 		forge.WithTags("crdt", "sync", "streaming"),
-	); err != nil {
+	}, c.syncOpts(forge.SyncRoleStream)...)...); err != nil {
 		return fmt.Errorf("crdt: register stream route: %w", err)
 	}
 
 	// GET /sync/ws — WebSocket bidirectional sync (Forge WebSocket transport).
-	if err := sync.WebSocket("/ws", c.handleWebSocket,
+	if err := sync.WebSocket("/ws", c.handleWebSocket, append([]forge.RouteOption{
 		forge.WithName("crdt.websocket"),
 		forge.WithTags("crdt", "sync", "websocket"),
-	); err != nil {
+	}, c.syncOpts(forge.SyncRoleSocket)...)...); err != nil {
 		return fmt.Errorf("crdt: register websocket route: %w", err)
 	}
 
@@ -960,6 +1001,16 @@ func (c *crdtForgeController) handleStream(ctx forge.Context, stream forge.Strea
 	// Get presence channel (nil if presence is disabled).
 	presenceCh := c.ctrl.PresenceChannel()
 
+	// Send a comment frame whenever the stream has been idle for a whole
+	// interval. The timer restarts after every event, so a busy stream sends
+	// none.
+	keepAlive := c.keepAlive
+	if keepAlive <= 0 {
+		keepAlive = defaultStreamKeepAlive
+	}
+	idle := time.NewTimer(keepAlive)
+	defer idle.Stop()
+
 	// Clean up presence on disconnect.
 	defer func() {
 		if nodeID != "" && c.ctrl.Presence() != nil {
@@ -968,9 +1019,21 @@ func (c *crdtForgeController) handleStream(ctx forge.Context, stream forge.Strea
 	}()
 
 	for {
+		if !idle.Stop() {
+			select {
+			case <-idle.C:
+			default:
+			}
+		}
+		idle.Reset(keepAlive)
+
 		select {
 		case <-stream.Context().Done():
 			return nil
+		case <-idle.C:
+			if err := stream.SendComment("keep-alive"); err != nil {
+				return err
+			}
 		case changes, ok := <-ch:
 			if !ok {
 				return nil // Channel closed.
