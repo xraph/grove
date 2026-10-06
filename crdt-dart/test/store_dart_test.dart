@@ -16,6 +16,13 @@ CrdtStore newStore({
   persistDebounce: Duration.zero,
 );
 
+/// A [CrdtError] with code [CrdtErrorCode.offlineQueueFull].
+final queueFull = isA<CrdtError>().having(
+  (e) => e.code,
+  'code',
+  CrdtErrorCode.offlineQueueFull,
+);
+
 void main() {
   test('a pulled tombstone deletes the record and later field writes do not resurrect it', () {
     final s = newStore();
@@ -1276,12 +1283,12 @@ void main() {
       // A delete and an insert need two slots.
       expect(
         () => s.setText('t', '1', 'body', 'hello there'),
-        throwsA(isA<PendingQueueFullError>()),
+        throwsA(queueFull),
       );
       // A remove and an add need two slots.
       expect(
         () => s.reconcileField('t', '1', 'tags', CrdtType.set, ['b']),
-        throwsA(isA<PendingQueueFullError>()),
+        throwsA(queueFull),
       );
       expect(s.exportTable('t')['1']!.toJson(), before);
       expect(s.pending, hasLength(3));
@@ -1313,7 +1320,7 @@ void main() {
         ),
       ]);
       final before = s.exportTable('t')['1']!.toJson();
-      expect(s.undo, throwsA(isA<PendingQueueFullError>()));
+      expect(s.undo, throwsA(queueFull));
       expect(s.exportTable('t')['1']!.toJson(), before);
       expect(s.pending, hasLength(2));
       expect(s.canRedo, isFalse);

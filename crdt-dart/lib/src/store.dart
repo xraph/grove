@@ -13,6 +13,7 @@ import 'dart:convert';
 
 import 'apply.dart';
 import 'compact.dart';
+import 'errors.dart';
 import 'go_json.dart';
 import 'hlc.dart';
 import 'merge.dart';
@@ -26,23 +27,6 @@ import 'wire_helpers.dart';
 
 /// Identifies one document.
 typedef DocKey = ({String table, String pk});
-
-/// Thrown by a local write when the pending queue is full and the store was
-/// created with `throwOnOverflow: true`. Port of the crdt-js `CRDTError` with
-/// code `OfflineQueueFull`.
-final class PendingQueueFullError implements Exception {
-  /// Creates the error for a queue bounded at [limit] changes.
-  const PendingQueueFullError(this.limit);
-
-  /// The queue bound.
-  final int limit;
-
-  /// The crdt-js message text.
-  String get message => 'crdt: pending queue full ($limit changes)';
-
-  @override
-  String toString() => message;
-}
 
 /// [CrdtStore.ready] completes with this when the persisted replica could
 /// not be read: the pending queue, or the document set as a whole.
@@ -253,8 +237,8 @@ final class CrdtStore {
   /// [MemoryReplicaStorage]. [maxPendingChanges] bounds the pending queue (0
   /// disables the bound); when it is reached the oldest changes are dropped
   /// and reported through [onPendingOverflow], or, with [throwOnOverflow], the
-  /// write throws [PendingQueueFullError]. [undoHistory] bounds the undo
-  /// stack.
+  /// write throws a [CrdtError] with code [CrdtErrorCode.offlineQueueFull].
+  /// [undoHistory] bounds the undo stack.
   ///
   /// [onError] hears a remote change that could not be applied. A storage
   /// failure (including a document that cannot be decoded on hydrate, a
@@ -1410,8 +1394,9 @@ final class CrdtStore {
   /// tombstone was pushed (or a later tombstone superseded it) undo returns
   /// false and discards the entry, because server tombstones are sticky.
   ///
-  /// Throws [PendingQueueFullError] (leaving the entry in place) when the
-  /// queue is full and the store throws on overflow.
+  /// Throws a [CrdtError] with code [CrdtErrorCode.offlineQueueFull] (leaving
+  /// the entry in place) when the queue is full and the store throws on
+  /// overflow.
   bool undo() {
     _checkWritable();
     if (!_undo.canUndo) return false;
@@ -1717,14 +1702,18 @@ final class CrdtStore {
     return () => _overflowHandlers.remove(handler);
   }
 
-  /// Throws [PendingQueueFullError] when the store throws on overflow and the
-  /// bound is reached. Every mutator calls this first, before it reads the
-  /// clock, so a refused write leaves no trace.
+  /// Throws a [CrdtError] with code [CrdtErrorCode.offlineQueueFull] when the
+  /// store throws on overflow and the bound is reached. Every mutator calls
+  /// this first, before it reads the clock, so a refused write leaves no
+  /// trace.
   void _assertPendingCapacity([int changes = 1]) {
     if (_throwOnOverflow &&
         _maxPendingChanges > 0 &&
         _pending.length + changes > _maxPendingChanges) {
-      throw PendingQueueFullError(_maxPendingChanges);
+      throw CrdtError(
+        'crdt: pending queue full ($_maxPendingChanges changes)',
+        code: CrdtErrorCode.offlineQueueFull,
+      );
     }
   }
 

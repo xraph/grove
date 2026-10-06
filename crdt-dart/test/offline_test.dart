@@ -13,6 +13,16 @@ CrdtStore mkStore({
   throwOnOverflow: throwOnOverflow,
 );
 
+/// A [CrdtError] with code [CrdtErrorCode.offlineQueueFull].
+final queueFull = isA<CrdtError>()
+    .having((e) => e.code, 'code', CrdtErrorCode.offlineQueueFull)
+    .having((e) => e.retryable, 'retryable', isFalse)
+    .having(
+      (e) => e.message,
+      'message',
+      'crdt: pending queue full (2 changes)',
+    );
+
 void main() {
   group('offline queue', () {
     test('bounds the pending queue and reports the overflow', () {
@@ -45,10 +55,7 @@ void main() {
       store.setField('t', 'p', 'a', 1);
       store.setField('t', 'p', 'b', 2);
       final before = store.clock.last;
-      expect(
-        () => store.setField('t', 'p', 'c', 3),
-        throwsA(isA<PendingQueueFullError>()),
-      );
+      expect(() => store.setField('t', 'p', 'c', 3), throwsA(queueFull));
       // No clock was consumed by the refused write.
       expect(store.clock.last, before);
       // The rejected change must not be left half-queued.
@@ -63,7 +70,7 @@ void main() {
       // two undos succeed and a third finds nothing. Changed from crdt-js: an
       // undo here queues a compensating change, so a full queue refuses it
       // (leaving the entry in place); clear the queue first.
-      expect(store.undo, throwsA(isA<PendingQueueFullError>()));
+      expect(store.undo, throwsA(queueFull));
       store.clearPendingChanges();
       expect(store.undo(), isTrue); // undoes "b"
       expect(store.undo(), isTrue); // undoes "a"
