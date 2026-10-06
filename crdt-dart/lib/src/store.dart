@@ -316,6 +316,7 @@ final class CrdtStore {
 
   final Set<void Function(List<ChangeRecord> dropped)> _overflowHandlers = {};
   final Set<void Function()> _globalListeners = {};
+  final Set<void Function(ChangeRecord change)> _remoteListeners = {};
 
   /// table -> pk -> listeners. Nested, never a delimited key: a pk may
   /// contain any character.
@@ -1631,6 +1632,13 @@ final class CrdtStore {
         final c = _normalizeKeys(allowed);
         _applyChangeInternal(c);
         affected.add((table: c.table, pk: c.pk));
+        for (final listener in _remoteListeners.toList()) {
+          try {
+            listener(c);
+          } on Object {
+            // An observer must not abort the batch.
+          }
+        }
         if (_quarantined.contains((c.table, c.pk))) {
           _reportStorage(
             StateError(
@@ -1659,6 +1667,17 @@ final class CrdtStore {
     }
     _requestPersist();
     return affected;
+  }
+
+  /// Calls [listener] with every remote change [applyChanges] applies, as
+  /// applied (after `beforeMerge`, with normalized names), in order. Returns
+  /// the function that removes it. A listener that throws is ignored.
+  ///
+  /// `SyncEngine.discardRejected` uses it to keep a newer value that arrives
+  /// while it fetches the server's.
+  void Function() onRemoteChange(void Function(ChangeRecord change) listener) {
+    _remoteListeners.add(listener);
+    return () => _remoteListeners.remove(listener);
   }
 
   /// The pushable pending changes, oldest first: rejected ones are left out

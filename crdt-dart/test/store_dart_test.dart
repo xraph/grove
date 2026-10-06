@@ -1367,6 +1367,57 @@ void main() {
       expect(notified, 1);
     });
   });
+
+  group('onRemoteChange', () {
+    test(
+      'hears each applied remote change in order, not skipped or local ones',
+      () {
+        final store = newStore();
+        final heard = <String>[];
+        final remove = store.onRemoteChange(
+          (c) => heard.add('${c.pk}/${c.field}'),
+        );
+        store.use(
+          FnPlugin(
+            'skip-x',
+            onBeforeMerge: (e) => e.remote.field == 'x' ? null : e.remote,
+          ),
+        );
+        ChangeRecord r(String pk, String field, int ts) => ChangeRecord(
+          table: 't',
+          pk: pk,
+          field: field,
+          crdtType: CrdtType.lww,
+          hlc: n(ts),
+          nodeId: 'srv',
+          value: const JsonValue(1),
+        );
+        store.applyChanges([r('p1', 'f', 1), r('p1', 'x', 2), r('p2', 'g', 3)]);
+        store.setField('t', 'p3', 'local', 1);
+        expect(heard, ['p1/f', 'p2/g']);
+        remove();
+        store.applyChanges([r('p4', 'f', 4)]);
+        expect(heard, hasLength(2));
+      },
+    );
+
+    test('a listener that throws does not abort the batch', () {
+      final store = newStore();
+      store.onRemoteChange((_) => throw StateError('observer'));
+      store.applyChanges([
+        ChangeRecord(
+          table: 't',
+          pk: 'p',
+          field: 'f',
+          crdtType: CrdtType.lww,
+          hlc: n(1),
+          nodeId: 'srv',
+          value: const JsonValue('v'),
+        ),
+      ]);
+      expect(store.getDocument('t', 'p')!['f'], 'v');
+    });
+  });
 }
 
 final class _HydrateFails extends StorePlugin {

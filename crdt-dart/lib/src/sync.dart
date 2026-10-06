@@ -135,6 +135,22 @@ final class _Cancelled implements Exception {
 
 /// A drift correction re-stamped pending changes, so the batch being bisected
 /// holds stale records. Caught by the push leg, which re-reads the queue.
+/// A batch failed without a verdict and with no evidence that the server
+/// works, so its changes stay pushable. The push leg skips past them, and
+/// marks [deferred] only if a later batch of the same run supplies evidence.
+final class _Stuck implements Exception {
+  _Stuck(this.error, this.trace, this.changes, [this.deferred = const []]);
+
+  final TransportError error;
+  final StackTrace trace;
+
+  /// The changes the leg must skip in this run.
+  final List<PendingChange> changes;
+
+  /// Single changes a bisection found failing alone, with what to mark them.
+  final List<(PendingChange, PushRejection)> deferred;
+}
+
 final class _Restart implements Exception {
   const _Restart();
 }
@@ -200,14 +216,17 @@ final class _Bisection {
 ///   status 0, like Go's own error text over HTTP: a recognized rejection is
 ///   handled exactly as above. An unrecognized one is transient: the run
 ///   aborts, nothing is marked or counted.
-/// - Any other failure (an unclassified 500, an unexpected status) aborts the
-///   run and is retried by the next. After [serverErrorLimit] consecutive
-///   failures the batch is bisected. A single change that keeps failing that
-///   way is marked only when this run has evidence that the server works:
-///   another change merged, or got a verdict. Without it (a queue of one
-///   change, or a server failing every request) nothing is marked; the run
-///   aborts with a [SyncInterrupted] and later runs retry, with backoff when
-///   driven by [start], for as long as it takes.
+/// - Any other failure (an unclassified 500, an unexpected status) leaves
+///   the batch pushable. The push leg skips past it, and past every later
+///   change on the same fields, so they keep their order, and pushes the rest
+///   of the queue; the run then ends with a [SyncInterrupted] and later runs
+///   retry, with backoff when driven by [start], for as long as it takes.
+///   Once a change has failed this way in [serverErrorLimit] consecutive
+///   runs, its batch is bisected. A single change that still fails alone is
+///   marked only when the run has evidence that the server works: another
+///   change merged, or got a verdict, in the same run (the rest of the queue
+///   counts). Without it (a queue of one change, or a server failing every
+///   request) nothing is marked.
 ///
 /// Only a server verdict on a change marks it. A marked change stays in the
 /// replica and in the queue until [retryRejected] or [discardRejected].
@@ -300,7 +319,8 @@ final class SyncEngine {
   /// re-stamped.
   final Duration futureTolerance;
 
-  /// Consecutive unclassified failures tolerated before bisecting.
+  /// Consecutive runs in which a change may fail without a verdict before
+  /// its batch is bisected.
   final int serverErrorLimit;
 
   /// Ceiling of the retry delay after failed runs driven by [start].
@@ -325,7 +345,9 @@ final class SyncEngine {
   SyncEngineState _state = SyncEngineState.idle;
   Future<SyncReport>? _inFlight;
   Timer? _timer;
-  int _serverErrors = 0;
+
+  /// Consecutive unclassified failures per pending key, across runs.
+  final Map<String, int> _failCounts = {};
   int _generation = 0;
   int? _epoch;
   Set<String>? _eligible;
@@ -808,19 +830,36 @@ final class SyncEngine {
     }
   }
 
+  /// The order key of a change: a later change on the same field must never
+  /// overtake an earlier one that is being skipped.
+  static (String, String, String) _fieldOf(PendingChange p) =>
+      (p.change.table, p.change.pk, p.change.field);
+
   Future<_Tally> _pushEligible(
     int gen,
     Set<String> eligible,
     void Function(_Tally) progress,
   ) async {
+    _failCounts.removeWhere((key, _) => !eligible.contains(key));
     var tally = _none;
+    // Batches that failed without a verdict or evidence: skipped for the rest
+    // of this run, together with every later change on the same fields.
+    final stuck = <_Stuck>[];
+    final skipped = <String>{};
+    final blocked = <(String, String, String)>{};
     while (true) {
       _checkCancelled(gen);
       final batch = store.pending
-          .where((p) => !p.isRejected && eligible.contains(p.key))
+          .where(
+            (p) =>
+                !p.isRejected &&
+                eligible.contains(p.key) &&
+                !skipped.contains(p.key) &&
+                !blocked.contains(_fieldOf(p)),
+          )
           .take(pushBatchSize)
           .toList();
-      if (batch.isEmpty) return tally;
+      if (batch.isEmpty) break;
       final before = _signature();
       final _Tally? step;
       try {
@@ -828,15 +867,43 @@ final class SyncEngine {
       } on _Stop catch (stop) {
         progress(_sum(tally, stop.carried));
         rethrow;
+      } on _Stuck catch (st) {
+        stuck.add(st);
+        for (final p in st.changes) {
+          skipped.add(p.key);
+          blocked.add(_fieldOf(p));
+        }
+        _checkCancelled(gen);
+        continue;
       }
-      if (step == null) return tally;
+      if (step == null) break;
       tally = _sum(tally, step);
       progress(tally);
       _checkCancelled(gen);
       // Every step clears, marks or re-stamps something, or changes the
       // batch size. Guard anyway, so the loop can never spin.
-      if (_signature() == before) return tally;
+      if (_signature() == before) break;
     }
+    if (stuck.isEmpty) return tally;
+    if (_evidence) {
+      // The rest of the queue got through: the server works, so a change a
+      // bisection found failing alone is marked, as the rule says.
+      for (final st in stuck) {
+        for (final (p, r) in st.deferred) {
+          final current = store.pending.where((x) => x.key == p.key);
+          if (current.isEmpty || current.first.isRejected) continue;
+          tally = _sum(tally, _mark(p, r));
+          _failCounts.remove(p.key);
+        }
+      }
+      progress(tally);
+    }
+    final unresolved = store.pending.any(
+      (p) => !p.isRejected && skipped.contains(p.key),
+    );
+    if (!unresolved) return tally;
+    final first = stuck.first;
+    Error.throwWithStackTrace(first.error, first.trace);
   }
 
   /// Pairs each pushed record with its pending change by [pendingKey]. Null
@@ -869,7 +936,9 @@ final class SyncEngine {
   void _pushed(List<ChangeRecord> records, PushResponse resp) {
     _skew?.observeHlc(resp.latestHlc);
     store.pluginManager.dispatchAfterPush(records.length, records);
-    _serverErrors = 0;
+    for (final r in records) {
+      _failCounts.remove(pendingKey(r));
+    }
     _evidence = true;
   }
 
@@ -958,10 +1027,16 @@ final class SyncEngine {
         // Handled above.
         return _none;
       case null:
-        if (++_serverErrors < serverErrorLimit) {
-          Error.throwWithStackTrace(e, s);
+        var worst = 0;
+        for (final p in batch) {
+          final n = (_failCounts[p.key] ?? 0) + 1;
+          _failCounts[p.key] = n;
+          if (n > worst) worst = n;
         }
-        _serverErrors = 0;
+        if (worst < serverErrorLimit) throw _Stuck(e, s, batch);
+        for (final p in batch) {
+          _failCounts.remove(p.key);
+        }
         return _bisect(gen, pairs, e, s);
     }
   }
@@ -1022,7 +1097,11 @@ final class SyncEngine {
     }
     if (b.deferred.isEmpty) return b.total;
     if (!_evidence) {
-      Error.throwWithStackTrace(b.lastUnclassified ?? e, b.lastTrace ?? s);
+      // Skipped for this run; marked at its end if later batches show the
+      // server works.
+      throw _Stuck(b.lastUnclassified ?? e, b.lastTrace ?? s, [
+        for (final (p, _) in b.deferred) p,
+      ], b.deferred);
     }
     for (final (p, r) in b.deferred) {
       b.add(_mark(p, r));
@@ -1122,6 +1201,7 @@ final class SyncEngine {
   }
 
   Future<void> _discard(int gen, String key) async {
+    void Function() stopRecording = () {};
     try {
       final running = _inFlight;
       if (running != null) {
@@ -1144,6 +1224,17 @@ final class SyncEngine {
       final c = target.change;
       final recordDelete =
           c.tombstone && !(c.crdtType == CrdtType.document && c.value != null);
+      // Every remote change the store applies to this field (or document)
+      // while the fetch runs, from a stream, a concurrent run or anything
+      // else, is applied again after the drop, so a newer value is kept.
+      final arrived = <ChangeRecord>[];
+      stopRecording = store.onRemoteChange((r) {
+        if (r.table == c.table &&
+            r.pk == c.pk &&
+            (recordDelete || r.field == c.field)) {
+          arrived.add(r);
+        }
+      });
       final fetched = <ChangeRecord>[];
       await _paged(
         gen,
@@ -1158,6 +1249,10 @@ final class SyncEngine {
       _checkCancelled(gen);
       final current = store.pending.where((p) => p.key == key).firstOrNull;
       if (current == null || !current.isRejected) return;
+      // The transaction is synchronous, so nothing else can apply while it
+      // runs; stop before it, so its own applies are not recorded.
+      stopRecording();
+      final recorded = List.of(arrived);
       store.transact(() {
         store.discardPending(key);
         if (recordDelete) {
@@ -1166,6 +1261,8 @@ final class SyncEngine {
           store.dropField(c.table, c.pk, c.field);
         }
         store.applyChanges(fetched);
+        // Idempotent and commutative: a change also in [fetched] is harmless.
+        store.applyChanges(recorded);
         store.applyChanges([
           for (final q in store.pending)
             if (q.change.table == c.table &&
@@ -1183,6 +1280,8 @@ final class SyncEngine {
         'crdt: the discard was cancelled',
         code: CrdtErrorCode.cancelled,
       );
+    } finally {
+      stopRecording();
     }
   }
 

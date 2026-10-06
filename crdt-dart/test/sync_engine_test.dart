@@ -1028,6 +1028,56 @@ void main() {
       },
     );
 
+    test(
+      'a newer value streamed during the fetch survives the discard',
+      () async {
+        final srv = FakeServer();
+        final held = _Held(srv);
+        final s = setup(server: srv, transport: held);
+        final sub = _Subscription();
+        s.engine.attachStream(sub);
+        srv.log.add(
+          ChangeRecord(
+            table: 'notes',
+            pk: 'n1',
+            field: 'locked',
+            crdtType: CrdtType.lww,
+            hlc: HLC(BigInt.from(1), 0, 'srv'),
+            nodeId: 'srv',
+            value: const JsonValue('server'),
+          ),
+        );
+        await s.engine.sync();
+        final rejected = s.store.setField('notes', 'n1', 'locked', 'mine')!;
+        srv.rejectField = 'locked';
+        await s.engine.sync();
+        srv.rejectField = null;
+        final gate = held.gate = Completer<void>();
+        // The discard's second page: its answer was computed before the edit.
+        held.gateAt = srv.pulls.length + 2;
+        final discard = s.engine.discardRejected(pendingKey(rejected));
+        await _until(() => srv.pulls.length == held.gateAt);
+        await pumpEventQueue();
+        // Another user edits the field; the server streams it during the fetch.
+        final newer = ChangeRecord(
+          table: 'notes',
+          pk: 'n1',
+          field: 'locked',
+          crdtType: CrdtType.lww,
+          hlc: HLC(BigInt.two.pow(50), 0, 'srv'),
+          nodeId: 'srv',
+          value: const JsonValue('newer'),
+        );
+        srv.log.add(newer);
+        sub.emit(StreamChange(newer));
+        held.gate = null;
+        gate.complete();
+        await discard;
+        expect(s.store.getDocument('notes', 'n1')?['locked'], 'newer');
+        expect(s.store.pending, isEmpty);
+      },
+    );
+
     for (final viaDispose in [false, true]) {
       final how = viaDispose ? 'dispose' : 'stop';
       test('$how during a discard sends nothing after it returns', () async {
@@ -1063,6 +1113,70 @@ void main() {
   });
 
   group('no mark without evidence the server works', () {
+    test(
+      'with pushBatchSize 1 the queue drains past a change failing with 500',
+      () async {
+        final s = setup(pushBatchSize: 1);
+        s.store.setField('notes', 'n1', 'title', 'poison');
+        s.store.setField('notes', 'n2', 'title', 'good');
+        s.server.onPush = (req) {
+          if (req.changes.any((c) => c.pk == 'n1')) {
+            throw _status(500, 'boom');
+          }
+        };
+        for (var i = 0; i < 8; i++) {
+          await expectLater(s.engine.sync(), throwsA(isA<TransportError>()));
+        }
+        expect(s.server.log.map((c) => c.pk), ['n2']);
+        // After n2 went, no later run has evidence: n1 stays pushable.
+        expect(s.store.rejectedCount, 0);
+        expect(s.store.pendingCount, 1);
+      },
+    );
+
+    test('a skipped change is marked once the rest of the run shows the server works', () async {
+      final s = setup(pushBatchSize: 1, serverErrorLimit: 1);
+      final events = <SyncEngineEvent>[];
+      s.engine.events.listen(events.add);
+      final poison = s.store.setField('notes', 'n1', 'title', 'poison')!;
+      s.store.setField('notes', 'n2', 'title', 'good');
+      s.server.onPush = (req) {
+        if (req.changes.any((c) => c.pk == 'n1')) {
+          throw _status(500, 'boom');
+        }
+      };
+      final report = await s.engine.sync();
+      expect(report.pushed, 1);
+      expect(report.rejected, 1);
+      expect(s.server.log.map((c) => c.pk), ['n2']);
+      expect(s.store.pending.single.key, pendingKey(poison));
+      expect(s.store.pending.single.rejection!.kind, 'server');
+      expect(events.whereType<SyncInterrupted>(), isEmpty);
+    });
+
+    test('a later change on the skipped field never overtakes it', () async {
+      final s = setup(pushBatchSize: 1);
+      s.store.setField('notes', 'n1', 'title', 'poison');
+      final later = s.store.setField('notes', 'n1', 'title', 'later')!;
+      s.store.setField('notes', 'n1', 'body', 'other field');
+      s.store.setField('notes', 'n2', 'title', 'other doc');
+      s.server.onPush = (req) {
+        if (req.changes.any((c) => c.value == const JsonValue('poison'))) {
+          throw _status(500, 'boom');
+        }
+      };
+      await expectLater(s.engine.sync(), throwsA(isA<TransportError>()));
+      expect(
+        s.server.log.map((c) => (c.pk, c.field)),
+        unorderedEquals([('n1', 'body'), ('n2', 'title')]),
+      );
+      expect(
+        s.server.pushes.expand((p) => p).map((c) => c.hlc),
+        isNot(contains(later.hlc)),
+      );
+      expect(s.store.pendingCount, 2);
+    });
+
     test(
       'a lone change failing with 500 is never marked, however many runs',
       () async {
@@ -1501,6 +1615,26 @@ final class _Rounding implements Transport {
       latestHlc: l.isZero ? l : HLC(l.ts + BigInt.from(300), l.c, l.node),
       latestHlcExact: false,
     );
+  }
+
+  @override
+  Future<PushResponse> push(PushRequest req) => inner.push(req);
+}
+
+/// Computes each pull at once and holds its answer on [gate] from pull
+/// number [gateAt].
+final class _Held implements Transport {
+  _Held(this.inner);
+  final FakeServer inner;
+  Completer<void>? gate;
+  int gateAt = 1 << 30;
+
+  @override
+  Future<PullResponse> pull(PullRequest req) async {
+    final r = await inner.pull(req);
+    final g = gate;
+    if (g != null && inner.pulls.length >= gateAt) await g.future;
+    return r;
   }
 
   @override
