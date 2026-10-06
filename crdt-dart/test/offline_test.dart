@@ -1,4 +1,5 @@
 // Port of crdt-js src/__tests__/offline.test.ts, case for case.
+import 'package:fake_async/fake_async.dart';
 import 'package:grove_crdt/grove_crdt.dart';
 import 'package:test/test.dart';
 
@@ -77,11 +78,38 @@ void main() {
       expect(store.undo(), isFalse); // "c" was never recorded
     });
 
-    test(
-      'start() syncs on an interval and stop() halts it',
-      () {},
-      skip: 'needs SyncEngine, which is ported in Task 16; the case moves to its sync tests there.',
-    );
+    test('start() syncs on an interval and stop() halts it', () {
+      fakeAsync((async) {
+        var pushes = 0;
+        final transport = _CountingTransport(() => pushes++);
+        final client = CrdtClient(nodeId: 'n1', transport: transport);
+        final store = CrdtStore(
+          'n1',
+          client.clock,
+          persistDebounce: Duration.zero,
+        );
+        final engine = SyncEngine(client, store, tables: const ['t']);
+
+        final stop = engine.start(interval: const Duration(milliseconds: 10));
+        store.setField('t', 'p', 'f', 1);
+        async.elapse(const Duration(milliseconds: 50));
+        stop();
+        async.flushMicrotasks();
+        final settled = pushes;
+        expect(settled, greaterThan(0));
+
+        // A stopped engine must not fire again. sync() is a no-op on an empty
+        // queue, so give it fresh work across several would-be periods: a
+        // leaked timer would push it.
+        store.setField('t', 'p', 'g', 2);
+        async.elapse(const Duration(milliseconds: 50));
+
+        expect(
+          pushes,
+          settled,
+        ); // no syncs after stop(), even with pending work
+      });
+    });
   });
 
   group('eviction order and overflow handlers', () {
@@ -141,4 +169,20 @@ void main() {
       },
     );
   });
+}
+
+/// An inert transport that counts pushes, like the TS case's literal.
+final class _CountingTransport implements Transport {
+  _CountingTransport(this.onPush);
+
+  final void Function() onPush;
+
+  @override
+  Future<PullResponse> pull(PullRequest req) async => PullResponse();
+
+  @override
+  Future<PushResponse> push(PushRequest req) async {
+    onPush();
+    return PushResponse(merged: req.changes.length);
+  }
 }

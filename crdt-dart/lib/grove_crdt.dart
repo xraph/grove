@@ -24,6 +24,7 @@ export 'src/room.dart';
 export 'src/sse.dart';
 export 'src/storage.dart';
 export 'src/store.dart';
+export 'src/sync.dart';
 export 'src/sync_types.dart';
 export 'src/text.dart';
 export 'src/transport.dart';
