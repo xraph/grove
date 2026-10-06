@@ -127,12 +127,22 @@ final class CrdtClient {
   CrdtStore? _store;
   bool _disposed = false;
 
+  /// Bumped by [leaveAllPresence] (and so [dispose]); a join whose snapshot
+  /// arrives after a bump seeds nothing.
+  int _presenceGeneration = 0;
+
+  /// Per topic, bumped by [leavePresence].
+  final Map<String, int> _topicGeneration = {};
+
   /// The node id pulls and pushes carry: `clock.nodeId`.
   String get nodeId => clock.nodeId;
 
   /// Pulls the changes after [since] for [tables] (the client's tables when
   /// null), narrowed by [filter]. The response's `latestHlc` is merged into
-  /// [clock], as crdt-js does.
+  /// [clock], as crdt-js does. That happens as the response arrives, even
+  /// when the caller (a cancelled `SyncEngine` run) then ignores it; it only
+  /// moves the clock forward, bounded by the drift clamp of
+  /// [HybridClock.update].
   Future<PullResponse> pull({
     List<String>? tables,
     HLC? since,
@@ -152,7 +162,7 @@ final class CrdtClient {
 
   /// Pushes [changes]. An empty list sends nothing and answers with zero
   /// merged and a fresh clock value, as crdt-js does. The response's
-  /// `latestHlc` is merged into [clock].
+  /// `latestHlc` is merged into [clock] as it arrives, as for [pull].
   Future<PushResponse> push(List<ChangeRecord> changes) async {
     if (changes.isEmpty) return PushResponse(merged: 0, latestHlc: clock.now());
     final response = await _transport.push(
@@ -247,20 +257,32 @@ final class CrdtClient {
   /// The seed needs [PresenceTransport.getPresence]. The WebSocket transport
   /// cannot answer it (the Go server has no `presence_get` handler), so over
   /// a socket this is [updatePresence] alone, as in crdt-js.
+  ///
+  /// A snapshot that arrives after [leavePresence] for [topic],
+  /// [leaveAllPresence] or [dispose] is dropped, so it cannot bring back
+  /// peers those cleared.
   Future<void> joinPresence(String topic, Object? data) async {
+    final generation = _presenceGeneration;
+    final topicGeneration = _topicGeneration[topic] ?? 0;
+    bool stale() =>
+        _disposed ||
+        generation != _presenceGeneration ||
+        topicGeneration != (_topicGeneration[topic] ?? 0);
     await updatePresence(topic, data);
+    if (stale()) return;
     final List<PresenceState> states;
     try {
       states = await _presenceTransport().getPresence(topic);
     } on UnsupportedError {
       return;
     }
-    if (_disposed) return;
+    if (stale()) return;
     presence.seed(topic, states);
   }
 
   /// Leaves [topic]: stops its heartbeat and sends `data: null`.
   Future<void> leavePresence(String topic) async {
+    _topicGeneration[topic] = (_topicGeneration[topic] ?? 0) + 1;
     _stopHeartbeat(topic);
     _lastPresence.remove(topic);
     final t = _transport;
@@ -288,6 +310,7 @@ final class CrdtClient {
       _stopHeartbeat(topic);
     }
     _lastPresence.clear();
+    _presenceGeneration++;
     presence.clear();
     Object? failure;
     StackTrace? trace;

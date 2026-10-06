@@ -560,6 +560,45 @@ void main() {
     );
   });
 
+  // Not in the TS file. A join's snapshot that arrives after the topic was
+  // left must not bring its peers back.
+  group('presence seeding races (Dart additions)', () {
+    for (final how in ['leaveAllPresence', 'dispose', 'leavePresence']) {
+      test('a join racing $how seeds nothing', () async {
+        final t = _HeldSnapshot();
+        final client = CrdtClient(nodeId: 'dev', transport: t);
+        final join = client.joinPresence('room', {'me': 1});
+        await pumpEventQueue();
+        expect(t.reads, 1, reason: 'the snapshot read is in flight');
+        switch (how) {
+          case 'leaveAllPresence':
+            await client.leaveAllPresence();
+          case 'dispose':
+            await client.dispose();
+          default:
+            await client.leavePresence('room');
+        }
+        expect(client.presence.getPresence('room'), isEmpty);
+        t.gate.complete();
+        await join;
+        expect(
+          client.presence.getPresence('room'),
+          isEmpty,
+          reason: 'the seed landed after $how',
+        );
+      });
+    }
+
+    test('a join after a leave seeds again', () async {
+      final t = _HeldSnapshot()..gate.complete();
+      final client = CrdtClient(nodeId: 'dev', transport: t);
+      await client.joinPresence('room', 1);
+      await client.leaveAllPresence();
+      await client.joinPresence('room', 1);
+      expect(client.presence.getPresence('room'), hasLength(1));
+    });
+  });
+
   // Not in the TS file. An account switch disposes the client, which must
   // leave nothing of the old session visible or running.
   group('dispose and leaveAllPresence (Dart additions)', () {
@@ -721,4 +760,33 @@ final class _CloseSpy extends http.BaseClient {
 
   @override
   void close() => onClose();
+}
+
+/// A presence transport whose snapshot read waits on a gate.
+final class _HeldSnapshot implements Transport, PresenceTransport {
+  final gate = Completer<void>();
+  var reads = 0;
+
+  @override
+  Future<PullResponse> pull(PullRequest req) async => PullResponse();
+
+  @override
+  Future<PushResponse> push(PushRequest req) async => PushResponse(merged: 0);
+
+  @override
+  Future<void> updatePresence(PresenceUpdate update) async {}
+
+  @override
+  Future<List<PresenceState>> getPresence(String topic) async {
+    reads++;
+    await gate.future;
+    return [
+      PresenceState(
+        nodeId: 'peer',
+        topic: topic,
+        data: const {'name': 'A peer'},
+        updatedAt: DateTime.now().toUtc(),
+      ),
+    ];
+  }
 }
