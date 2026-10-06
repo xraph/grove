@@ -518,12 +518,14 @@ void main() {
     });
   });
 
-  test('a throwing hook is reported and treated as pass-through', () {
+  test('a throwing hook is reported and fails closed', () {
+    // Differs from crdt-js (and from the first draft of this case, which
+    // expected a pass-through): a beforePush that throws cancels the push.
     final errors = <Object>[];
     final m = PluginManager(onPluginError: (e, name) => errors.add(e));
     m.use(_Throwing());
     final c = ChangeRecord(table: 't', pk: '1', field: 'f', crdtType: CrdtType.lww, hlc: HLC.zero, nodeId: 'a');
-    expect(m.dispatchBeforePush([c]), [c]);
+    expect(m.dispatchBeforePush([c]), isNull);
     expect(errors, hasLength(1));
   });
 
@@ -693,123 +695,140 @@ void main() {
   });
 
   group('plugin errors', () {
-    test('every hook that throws is reported with the plugin name and passes its input through', () {
-      final errors = <(String, String)>[];
-      final pm = PluginManager(onPluginError: (e, name) => errors.add((name, '$e')));
+    late List<(String, String)> errors;
+    late PluginManager pm;
+
+    setUp(() {
+      errors = [];
+      pm = PluginManager(onPluginError: (e, name) => errors.add((name, '$e')));
       pm.use(_ThrowsEverywhere());
       errors.clear(); // the init error is covered below
+    });
 
-      final w = makeWriteEvent();
-      expect(pm.dispatchBeforeWrite(w), same(w));
-      pm.dispatchAfterWrite(w);
-      final merge = makeMergeEvent();
-      expect(pm.dispatchBeforeMerge(merge), same(merge.remote));
-      pm.dispatchAfterMerge(merge);
-      const pull = PullEvent(tables: []);
-      expect(pm.dispatchBeforePull(pull), same(pull));
-      pm.dispatchAfterPull(pull, []);
-      final changes = [makeChange()];
-      expect(pm.dispatchBeforePush(changes), same(changes));
-      pm.dispatchAfterPush(1, changes);
-      final doc = <String, Object?>{};
-      expect(pm.dispatchTransformDocument('t', '1', doc), same(doc));
-      final docs = <Map<String, Object?>>[];
-      expect(pm.dispatchTransformCollection('t', docs), same(docs));
-      expect(pm.dispatchBeforePresenceUpdate('r', 5), 5);
-      pm.dispatchOnPresenceEvent(const PresenceEvent(type: 'join', nodeId: 'n', topic: 'r'));
-      final state = makeDocState();
-      expect(pm.dispatchBeforePersist('t', '1', state), same(state));
-      expect(pm.dispatchAfterHydrate('t', '1', state), same(state));
+    test('hooks that can reject or hide data fail closed and are reported with the plugin name', () {
+      expect(pm.dispatchBeforeWrite(makeWriteEvent()), isNull);
+      expect(pm.dispatchBeforeMerge(makeMergeEvent()), isNull);
+      expect(pm.dispatchBeforePull(const PullEvent(tables: [])), isNull);
+      expect(pm.dispatchBeforePush([makeChange()]), isNull);
+      expect(pm.dispatchTransformDocument('t', '1', {'secret': 1}), isNull);
+      expect(
+        pm.dispatchTransformCollection('t', [
+          {'secret': 1},
+        ]),
+        isEmpty,
+      );
+      expect(pm.dispatchBeforePresenceUpdate('r', 5), same(presenceRejected));
 
       expect(errors.map((e) => e.$1).toSet(), {'bad'});
       expect(errors.map((e) => e.$2), [
         for (final hook in [
           'beforeWrite',
-          'afterWrite',
           'beforeMerge',
-          'afterMerge',
           'beforePull',
-          'afterPull',
           'beforePush',
-          'afterPush',
           'transformDocument',
           'transformCollection',
           'beforePresenceUpdate',
-          'onPresenceEvent',
-          'beforePersist',
-          'afterHydrate',
         ])
           'Bad state: $hook',
       ]);
     });
 
-    test('a throwing hook does not stop the plugins after it', () {
-      final pm = PluginManager(onPluginError: (e, name) {});
-      pm.use(_Throwing());
-      pm.use(_Plugin('b', onBeforePush: (c) => [...c, ...c]));
-      final changes = [makeChange()];
-      expect(pm.dispatchBeforePush(changes), hasLength(2));
+    test('a throwing encryptor rethrows after reporting, so the caller persists nothing', () {
+      final doc = makeDocState();
+      expect(() => pm.dispatchBeforePersist('t', '1', doc), throwsA(isA<StateError>()));
+      expect(errors.single, ('bad', 'Bad state: beforePersist'));
+    });
+
+    test('a throwing decryptor rethrows after reporting, so nothing undecrypted is served', () {
+      final doc = makeDocState();
+      expect(() => pm.dispatchAfterHydrate('t', '1', doc), throwsA(isA<StateError>()));
+      expect(errors.single, ('bad', 'Bad state: afterHydrate'));
+    });
+
+    test('a throwing encryptor stops the chain: the later plugin never sees the document', () {
+      var later = 0;
+      pm.use(_Plugin('after', onBeforePersist: (t, pk, d) {
+        later++;
+        return d;
+      }));
+      expect(() => pm.dispatchBeforePersist('t', '1', makeDocState()), throwsStateError);
+      expect(later, 0);
+    });
+
+    test('notification hooks are reported and the other plugins still run', () {
       final order = <String>[];
       pm.use(_Plugin('c', onAfterWrite: (_) => order.add('c')));
-      pm.use(_ThrowsEverywhere());
       pm.use(_Plugin('d', onAfterWrite: (_) => order.add('d')));
-      pm.dispatchAfterWrite(makeWriteEvent());
+      final w = makeWriteEvent();
+      pm.dispatchAfterWrite(w);
+      final merge = makeMergeEvent();
+      pm.dispatchAfterMerge(merge);
+      pm.dispatchAfterPull(const PullEvent(tables: []), []);
+      pm.dispatchAfterPush(1, [makeChange()]);
+      pm.dispatchOnPresenceEvent(const PresenceEvent(type: 'join', nodeId: 'n', topic: 'r'));
       expect(order, ['c', 'd']);
+      expect(errors.map((e) => e.$2), [
+        for (final hook in ['afterWrite', 'afterMerge', 'afterPull', 'afterPush', 'onPresenceEvent']) 'Bad state: $hook',
+      ]);
     });
 
-    test('a throw in a chained hook leaves the chain on the value it had', () {
-      final pm = PluginManager(onPluginError: (e, name) {});
-      pm.use(_Plugin('a', onBeforeWrite: (e) => withValue(e, 'from-a')));
-      pm.use(_ThrowsEverywhere());
-      pm.use(_Plugin('c', onBeforeWrite: (e) => withValue(e, '${e.value}+c')));
-      expect(pm.dispatchBeforeWrite(makeWriteEvent())!.value, 'from-a+c');
+    test('a failing validator means a later plugin never sees the write', () {
+      var later = 0;
+      pm.use(_Plugin('b', onBeforeWrite: (e) {
+        later++;
+        return e;
+      }));
+      expect(pm.dispatchBeforeWrite(makeWriteEvent()), isNull);
+      expect(later, 0);
     });
 
-    test('without a handler errors are dropped', () {
-      final pm = PluginManager();
-      pm.use(_ThrowsEverywhere());
-      final changes = [makeChange()];
-      expect(pm.dispatchBeforePush(changes), same(changes));
-      pm.remove('bad');
+    test('a throw after earlier plugins ran cancels the whole chain', () {
+      final pm2 = PluginManager(onPluginError: (e, name) {});
+      pm2.use(_Plugin('a', onBeforeWrite: (e) => withValue(e, 'from-a')));
+      pm2.use(_ThrowsEverywhere());
+      pm2.use(_Plugin('c', onBeforeWrite: (e) => withValue(e, '${e.value}+c')));
+      expect(pm2.dispatchBeforeWrite(makeWriteEvent()), isNull);
     });
 
-    test('a handler that throws does not break dispatch', () {
-      final pm = PluginManager(onPluginError: (e, name) => throw StateError('handler'));
-      pm.use(_Throwing());
-      pm.use(_Plugin('b', onBeforePush: (c) => <ChangeRecord>[]));
-      expect(pm.dispatchBeforePush([makeChange()]), isEmpty);
+    test('without a handler errors are still handled by the same policy', () {
+      final quiet = PluginManager();
+      quiet.use(_ThrowsEverywhere());
+      expect(quiet.dispatchBeforePush([makeChange()]), isNull);
+      expect(() => quiet.dispatchBeforePersist('t', '1', makeDocState()), throwsStateError);
+      quiet.remove('bad');
+    });
+
+    test('a handler that throws does not break the policy', () {
+      final loud = PluginManager(onPluginError: (e, name) => throw StateError('handler'));
+      loud.use(_Throwing());
+      expect(loud.dispatchBeforePush([makeChange()]), isNull);
+      loud.use(_ThrowsEverywhere());
+      expect(() => loud.dispatchBeforePersist('t', '1', makeDocState()), throwsA(predicate((e) => '$e' == 'Bad state: beforePersist')));
     });
 
     test('an init that throws is reported and the plugin stays registered', () {
-      final errors = <String>[];
-      final pm = PluginManager(onPluginError: (e, name) => errors.add(name));
+      final errs = <String>[];
+      final pm2 = PluginManager(onPluginError: (e, name) => errs.add(name));
       final p = _ThrowsEverywhere();
-      pm.use(p);
-      expect(errors, ['bad']);
-      expect(pm.get<StorePlugin>('bad'), same(p));
+      pm2.use(p);
+      expect(errs, ['bad']);
+      expect(pm2.get<StorePlugin>('bad'), same(p));
     });
 
     test('a destroy that throws is reported and the plugin is still removed', () {
-      final errors = <String>[];
-      final pm = PluginManager(onPluginError: (e, name) => errors.add(name));
-      pm.use(_ThrowsEverywhere());
-      errors.clear();
       pm.remove('bad');
-      expect(errors, ['bad']);
+      expect(errors.single.$1, 'bad');
       expect(pm.get<StorePlugin>('bad'), isNull);
     });
 
     test('destroy calls every plugin, survives one that throws, and empties the manager', () {
-      final errors = <String>[];
-      final pm = PluginManager(onPluginError: (e, name) => errors.add(name));
       var destroyed = 0;
       pm.use(_Plugin('a', onDestroy: () => destroyed++));
-      pm.use(_ThrowsEverywhere());
       pm.use(_Plugin('c', onDestroy: () => destroyed++));
-      errors.clear();
       pm.destroy();
       expect(destroyed, 2);
-      expect(errors, ['bad']);
+      expect(errors.map((e) => e.$1), ['bad']);
       expect(pm.all(), isEmpty);
     });
   });

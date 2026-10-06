@@ -98,14 +98,25 @@ final class UndoManager {
     if (_redo.isEmpty) return null;
     final entry = _redo.removeLast();
     _undo.add(entry);
+    _trim(_undo);
     return entry;
   }
+
+  /// Pops the last entry from the undo stack WITHOUT putting it on the redo
+  /// stack, and returns it. Returns null when there is nothing to undo.
+  ///
+  /// For a store that cannot offer the entry for redo: the change it holds was
+  /// never pushed, so undoing it discards it. Use [pushRedo] afterwards if a
+  /// different entry should be redoable.
+  UndoEntry? popUndo() => _undo.isEmpty ? null : _undo.removeLast();
 
   /// Puts [entry] on the redo stack without touching the undo stack or
   /// clearing redo.
   ///
-  /// For a store whose undo had to be compensated: when the entry [undo] popped
-  /// cannot be redone as it stands, the store pushes the entry that can.
+  /// For a store whose undo works through a compensating change. It pops the
+  /// entry with [popUndo], applies the compensation, and pushes the entry that
+  /// redoes it. Using [undo] instead would leave the popped entry on the redo
+  /// stack too, and one undo would then take two redos.
   void pushRedo(UndoEntry entry) {
     _redo.add(entry);
     _trim(_redo);

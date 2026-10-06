@@ -108,17 +108,54 @@ void main() {
       expect(() => UndoManager(maxHistory: -1), throwsRangeError);
     });
 
-    test('pushRedo puts a compensated entry on the redo stack and keeps undo and redo as they are', () {
+    test('popUndo pops the top entry without touching redo', () {
       final u = UndoManager()
         ..record(change(1), null)
         ..record(change(2), null);
-      final popped = u.undo()!;
-      expect((u.undoCount, u.redoCount), (1, 1));
+      final e = u.popUndo()!;
+      expect(e.change.hlc.ts, BigInt.two);
+      expect((u.undoCount, u.redoCount), (1, 0));
+      expect(u.canRedo, isFalse);
+      expect(u.undo()!.change.hlc.ts, BigInt.one);
+    });
+
+    test('popUndo on an empty stack returns null and keeps redo', () {
+      final u = UndoManager()..record(change(1), null);
+      u.undo();
+      expect(u.popUndo(), isNull);
+      expect(u.redoCount, 1);
+    });
+
+    test('popUndo keeps the entry previousDocument for the caller', () {
+      final d = DocumentState(table: 't', pk: '1');
+      final u = UndoManager()..record(change(1).copyWith(tombstone: true), null, previousDocument: d);
+      expect(u.popUndo()!.previousDocument, same(d));
+      expect(u.canUndo, isFalse);
+    });
+
+    test('popUndo then pushRedo: one undo leaves exactly one redo entry', () {
+      final u = UndoManager()
+        ..record(change(1), null)
+        ..record(change(2), null);
+      final popped = u.popUndo()!;
       final compensated = UndoEntry(change: change(9), previousState: field(2), timestamp: popped.timestamp);
       u.pushRedo(compensated);
-      expect((u.undoCount, u.redoCount), (1, 2));
+      expect((u.undoCount, u.redoCount), (1, 1));
       expect(u.redo(), same(compensated));
-      expect(u.redo(), same(popped));
+      expect(u.redo(), isNull);
+      expect((u.undoCount, u.redoCount), (2, 0));
+    });
+
+    test('redo never grows the undo stack past maxHistory', () {
+      final u = UndoManager(maxHistory: 2)
+        ..record(change(1), null)
+        ..record(change(2), null);
+      for (var i = 3; i <= 4; i++) {
+        u.pushRedo(UndoEntry(change: change(i), previousState: null, timestamp: 0));
+      }
+      u.redo();
+      u.redo();
+      expect(u.undoCount, 2);
     });
 
     test('pushRedo enables redo on its own and a later record clears it', () {

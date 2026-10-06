@@ -113,8 +113,25 @@ final class PullEvent {
 /// whose hooks all pass their input through, so a plugin overrides only what it
 /// needs and the manager never type-checks.
 ///
-/// A `before*` hook that returns null cancels (see each hook). A hook that
-/// throws is caught by the [PluginManager] and treated as a pass-through.
+/// A `before*` hook that returns null cancels (see each hook).
+///
+/// A hook that throws is caught by the [PluginManager], reported through its
+/// error handler with the plugin's name, and handled so that a broken plugin
+/// never lets data bypass it:
+///
+/// - A hook that can reject or hide data fails closed. A throw in
+///   [beforeWrite], [beforeMerge], [beforePull], [beforePush],
+///   [transformDocument], [transformCollection] or [beforePresenceUpdate] has
+///   the outcome of the hook cancelling (see each hook).
+/// - [beforePersist] (an encryptor) and [afterHydrate] (a decryptor) cannot
+///   cancel, so a throw is rethrown to the caller after it is reported:
+///   plaintext is never persisted and undecrypted data is never served.
+/// - A notification hook that cannot change data ([init], [destroy],
+///   [afterWrite], [afterMerge], [afterPull], [afterPush], [onPresenceEvent])
+///   is reported and the remaining plugins still run.
+///
+/// Differs from crdt-js, whose manager has no try/catch: there a throwing hook
+/// propagates to the caller and aborts the operation.
 abstract class StorePlugin {
   /// Creates a plugin.
   const StorePlugin();
@@ -131,28 +148,29 @@ abstract class StorePlugin {
   void destroy() {}
 
   /// Called before a local mutation is applied. Return [e] to proceed, a
-  /// modified event to transform the write, or null to reject it.
+  /// modified event to transform the write, or null to reject it. A throw
+  /// rejects the write.
   WriteEvent? beforeWrite(WriteEvent e) => e;
 
   /// Called after a local mutation was applied and persisted.
   void afterWrite(WriteEvent e) {}
 
   /// Called before a remote change is merged. Return the change to proceed, a
-  /// modified change to transform it, or null to skip it.
+  /// modified change to transform it, or null to skip it. A throw skips it.
   ChangeRecord? beforeMerge(MergeEvent e) => e.remote;
 
   /// Called after a merge completes.
   void afterMerge(MergeEvent e) {}
 
   /// Called before a pull request is sent. Return [e], a modified event, or
-  /// null to cancel the pull.
+  /// null to cancel the pull. A throw cancels it.
   PullEvent? beforePull(PullEvent e) => e;
 
   /// Called after a pull completes with the received [changes].
   void afterPull(PullEvent e, List<ChangeRecord> changes) {}
 
   /// Called before local changes are pushed. Return the changes to push, or
-  /// null to cancel the push entirely.
+  /// null to cancel the push entirely. A throw cancels it.
   ///
   /// FILTERING IS NOT SUPPORTED. Return the same records you were given
   /// (reordered, or individually rewritten, is fine) or null. The sync engine
@@ -166,26 +184,29 @@ abstract class StorePlugin {
   void afterPush(int pushed, List<ChangeRecord> changes) {}
 
   /// Called when a document is resolved for reading. Return a transformed
-  /// document, or null to hide it.
+  /// document, or null to hide it. A throw hides it.
   Map<String, Object?>? transformDocument(String table, String pk, Map<String, Object?> doc) => doc;
 
   /// Called when a collection is resolved for reading. Return a filtered or
-  /// transformed list.
+  /// transformed list. A throw hides the whole collection (an empty list).
   List<Map<String, Object?>> transformCollection(String table, List<Map<String, Object?>> docs) => docs;
 
   /// Called before a presence update is sent. Return [data], modified data
-  /// (null is a valid payload), or [presenceRejected] to cancel the update.
+  /// (null is a valid payload), or [presenceRejected] to cancel the update. A
+  /// throw cancels it.
   Object? beforePresenceUpdate(String topic, Object? data) => data;
 
   /// Called when a remote presence event is received.
   void onPresenceEvent(PresenceEvent e) {}
 
   /// Called before a document is persisted. Return the state to store, for
-  /// example an encrypted one.
+  /// example an encrypted one. A throw is rethrown to the caller after it is
+  /// reported, so nothing is persisted.
   DocumentState beforePersist(String table, String pk, DocumentState doc) => doc;
 
   /// Called after a document is loaded from storage. Return the state to hold
-  /// in memory.
+  /// in memory. A throw is rethrown to the caller after it is reported, so the
+  /// document is not served.
   DocumentState afterHydrate(String table, String pk, DocumentState doc) => doc;
 }
 
@@ -203,12 +224,17 @@ typedef PluginErrorHandler = void Function(Object error, String pluginName);
 /// - `transform*` and `beforePersist`/`afterHydrate` chain, each hook seeing
 ///   the previous one's result.
 ///
-/// A hook, `init` or `destroy` that throws is reported through
-/// [onPluginError] and treated as a pass-through: the chain goes on with the
-/// value it had.
+/// A hook, `init` or `destroy` that throws is reported through [onPluginError]
+/// and then handled by what the hook can do (see [StorePlugin]): a hook that can
+/// reject or hide data fails closed, `beforePersist` and `afterHydrate` rethrow,
+/// and a notification hook is isolated so the remaining plugins still run. A
+/// broken plugin never causes data to bypass it.
+///
+/// Differs from crdt-js, whose manager has no try/catch.
 final class PluginManager {
-  /// Creates a manager. [onPluginError] hears every error a plugin throws and
-  /// defaults to ignoring it. An error the handler itself throws is ignored.
+  /// Creates a manager. [onPluginError] hears every error a plugin throws,
+  /// whatever happens to the operation next, and defaults to ignoring it. An
+  /// error the handler itself throws is ignored.
   PluginManager({this.onPluginError});
 
   /// Hears every error a plugin throws.
@@ -269,13 +295,25 @@ final class PluginManager {
     }
   }
 
-  /// Calls [call], or returns [fallback] after reporting the error it threw.
-  R _guard<R>(StorePlugin p, R fallback, R Function() call) {
+  /// Calls [call], or returns [closed] after reporting the error it threw.
+  /// [closed] is the value that denies: null for a hook that can cancel, an
+  /// empty list or the rejection sentinel otherwise.
+  R _failClosed<R>(StorePlugin p, R closed, R Function() call) {
     try {
       return call();
     } on Object catch (e) {
       _report(p, e);
-      return fallback;
+      return closed;
+    }
+  }
+
+  /// Calls [call], and rethrows the error it threw after reporting it.
+  R _rethrowing<R>(StorePlugin p, R Function() call) {
+    try {
+      return call();
+    } on Object catch (e) {
+      _report(p, e);
+      rethrow;
     }
   }
 
@@ -290,7 +328,8 @@ final class PluginManager {
     for (final p in _snapshot) {
       if (current == null) break;
       final input = current;
-      current = _guard<WriteEvent?>(p, input, () => p.beforeWrite(input));
+      // Differs from crdt-js: a throw cancels (fails closed) instead of propagating.
+      current = _failClosed<WriteEvent?>(p, null, () => p.beforeWrite(input));
     }
     return current;
   }
@@ -298,6 +337,7 @@ final class PluginManager {
   /// Runs `afterWrite` through every plugin.
   void dispatchAfterWrite(WriteEvent event) {
     for (final p in _snapshot) {
+      // Differs from crdt-js: a throw is reported and the other plugins still run.
       _run(p, () => p.afterWrite(event));
     }
   }
@@ -311,7 +351,8 @@ final class PluginManager {
       if (current == null) break;
       final input = current;
       event.remote = input;
-      current = _guard<ChangeRecord?>(p, input, () => p.beforeMerge(event));
+      // Differs from crdt-js: a throw cancels (fails closed) instead of propagating.
+      current = _failClosed<ChangeRecord?>(p, null, () => p.beforeMerge(event));
     }
     return current;
   }
@@ -319,6 +360,7 @@ final class PluginManager {
   /// Runs `afterMerge` through every plugin.
   void dispatchAfterMerge(MergeEvent event) {
     for (final p in _snapshot) {
+      // Differs from crdt-js: a throw is reported and the other plugins still run.
       _run(p, () => p.afterMerge(event));
     }
   }
@@ -329,7 +371,8 @@ final class PluginManager {
     for (final p in _snapshot) {
       if (current == null) break;
       final input = current;
-      current = _guard<PullEvent?>(p, input, () => p.beforePull(input));
+      // Differs from crdt-js: a throw cancels (fails closed) instead of propagating.
+      current = _failClosed<PullEvent?>(p, null, () => p.beforePull(input));
     }
     return current;
   }
@@ -337,6 +380,7 @@ final class PluginManager {
   /// Runs `afterPull` through every plugin.
   void dispatchAfterPull(PullEvent event, List<ChangeRecord> changes) {
     for (final p in _snapshot) {
+      // Differs from crdt-js: a throw is reported and the other plugins still run.
       _run(p, () => p.afterPull(event, changes));
     }
   }
@@ -348,7 +392,8 @@ final class PluginManager {
     for (final p in _snapshot) {
       if (current == null) break;
       final input = current;
-      current = _guard<List<ChangeRecord>?>(p, input, () => p.beforePush(input));
+      // Differs from crdt-js: a throw cancels (fails closed) instead of propagating.
+      current = _failClosed<List<ChangeRecord>?>(p, null, () => p.beforePush(input));
     }
     return current;
   }
@@ -356,6 +401,7 @@ final class PluginManager {
   /// Runs `afterPush` through every plugin.
   void dispatchAfterPush(int pushed, List<ChangeRecord> changes) {
     for (final p in _snapshot) {
+      // Differs from crdt-js: a throw is reported and the other plugins still run.
       _run(p, () => p.afterPush(pushed, changes));
     }
   }
@@ -367,7 +413,8 @@ final class PluginManager {
     for (final p in _snapshot) {
       if (current == null) break;
       final input = current;
-      current = _guard<Map<String, Object?>?>(p, input, () => p.transformDocument(table, pk, input));
+      // Differs from crdt-js: a throw cancels (fails closed) instead of propagating.
+      current = _failClosed<Map<String, Object?>?>(p, null, () => p.transformDocument(table, pk, input));
     }
     return current;
   }
@@ -377,7 +424,8 @@ final class PluginManager {
     var current = docs;
     for (final p in _snapshot) {
       final input = current;
-      current = _guard(p, input, () => p.transformCollection(table, input));
+      // Differs from crdt-js: a throw cancels (fails closed) instead of propagating.
+      current = _failClosed<List<Map<String, Object?>>>(p, const [], () => p.transformCollection(table, input));
     }
     return current;
   }
@@ -390,7 +438,8 @@ final class PluginManager {
     for (final p in _snapshot) {
       if (identical(current, presenceRejected)) break;
       final input = current;
-      current = _guard(p, input, () => p.beforePresenceUpdate(topic, input));
+      // Differs from crdt-js: a throw cancels (fails closed) instead of propagating.
+      current = _failClosed<Object?>(p, presenceRejected, () => p.beforePresenceUpdate(topic, input));
     }
     return current;
   }
@@ -398,6 +447,7 @@ final class PluginManager {
   /// Runs `onPresenceEvent` through every plugin.
   void dispatchOnPresenceEvent(PresenceEvent event) {
     for (final p in _snapshot) {
+      // Differs from crdt-js: a throw is reported and the other plugins still run.
       _run(p, () => p.onPresenceEvent(event));
     }
   }
@@ -407,7 +457,8 @@ final class PluginManager {
     var current = doc;
     for (final p in _snapshot) {
       final input = current;
-      current = _guard(p, input, () => p.beforePersist(table, pk, input));
+      // Differs from crdt-js: the error is reported, then rethrown to the caller.
+      current = _rethrowing(p, () => p.beforePersist(table, pk, input));
     }
     return current;
   }
@@ -417,7 +468,8 @@ final class PluginManager {
     var current = doc;
     for (final p in _snapshot) {
       final input = current;
-      current = _guard(p, input, () => p.afterHydrate(table, pk, input));
+      // Differs from crdt-js: the error is reported, then rethrown to the caller.
+      current = _rethrowing(p, () => p.afterHydrate(table, pk, input));
     }
     return current;
   }
