@@ -58,11 +58,14 @@ void main() {
         b.store.getDocument('notes', 'n1'),
         a.store.getDocument('notes', 'n1'),
       );
-      final serverDoc = await server.state('notes', 'n1');
+      final serverDoc = (await server.state('notes', 'n1'))!;
       final local = resolved(a.store.getDocumentState('notes', 'n1')!);
-      expect(resolved(serverDoc!)['title'], local['title']);
-      expect(resolved(serverDoc)['views'], local['views']);
-      expect(resolved(serverDoc)['tags'], local['tags']);
+      final remote = resolved(serverDoc);
+      expect(
+        remote.keys,
+        unorderedEquals(['title', 'views', 'tags', 'items', 'body', 'meta']),
+      );
+      expect(remote, local);
     });
 
     test('a local delete comes back as a pulled tombstone', () async {

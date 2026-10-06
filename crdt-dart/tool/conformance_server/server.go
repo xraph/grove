@@ -138,10 +138,12 @@ func sinceFromQuery(r *http.Request) crdt.HLC {
 	return since
 }
 
-// streamSSE mirrors the extension's handleStream: changes and presence. It
-// also sends a keep-alive comment every 15 seconds, which the extension does
-// not do at grove v1.7.0 (streamKeepAlive is set and never read).
-func (s *server) streamSSE(w http.ResponseWriter, r *http.Request, tables []string, since crdt.HLC, withPresence bool) {
+// streamSSE mirrors the extension's handleStream: changes and presence, and
+// the removal of nodeID's presence when the stream ends (extension.go
+// handleStream). It also sends a keep-alive comment every 15 seconds, which
+// the extension does not do at grove v1.7.0 (streamKeepAlive is set and never
+// read).
+func (s *server) streamSSE(w http.ResponseWriter, r *http.Request, tables []string, since crdt.HLC, nodeID string, withPresence bool) {
 	ch, err := s.ctrl.StreamChangesSince(r.Context(), tables, since)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -156,6 +158,11 @@ func (s *server) streamSSE(w http.ResponseWriter, r *http.Request, tables []stri
 	var presence <-chan crdt.PresenceEvent
 	if withPresence {
 		presence = s.ctrl.PresenceChannel()
+		defer func() {
+			if nodeID != "" && s.ctrl.Presence() != nil {
+				s.ctrl.Presence().RemoveNode(nodeID)
+			}
+		}()
 	}
 	keepAlive := time.NewTicker(15 * time.Second)
 	defer keepAlive.Stop()
@@ -192,7 +199,7 @@ func (s *server) nativeStream(w http.ResponseWriter, r *http.Request) {
 			tables = append(tables, t)
 		}
 	}
-	s.streamSSE(w, r, tables, sinceFromQuery(r), true)
+	s.streamSSE(w, r, tables, sinceFromQuery(r), r.URL.Query().Get("node_id"), true)
 }
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -343,7 +350,7 @@ func (s *server) dtoStream(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.streamSSE(w, r, []string{table}, crdt.HLC{}, false)
+	s.streamSSE(w, r, []string{table}, crdt.HLC{}, "", false)
 }
 
 func (s *server) dtoWS(w http.ResponseWriter, r *http.Request) {
@@ -354,6 +361,10 @@ func (s *server) dtoWS(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- admin ---
+//
+// Test-only: these routes let a test arrange server state (reject a field,
+// seed rows, drop a dataset, inspect a record). They are unauthenticated by
+// design, and the server binds 127.0.0.1 only.
 
 func (s *server) adminReject(w http.ResponseWriter, r *http.Request) {
 	s.hook.mu.Lock()

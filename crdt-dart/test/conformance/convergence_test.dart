@@ -72,7 +72,7 @@ void main() {
     test(
       'two devices edit the same field offline converge to the later write',
       () async {
-        var aNow = 1000000;
+        const aNow = 1000000;
         var bNow = 1000000;
         final a = replica(
           'dev-a',
@@ -98,7 +98,6 @@ void main() {
           ),
           'from b (later)',
         );
-        aNow = 0;
       },
     );
 
@@ -135,12 +134,18 @@ void main() {
             expect(serverDoc, isNull, reason: 'pk $pk is untouched');
             continue;
           }
-          final serverFields = {
-            for (final e in serverDoc!.fields.entries)
-              e.key: resolveFieldValue(e.value),
-          };
-          for (final f in serverFields.keys) {
-            expect(local[f], serverFields[f], reason: 'pk $pk field $f');
+          final localState = a.store.getDocumentState('notes', pk)!;
+          Object? value(DocumentState d, String f) =>
+              d.fields[f] == null ? null : resolveFieldValue(d.fields[f]!);
+          for (final f in {
+            ...localState.fields.keys,
+            ...serverDoc!.fields.keys,
+          }) {
+            expect(
+              value(localState, f),
+              value(serverDoc, f),
+              reason: 'pk $pk field $f',
+            );
           }
         }
       });

@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:isolate';
+import 'dart:math';
 
 import 'package:grove_crdt/grove_crdt.dart';
 import 'package:http/http.dart' as http;
@@ -74,21 +74,26 @@ final class ConformanceServer {
     }
   }
 
-  /// Builds into a private file and renames it into place, so test files
-  /// building at the same time never write the same path. A server that is
+  /// Builds into a private file (process id plus a random suffix) and renames
+  /// it into place, so test files building at the same time never write the
+  /// same path. A server that is
   /// already running keeps the old file's inode.
   static Future<String> _build() async {
     final dir = Directory('${Directory.current.path}/.dart_tool');
     await dir.create(recursive: true);
     final out = '${dir.path}/conformance_server';
-    final tmp = '$out.${pid}_${Isolate.current.hashCode}.tmp';
+    final tmp =
+        '$out.${pid}_${Random.secure().nextInt(1 << 32).toRadixString(16)}.tmp';
     final r = await Process.run(
       'go',
       ['build', '-o', tmp, '.'],
       workingDirectory: 'tool/conformance_server',
       environment: _goEnvironment,
     );
-    if (r.exitCode != 0) throw StateError('go build failed:\n${r.stderr}');
+    if (r.exitCode != 0) {
+      if (File(tmp).existsSync()) File(tmp).deleteSync();
+      throw StateError('go build failed:\n${r.stderr}');
+    }
     await File(tmp).rename(out);
     return out;
   }
