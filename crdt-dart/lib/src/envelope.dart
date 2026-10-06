@@ -63,9 +63,9 @@ final class GroveEnvelope implements SyncEnvelope {
 /// foundry's DTO framing: camelCase envelopes around grove change records.
 ///
 /// A response that omits `latestHlc` decodes it as [HLC.zero]. A numeric
-/// `latestHlc.ts` goes through `num`, so on the web it may round. The sync
-/// engine never uses `latestHlc` as a cursor; it derives cursors from the
-/// pulled changes' own HLCs.
+/// `latestHlc.ts` goes through `num`, so on the web it may round; such a pull
+/// response says so in `PullResponse.latestHlcExact`, and the sync engine
+/// backs off a margin before using it as a cursor.
 final class CamelDtoEnvelope implements SyncEnvelope {
   /// Creates the envelope.
   const CamelDtoEnvelope();
@@ -103,9 +103,11 @@ final class CamelDtoEnvelope implements SyncEnvelope {
   @override
   PullResponse decodePull(Object? json) {
     final m = wireObj(json);
+    final latest = m['latestHlc'];
     return PullResponse(
       changes: wireList(m['changes'], ChangeRecord.fromJson),
-      latestHlc: _readHlc(m['latestHlc']),
+      latestHlc: _readHlc(latest),
+      latestHlcExact: !(latest is Map && latest['ts'] is num),
     );
   }
 

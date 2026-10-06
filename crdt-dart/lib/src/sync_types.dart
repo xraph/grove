@@ -85,14 +85,27 @@ final class PullRequest {
 @immutable
 final class PullResponse {
   /// Creates a pull response. [latestHlc] defaults to [HLC.zero].
-  PullResponse({this.changes = const [], HLC? latestHlc})
-    : latestHlc = latestHlc ?? HLC.zero;
+  /// [latestHlcExact] is false when the envelope carried `latestHlc.ts` as a
+  /// JSON number, which may have rounded on the web.
+  PullResponse({
+    this.changes = const [],
+    HLC? latestHlc,
+    this.latestHlcExact = true,
+  }) : latestHlc = latestHlc ?? HLC.zero;
 
   /// The changes since the requested clock.
   final List<ChangeRecord> changes;
 
-  /// The newest clock the server holds.
+  /// The highest HLC among the rows the server read for this page, before
+  /// its filter and its outbound hook hid any of them (Go
+  /// `SyncController.HandlePull`). Zero when it read none.
   final HLC latestHlc;
+
+  /// Whether [latestHlc] is exactly what the server sent. Grove's own wire
+  /// form carries `ts` as a decimal string, which is exact everywhere. A
+  /// numeric `ts` goes through a double on the web and may be off by up to
+  /// half a ulp (512 ns at int64 magnitudes).
+  final bool latestHlcExact;
 
   /// Go wire form.
   Map<String, Object?> toJson() => {
@@ -103,9 +116,11 @@ final class PullResponse {
   /// Decodes the Go wire form. A `null` `changes` decodes as empty.
   static PullResponse fromJson(Object? j) {
     final m = wireObj(j);
+    final latest = m['latest_hlc'];
     return PullResponse(
       changes: wireList(m['changes'], ChangeRecord.fromJson),
-      latestHlc: HLC.fromJson(m['latest_hlc']),
+      latestHlc: HLC.fromJson(latest),
+      latestHlcExact: !(latest is Map && latest['ts'] is num),
     );
   }
 }

@@ -145,4 +145,24 @@ void main() {
       '{"data":{"x":1},"node_id":"dev","topic":"ds"}',
     );
   });
+
+  test('a pull latest_hlc is exact as a string and possibly rounded as a '
+      'number', () {
+    Map<String, Object?> grove(Object ts) => {
+      'changes': <Object?>[],
+      'latest_hlc': {'ts': ts, 'c': 1, 'node': 's'},
+    };
+    Map<String, Object?> camel(Object ts) => {
+      'changes': <Object?>[],
+      'latestHlc': {'ts': ts, 'counter': 1, 'nodeId': 's'},
+    };
+    expect(groveEnvelope.decodePull(grove('5')).latestHlcExact, isTrue);
+    expect(groveEnvelope.decodePull(grove(5)).latestHlcExact, isFalse);
+    expect(camelDtoEnvelope.decodePull(camel('5')).latestHlcExact, isTrue);
+    expect(camelDtoEnvelope.decodePull(camel(5)).latestHlcExact, isFalse);
+    expect(
+      camelDtoEnvelope.decodePull({'changes': null}).latestHlcExact,
+      isTrue,
+    );
+  });
 }

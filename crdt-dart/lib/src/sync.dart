@@ -7,6 +7,7 @@ library;
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'backoff.dart';
 import 'client.dart';
 import 'clock_skew.dart';
 import 'errors.dart';
@@ -118,7 +119,13 @@ enum SyncEngineState {
 
 /// The run hit a terminal state (gone, unauthorized). Caught by the run.
 final class _Stop implements Exception {
-  const _Stop();
+  _Stop(this.error);
+
+  /// The response that ended the run.
+  final TransportError error;
+
+  /// What the push leg had done before the stop, for the partial report.
+  _Tally carried = _none;
 }
 
 /// The run was cancelled by `stop` or `dispose`. Caught by the run.
@@ -149,9 +156,6 @@ typedef _Pair = ({PendingChange pending, ChangeRecord record});
 final class _Bisection {
   /// What the bisection pushed and marked so far.
   _Tally total = _none;
-
-  /// Whether some push got through or got a verdict on a change.
-  bool sawServerWork = false;
 
   /// Single changes that failed without a verdict, to mark at the end.
   final List<(PendingChange, PushRejection)> deferred = [];
@@ -184,18 +188,26 @@ final class _Bisection {
 ///   is, and stop every later run until [resume].
 /// - 408, 429, 502, 503 and 504, a [NetworkError] and an `AuthError` abort the
 ///   run with a [SyncInterrupted]. Nothing is marked.
-/// - 413 and a [BatchTooLargeRejection] halve the batch.
+/// - 413 and a [BatchTooLargeRejection] halve the batch. After a batch goes
+///   through, the size doubles back, up to the configured size and the
+///   server's known limit. A single change refused with either is marked.
 /// - A [ValidationRejection] marks its change and the rest are pushed again.
 /// - A [DriftRejection] corrects the clock and re-stamps the change once; it
 ///   is marked only when it cannot be re-stamped or is refused again.
 /// - A [HookRejection] and an [UnclassifiedRejection] (a 400 or 422) bisect
 ///   the batch until single changes fail, marking each with its reason.
-/// - Any other failure (an unclassified 500, a WebSocket error frame, an
-///   unexpected status) aborts the run and is retried by the next. After
-///   [serverErrorLimit] consecutive failures the batch is bisected. A single
-///   change that keeps failing that way is marked only when some other push
-///   of the bisection got through (or the batch was that change alone), so a
-///   server that fails every request never gets the queue marked.
+/// - A failure with no HTTP status (a WebSocket error frame) is classified as
+///   status 0, like Go's own error text over HTTP: a recognized rejection is
+///   handled exactly as above. An unrecognized one is transient: the run
+///   aborts, nothing is marked or counted.
+/// - Any other failure (an unclassified 500, an unexpected status) aborts the
+///   run and is retried by the next. After [serverErrorLimit] consecutive
+///   failures the batch is bisected. A single change that keeps failing that
+///   way is marked only when this run has evidence that the server works:
+///   another change merged, or got a verdict. Without it (a queue of one
+///   change, or a server failing every request) nothing is marked; the run
+///   aborts with a [SyncInterrupted] and later runs retry, with backoff when
+///   driven by [start], for as long as it takes.
 ///
 /// Only a server verdict on a change marks it. A marked change stays in the
 /// replica and in the queue until [retryRejected] or [discardRejected].
@@ -206,7 +218,13 @@ final class _Bisection {
 /// merged and rejects only future-dated changes. Bisection gives the same
 /// result under both, because a re-pushed change is idempotent.
 ///
-/// Cancellation: [stop] and [dispose] cancel the run in flight. The run checks
+/// A late answer abandoned by a cancellation changes nothing the engine owns.
+/// [CrdtClient] has already merged its `latestHlc` into the shared clock by
+/// then; that only moves the clock forward (and Go's drift clamp bounds it),
+/// so no issued or future HLC is affected.
+///
+/// Cancellation: [stop] and [dispose] cancel the run in flight, and a
+/// [discardRejected] in flight. The run checks
 /// for cancellation before every transport call, after each pull page, after
 /// each push batch and after each bisection step, and a request in flight is
 /// abandoned at once (its answer, when it lands, changes nothing). A
@@ -226,7 +244,11 @@ final class SyncEngine {
   /// live in memory. [futureTolerance] is how far past corrected time a
   /// pending change may be before it is re-stamped. [baseNodeId] is the node
   /// id a rebase builds on (`<baseNodeId>~<epoch>`); it defaults to the
-  /// store's node id up to its first `~`.
+  /// store's node id up to its first `~`. A [skew] requires [cursors].
+  ///
+  /// When a run driven by [start] fails, the next one waits longer: the
+  /// interval, then a jittered delay that doubles up to [maxRetryDelay].
+  /// [random] replaces the jitter source, for tests.
   SyncEngine(
     this.client,
     this.store, {
@@ -237,7 +259,10 @@ final class SyncEngine {
     this.futureTolerance = const Duration(minutes: 1),
     this.serverErrorLimit = 3,
     String? baseNodeId,
+    this.maxRetryDelay = const Duration(minutes: 5),
+    this._random,
   }) : tables = List.unmodifiable(tables),
+       _configuredBatchSize = pushBatchSize,
        _baseNodeId = baseNodeId ?? store.nodeId.split('~').first {
     assert(
       identical(client.clock, store.clock),
@@ -245,6 +270,15 @@ final class SyncEngine {
     );
     if (pushBatchSize < 1) {
       throw ArgumentError.value(pushBatchSize, 'pushBatchSize', 'must be >= 1');
+    }
+    if (_skew != null && _cursors == null) {
+      // The clock epoch must survive a restart: an epoch kept in memory would
+      // start again at 1 and reuse `<base>~1`, whose HLCs are already issued.
+      throw ArgumentError.value(
+        _cursors,
+        'cursors',
+        'a ClockSkew needs a cursors store to persist the clock epoch',
+      );
     }
     _skew?.attach(store.clock);
     store.ready.then<void>((_) => _storeReady = true, onError: (Object _) {});
@@ -268,6 +302,18 @@ final class SyncEngine {
 
   /// Consecutive unclassified failures tolerated before bisecting.
   final int serverErrorLimit;
+
+  /// Ceiling of the retry delay after failed runs driven by [start].
+  final Duration maxRetryDelay;
+
+  final int _configuredBatchSize;
+  final double Function()? _random;
+  int? _serverLimit;
+  Duration? _interval;
+  Backoff? _retry;
+  bool _evidence = false;
+  final Set<Future<void>> _discards = {};
+  Future<void>? _disposing;
 
   final SyncCursorStore? _cursors;
   final ClockSkew? _skew;
@@ -360,10 +406,49 @@ final class SyncEngine {
     Duration interval = const Duration(seconds: 30),
   }) {
     if (_disposed) throw StateError('crdt: the sync engine is disposed');
-    _timer?.cancel();
     _halted = false;
-    _timer = Timer.periodic(interval, (_) => _syncQuietly());
+    _interval = interval;
+    _retry = Backoff(
+      initialDelay: interval,
+      maxDelay: maxRetryDelay < interval ? interval : maxRetryDelay,
+      random: _random,
+    );
+    _schedule(interval);
     return stop;
+  }
+
+  void _schedule(Duration delay) {
+    _timer?.cancel();
+    _timer = Timer(delay, _tick);
+  }
+
+  void _tick() {
+    _timer = null;
+    if (_disposed || _halted) return;
+    final gen = _generation;
+    unawaited(
+      sync()
+          .then<Duration?>(
+            (_) {
+              _retry?.reset();
+              return _interval;
+            },
+            onError: (Object e) {
+              final interval = _interval;
+              final retry = _retry;
+              if (interval == null || retry == null || _isCancellation(e)) {
+                return interval;
+              }
+              final wait = retry.next();
+              return wait < interval ? interval : wait;
+            },
+          )
+          .then<void>((delay) {
+            if (delay == null || _disposed || _halted) return;
+            if (gen != _generation || _timer != null) return;
+            _schedule(delay);
+          }),
+    );
   }
 
   void _syncQuietly() {
@@ -371,12 +456,14 @@ final class SyncEngine {
     unawaited(sync().then<void>((_) {}, onError: (Object _) {}));
   }
 
-  /// Stops the timer and cancels the run in flight. Completes when that run
-  /// has finished. A request in flight is abandoned at once, so this does not
-  /// wait on the network.
+  /// Stops the timer and cancels the run in flight and any [discardRejected]
+  /// in flight. Completes when they have finished. A request in flight is
+  /// abandoned at once, so this does not wait on the network.
   ///
   /// Until [start] is called again, a stream attached with [attachStream]
-  /// does not start runs. [sync] still runs when called.
+  /// neither starts runs nor applies changes. [sync] still runs when called.
+  /// An account switch calls [dispose] (or [stop] and detaches the stream),
+  /// so nothing from the old account reaches the store.
   Future<void> stop() async {
     _timer?.cancel();
     _timer = null;
@@ -386,12 +473,13 @@ final class SyncEngine {
       if (!c.isCompleted) c.completeError(const _Cancelled());
     }
     _waiting.clear();
-    final running = _inFlight;
-    if (running == null) return;
-    try {
-      await running;
-    } on Object {
-      // The run's outcome belongs to whoever called sync().
+    final running = [?_inFlight, ..._discards];
+    for (final f in running) {
+      try {
+        await f;
+      } on Object {
+        // The outcome belongs to whoever called sync() or discardRejected().
+      }
     }
   }
 
@@ -402,8 +490,9 @@ final class SyncEngine {
   /// pulls what the stream missed while it was down. An idle recycle
   /// ([ConnectionReason.idle]) is not an error and loses nothing, so it starts
   /// no run. A [StreamError] is left to the stream, which reconnects on its
-  /// own. Changes arriving before `store.ready` are dropped; the next pull
-  /// fetches them. Stream changes do not move the pull cursors.
+  /// own. Changes arriving before `store.ready`, or after [stop] until the
+  /// next [start], are dropped; the next pull fetches them. Stream changes do
+  /// not move the pull cursors.
   void Function() attachStream(CrdtSubscription subscription) {
     if (_disposed) throw StateError('crdt: the sync engine is disposed');
     late final void Function() remove;
@@ -433,7 +522,7 @@ final class SyncEngine {
   }
 
   void _applyStreamed(List<ChangeRecord> changes) {
-    if (!_storeReady || changes.isEmpty) return;
+    if (!_storeReady || _halted || changes.isEmpty) return;
     final Set<DocKey> affected;
     try {
       affected = store.applyChanges(changes);
@@ -483,12 +572,12 @@ final class SyncEngine {
       if (s == 404 || s == 410) {
         _state = SyncEngineState.gone;
         _emit(DatasetGone(s!, serverMessage(e.body) ?? e.message));
-        throw const _Stop();
+        throw _Stop(e);
       }
       if (s == 401 || s == 403) {
         _state = SyncEngineState.unauthorized;
         _emit(AuthRequired(s!));
-        throw const _Stop();
+        throw _Stop(e);
       }
       rethrow;
     } finally {
@@ -505,6 +594,7 @@ final class SyncEngine {
       return const SyncReport();
     }
     _state = SyncEngineState.syncing;
+    _evidence = false;
     final pulledChanges = <ChangeRecord>[];
     var tally = _none;
     SyncReport partial() => SyncReport(
@@ -537,7 +627,9 @@ final class SyncEngine {
     } on _Stop {
       return partial();
     } on Object catch (e) {
-      if (_isCancellation(e)) {
+      // An error surfacing after a cancellation (a failed cursor write, a
+      // store that became unavailable) belongs to a cancelled run.
+      if (_isCancellation(e) || gen != _generation) {
         if (_state == SyncEngineState.syncing) _state = SyncEngineState.idle;
         if (e is CrdtError) rethrow;
         throw CrdtError(
@@ -568,27 +660,85 @@ final class SyncEngine {
       _checkCancelled(gen);
       if (cursor != null) _cursorCache[table] = cursor;
     }
+    await _paged(gen, table, cursor, (changes, next) async {
+      if (changes.isNotEmpty) {
+        final affected = store.applyChanges(changes);
+        if (affected.isNotEmpty) _emit(ChangesApplied(affected));
+        out.addAll(changes);
+      }
+      if (next == null) return;
+      _cursorCache[table] = next;
+      await _cursors?.writeCursor(table, next);
+      _checkCancelled(gen);
+    });
+  }
+
+  /// Pulls [table] page by page from just below [from] (the start when
+  /// null), narrowed by [filter], until a page makes no progress. Each page
+  /// goes to [onPage] with the cursor it advances to, or null on the last
+  /// page. Returns the final cursor.
+  ///
+  /// A non-empty page advances to the highest `(ts, c)` among its changes.
+  /// When that makes no progress, or the page is empty, it advances to the
+  /// page's `latestHlc` if that is past the cursor: Go computes it over the
+  /// rows it read before its filter (applied after the LIMIT) and its
+  /// `BeforeOutboundRead` hook hid any of them, so a page whose rows were all
+  /// hidden still moves the cursor on instead of ending the pull.
+  ///
+  /// A page shorter than its limit is not taken as the end: the engine does
+  /// not know the server's limit. More changes sharing one `(ts, c)` than fit
+  /// in a page (which needs that many distinct nodes) would stop the pull at
+  /// that group.
+  Future<HLC?> _paged(
+    int gen,
+    String table,
+    HLC? from,
+    Future<void> Function(List<ChangeRecord> changes, HLC? next) onPage, {
+    SyncFilter? filter,
+  }) async {
+    var cursor = from;
     while (true) {
       final since = cursor == null ? null : _below(cursor);
       final resp = await _call(
         gen,
-        () => client.pull(tables: [table], since: since),
+        () => client.pull(tables: [table], since: since, filter: filter),
       );
-      if (resp.changes.isEmpty) return;
-      final affected = store.applyChanges(resp.changes);
-      if (affected.isNotEmpty) _emit(ChangesApplied(affected));
-      out.addAll(resp.changes);
-      var pageMax = resp.changes.first.hlc;
-      for (final c in resp.changes) {
-        if (_cmpTsc(c.hlc, pageMax) > 0) pageMax = c.hlc;
+      HLC? next;
+      if (resp.changes.isNotEmpty) {
+        var pageMax = resp.changes.first.hlc;
+        for (final c in resp.changes) {
+          if (_cmpTsc(c.hlc, pageMax) > 0) pageMax = c.hlc;
+        }
+        if (cursor == null || _cmpTsc(pageMax, cursor) > 0) next = pageMax;
       }
-      // A page that only repeats the boundary makes no progress: done.
-      if (cursor != null && _cmpTsc(pageMax, cursor) <= 0) return;
-      cursor = pageMax;
-      _cursorCache[table] = pageMax;
-      await _cursors?.writeCursor(table, pageMax);
-      _checkCancelled(gen);
+      if (next == null) {
+        final latest = _latestCursor(resp);
+        if (latest != null && (cursor == null || _cmpTsc(latest, cursor) > 0)) {
+          next = latest;
+        }
+      }
+      await onPage(resp.changes, next);
+      if (next == null) return cursor;
+      cursor = next;
     }
+  }
+
+  /// A double holds 53 significant bits. An int64 nanosecond timestamp is
+  /// below 2^63, where a double's ulp is at most 2^10 = 1024 ns, so rounding
+  /// moves it by at most 512 ns (128 ns for timestamps before 2043, which are
+  /// below 2^61). One microsecond covers every int64 magnitude.
+  static final BigInt _roundingMargin = BigInt.from(1000);
+
+  /// The cursor a page's `latestHlc` allows, or null when it is zero. An
+  /// exact value is used as it is. One that may have rounded is moved down
+  /// by [_roundingMargin] with counter 0, so it is never past the real one;
+  /// the rows in between are pulled again, which is idempotent.
+  static HLC? _latestCursor(PullResponse resp) {
+    final latest = resp.latestHlc;
+    if (latest.isZero) return null;
+    if (resp.latestHlcExact) return HLC(latest.ts, latest.c, '');
+    final ts = latest.ts - _roundingMargin;
+    return ts > BigInt.zero ? HLC(ts, 0, '') : null;
   }
 
   Future<void> _correctClock(int gen) async {
@@ -672,13 +822,19 @@ final class SyncEngine {
           .toList();
       if (batch.isEmpty) return tally;
       final before = _signature();
-      final step = await _pushBatch(gen, batch);
+      final _Tally? step;
+      try {
+        step = await _pushBatch(gen, batch);
+      } on _Stop catch (stop) {
+        progress(_sum(tally, stop.carried));
+        rethrow;
+      }
       if (step == null) return tally;
       tally = _sum(tally, step);
       progress(tally);
       _checkCancelled(gen);
-      // Every step clears, marks or re-stamps something, or shrinks the
-      // batch. Guard anyway, so the loop can never spin.
+      // Every step clears, marks or re-stamps something, or changes the
+      // batch size. Guard anyway, so the loop can never spin.
       if (_signature() == before) return tally;
     }
   }
@@ -701,6 +857,22 @@ final class SyncEngine {
     return pairs;
   }
 
+  /// The batch size after a batch went through: double, up to the
+  /// configured size and the server's known limit.
+  void _growBatch() {
+    var cap = _configuredBatchSize;
+    final limit = _serverLimit;
+    if (limit != null && limit >= 1 && limit < cap) cap = limit;
+    pushBatchSize = math.min(cap, math.max(pushBatchSize, pushBatchSize * 2));
+  }
+
+  void _pushed(List<ChangeRecord> records, PushResponse resp) {
+    _skew?.observeHlc(resp.latestHlc);
+    store.pluginManager.dispatchAfterPush(records.length, records);
+    _serverErrors = 0;
+    _evidence = true;
+  }
+
   /// One top-level batch. Null when `beforePush` cancelled the push.
   Future<_Tally?> _pushBatch(int gen, List<PendingChange> batch) async {
     final records = store.pluginManager.dispatchBeforePush([
@@ -716,10 +888,22 @@ final class SyncEngine {
     // Clears the pre-hook snapshot, as crdt-js does (see
     // StorePlugin.beforePush on why a hook must not filter).
     store.clearPendingChanges([for (final p in batch) p.change]);
-    _skew?.observeHlc(resp.latestHlc);
-    store.pluginManager.dispatchAfterPush(records.length, records);
-    _serverErrors = 0;
+    _pushed(records, resp);
+    _growBatch();
     return (pushed: records.length, merged: resp.merged, rejected: 0);
+  }
+
+  /// The status a failure is classified with: a missing one (a WebSocket
+  /// error frame) reads as 0, which [classifyPushError] treats like Go's
+  /// 500.
+  static int _statusOf(TransportError e) => e.statusCode ?? 0;
+
+  /// Whether a failure is transient: a retry status, or a failure with no
+  /// HTTP status whose text names no rejection (a closed socket, a timeout).
+  static bool _transient(TransportError e) {
+    final status = _statusOf(e);
+    if (isTransientStatus(status)) return true;
+    return status == 0 && classifyPushError(0, e.body) == null;
   }
 
   Future<_Tally> _batchFailed(
@@ -729,18 +913,18 @@ final class SyncEngine {
     TransportError e,
     StackTrace s,
   ) async {
-    final status = e.statusCode;
-    if (status == null || isTransientStatus(status)) {
-      Error.throwWithStackTrace(e, s);
-    }
+    if (_transient(e)) Error.throwWithStackTrace(e, s);
+    final status = _statusOf(e);
     if (status == 413) {
-      if (batch.length == 1) return _mark(batch.single, _tooLarge(e));
+      if (batch.length == 1) return _verdict(batch.single, _tooLarge(e));
       pushBatchSize = math.max(1, batch.length ~/ 2);
       return _none;
     }
     final rejection = classifyPushError(status, e.body);
     if (rejection case BatchTooLargeRejection(:final limit)) {
-      if (batch.length == 1) return _mark(batch.single, rejection);
+      if (batch.length == 1) return _verdict(batch.single, rejection);
+      _evidence = true;
+      _serverLimit = limit;
       pushBatchSize = math.max(1, math.min(limit, batch.length ~/ 2));
       return _none;
     }
@@ -760,13 +944,15 @@ final class SyncEngine {
 
     switch (rejection) {
       case ValidationRejection(:final index) when blame(index) != null:
-        return _mark(blame(index)!, rejection);
+        return _verdict(blame(index)!, rejection);
       case DriftRejection(:final index) when blame(index) != null:
+        _evidence = true;
         return _handleDrift(gen, blame(index)!, rejection);
       case HookRejection() ||
           UnclassifiedRejection() ||
           ValidationRejection() ||
           DriftRejection():
+        _evidence = true;
         return _bisect(gen, pairs, e, s);
       case BatchTooLargeRejection():
         // Handled above.
@@ -782,6 +968,12 @@ final class SyncEngine {
 
   static UnclassifiedRejection _tooLarge(TransportError e) =>
       UnclassifiedRejection(413, serverMessage(e.body) ?? e.message);
+
+  /// Marks [p] for a server verdict, which is also evidence the server works.
+  _Tally _verdict(PendingChange p, PushRejection r) {
+    _evidence = true;
+    return _mark(p, r);
+  }
 
   _Tally _mark(PendingChange p, PushRejection r) {
     store.markRejected(p.key, PendingRejection(kind: r.kind, reason: r.reason));
@@ -809,11 +1001,10 @@ final class SyncEngine {
   /// server refuses.
   ///
   /// A single change that fails without a verdict (an unclassified 500) is
-  /// marked only when the bisection saw the server work (some push got
-  /// through or got a verdict), or when the batch was that change alone and
-  /// has already failed [serverErrorLimit] times. Otherwise the last failure
-  /// is rethrown and nothing more is marked: a server failing every request
-  /// is not a verdict on the queue.
+  /// marked only when this run has evidence that the server works: another
+  /// change merged or got a verdict. Otherwise the last failure is rethrown
+  /// and nothing more is marked: a server failing every request is not a
+  /// verdict on the queue, and neither is one change failing alone.
   Future<_Tally> _bisect(
     int gen,
     List<_Pair> pairs,
@@ -825,9 +1016,12 @@ final class SyncEngine {
       await _split(gen, b, pairs, e);
     } on _Restart {
       return b.total;
+    } on _Stop catch (stop) {
+      stop.carried = _sum(stop.carried, b.total);
+      rethrow;
     }
     if (b.deferred.isEmpty) return b.total;
-    if (!b.sawServerWork && pairs.length > 1) {
+    if (!_evidence) {
       Error.throwWithStackTrace(b.lastUnclassified ?? e, b.lastTrace ?? s);
     }
     for (final (p, r) in b.deferred) {
@@ -856,23 +1050,18 @@ final class SyncEngine {
     try {
       resp = await _call(gen, () => client.push(records));
     } on TransportError catch (e, s) {
-      final status = e.statusCode;
-      if (status == null || isTransientStatus(status)) {
-        Error.throwWithStackTrace(e, s);
-      }
+      if (_transient(e)) Error.throwWithStackTrace(e, s);
+      final status = _statusOf(e);
       if (status != 413 && classifyPushError(status, e.body) == null) {
         b.lastUnclassified = e;
         b.lastTrace = s;
       } else {
-        b.sawServerWork = true;
+        _evidence = true;
       }
       return _split(gen, b, pairs, e);
     }
     store.clearPendingChanges([for (final p in pairs) p.pending.change]);
-    _skew?.observeHlc(resp.latestHlc);
-    store.pluginManager.dispatchAfterPush(records.length, records);
-    b.sawServerWork = true;
-    _serverErrors = 0;
+    _pushed(records, resp);
     b.add((pushed: records.length, merged: resp.merged, rejected: 0));
   }
 
@@ -883,20 +1072,21 @@ final class SyncEngine {
     _Pair pair,
     TransportError e,
   ) async {
-    final status = e.statusCode ?? 0;
+    final status = _statusOf(e);
     if (status == 413) {
-      b.add(_mark(pair.pending, _tooLarge(e)));
+      b.add(_verdict(pair.pending, _tooLarge(e)));
       return;
     }
     final r = classifyPushError(status, e.body);
     switch (r) {
       case DriftRejection():
+        _evidence = true;
         b.add(await _handleDrift(gen, pair.pending, r));
         // The correction may have re-stamped other changes in this batch,
         // so its remaining records are stale.
         throw const _Restart();
       case final PushRejection verdict:
-        b.add(_mark(pair.pending, verdict));
+        b.add(_verdict(pair.pending, verdict));
       case null:
         b.deferred.add((
           pair.pending,
@@ -905,67 +1095,103 @@ final class SyncEngine {
     }
   }
 
-  /// Drops a rejected change, restores the server's value for its field (or
-  /// its whole document, for a record delete) and re-applies later pending
-  /// changes on it. Waits for a run in flight first. A key that is not a
-  /// rejected change is ignored.
-  Future<void> discardRejected(String key) async {
-    if (_disposed) throw StateError('crdt: the sync engine is disposed');
-    final running = _inFlight;
-    if (running != null) {
-      try {
-        await running;
-      } on Object {
-        // The run's outcome belongs to whoever called sync().
-      }
+  /// Drops a rejected change and restores the server's value for its field
+  /// (or its whole document, for a record delete), then re-applies later
+  /// pending changes on it.
+  ///
+  /// The server's value is fetched first, page by page with a pk and field
+  /// filter until the pages are exhausted (Go filters after its LIMIT, so a
+  /// single request could miss it). Only when that succeeds is the change
+  /// discarded, the field dropped, the fetched changes applied and the later
+  /// pending changes re-applied, in one store transaction. When the fetch
+  /// fails (offline, 401, 404, a cancellation) nothing changes: the change
+  /// stays marked rejected and the error propagates (a [TransportError],
+  /// [NetworkError], or a [CrdtError] with [CrdtErrorCode.cancelled]).
+  ///
+  /// Waits for a run in flight first, and is itself cancelled and awaited by
+  /// [stop] and [dispose]. A key that is not a rejected change is ignored.
+  /// Throws a [StateError] in the `gone` and `unauthorized` states.
+  Future<void> discardRejected(String key) {
+    if (_disposed) {
+      return Future.error(StateError('crdt: the sync engine is disposed'));
     }
-    await store.ready;
-    final rejected = store.pending.where((p) => p.key == key).firstOrNull;
-    if (rejected == null || !rejected.isRejected) return;
-    final p = store.discardPending(key);
-    if (p == null) return;
-    final c = p.change;
-    final recordDelete =
-        c.tombstone && !(c.crdtType == CrdtType.document && c.value != null);
-    if (recordDelete) {
-      store.dropDocument(c.table, c.pk);
-    } else {
-      store.dropField(c.table, c.pk, c.field);
-    }
-    final PullResponse resp;
-    try {
-      resp = await _call(
-        _generation,
-        () => client.pull(
-          tables: [c.table],
-          filter: SyncFilter(
-            pkFilter: [c.pk],
-            fieldFilter: recordDelete ? const [] : [c.field],
-          ),
-        ),
-      );
-    } on _Stop {
-      // Gone or unauthorized: the state and event already say so. The field
-      // stays dropped until the server answers again.
-      return;
-    } on _Cancelled {
-      return;
-    }
-    store.applyChanges(resp.changes);
-    store.applyChanges([
-      for (final q in store.pending)
-        if (q.change.table == c.table &&
-            q.change.pk == c.pk &&
-            (recordDelete || q.change.field == c.field))
-          q.change,
-    ]);
-    _emit(ChangesApplied({(table: c.table, pk: c.pk)}));
+    final gen = _generation;
+    final future = _discard(gen, key);
+    _discards.add(future);
+    return future.whenComplete(() => _discards.remove(future));
   }
 
-  /// Stops the engine (see [stop]), waits for the run in flight, detaches
-  /// every attached stream and closes [events].
-  Future<void> dispose() async {
-    if (_disposed) return;
+  Future<void> _discard(int gen, String key) async {
+    try {
+      final running = _inFlight;
+      if (running != null) {
+        try {
+          await running;
+        } on Object {
+          // The run's outcome belongs to whoever called sync().
+        }
+      }
+      await store.ready;
+      _checkCancelled(gen);
+      if (_state == SyncEngineState.gone ||
+          _state == SyncEngineState.unauthorized) {
+        throw StateError(
+          'crdt: the sync engine is ${_state.name}; resume it first',
+        );
+      }
+      final target = store.pending.where((p) => p.key == key).firstOrNull;
+      if (target == null || !target.isRejected) return;
+      final c = target.change;
+      final recordDelete =
+          c.tombstone && !(c.crdtType == CrdtType.document && c.value != null);
+      final fetched = <ChangeRecord>[];
+      await _paged(
+        gen,
+        c.table,
+        null,
+        (changes, _) async => fetched.addAll(changes),
+        filter: SyncFilter(
+          pkFilter: [c.pk],
+          fieldFilter: recordDelete ? const [] : [c.field],
+        ),
+      );
+      _checkCancelled(gen);
+      final current = store.pending.where((p) => p.key == key).firstOrNull;
+      if (current == null || !current.isRejected) return;
+      store.transact(() {
+        store.discardPending(key);
+        if (recordDelete) {
+          store.dropDocument(c.table, c.pk);
+        } else {
+          store.dropField(c.table, c.pk, c.field);
+        }
+        store.applyChanges(fetched);
+        store.applyChanges([
+          for (final q in store.pending)
+            if (q.change.table == c.table &&
+                q.change.pk == c.pk &&
+                (recordDelete || q.change.field == c.field))
+              q.change,
+        ]);
+      });
+      _emit(ChangesApplied({(table: c.table, pk: c.pk)}));
+    } on _Stop catch (stop) {
+      // The state and event already say gone or unauthorized.
+      throw stop.error;
+    } on _Cancelled {
+      throw CrdtError(
+        'crdt: the discard was cancelled',
+        code: CrdtErrorCode.cancelled,
+      );
+    }
+  }
+
+  /// Stops the engine (see [stop]), waits for the run and any discard in
+  /// flight, detaches every attached stream and closes [events]. A second
+  /// call returns the first call's future.
+  Future<void> dispose() => _disposing ??= _dispose();
+
+  Future<void> _dispose() async {
     _disposed = true;
     await stop();
     for (final detach in _streamHandlers.toList()) {

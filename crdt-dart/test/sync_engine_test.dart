@@ -10,8 +10,14 @@ import 'package:test/test.dart';
 import 'support/fake_server.dart';
 import 'support/store_fakes.dart';
 
-({CrdtStore store, SyncEngine engine, FakeServer server, MapReplicaKeyValue kv})
-setup({
+typedef Setup = ({
+  CrdtStore store,
+  SyncEngine engine,
+  FakeServer server,
+  MapReplicaKeyValue kv,
+});
+
+Setup setup({
   FakeServer? server,
   int pushBatchSize = 500,
   int Function()? now,
@@ -454,10 +460,56 @@ void main() {
         if (req.changes.length > 2) throw _status(413, 'request too large');
       };
       await s.engine.sync();
-      expect(s.engine.pushBatchSize, 2);
       expect(s.server.log, hasLength(5));
       expect(s.store.pendingCount, 0);
+      expect(
+        s.server.pushes.where((p) => p.length <= 2).expand((p) => p),
+        hasLength(5),
+      );
     });
+
+    test(
+      'the batch size doubles back to the configured size after a 413',
+      () async {
+        final s = setup(pushBatchSize: 8);
+        var limit = 2;
+        s.server.onPush = (req) {
+          if (req.changes.length > limit) {
+            throw _status(413, 'request too large');
+          }
+        };
+        for (var i = 0; i < 3; i++) {
+          s.store.setField('notes', 'a$i', 'title', 't$i');
+        }
+        await s.engine.sync();
+        // 3 refused, then 1 and 2 went through, doubling 1 to 4.
+        expect(s.server.pushes.map((p) => p.length), [3, 1, 2]);
+        expect(s.engine.pushBatchSize, 4);
+        limit = 100;
+        for (var i = 0; i < 40; i++) {
+          s.store.setField('notes', 'b$i', 'title', 't$i');
+        }
+        await s.engine.sync();
+        expect(s.engine.pushBatchSize, 8);
+        expect(s.store.pendingCount, 0);
+      },
+    );
+
+    test(
+      'growth stops at the server limit a BatchTooLargeRejection named',
+      () async {
+        final srv = FakeServer(maxChangesPerPush: 3);
+        final s = setup(server: srv, pushBatchSize: 10);
+        for (var i = 0; i < 20; i++) {
+          s.store.setField('notes', 'n$i', 'title', 't$i');
+        }
+        await s.engine.sync();
+        expect(srv.log, hasLength(20));
+        expect(s.engine.pushBatchSize, 3);
+        // Only the first oversized batch was refused.
+        expect(srv.pushes.where((p) => p.length > 3), hasLength(1));
+      },
+    );
 
     test('413 on a single change marks it, so the rest still flow', () async {
       final s = setup();
@@ -818,6 +870,511 @@ void main() {
       await s.engine.dispose();
     });
   });
+
+  group('WebSocket error frames (no HTTP status)', () {
+    test(
+      'a statusless hook rejection is classified and the queue drains past it',
+      () async {
+        final srv = FakeServer();
+        final s = setup(server: srv, transport: _WsLike(srv));
+        s.store.setField('notes', 'n1', 'title', 'fine');
+        s.store.setField('notes', 'n2', 'locked', 'x');
+        srv.rejectField = 'locked';
+        final report = await s.engine.sync();
+        expect(report.rejected, 1);
+        expect(s.store.rejectedCount, 1);
+        expect(s.store.pending.single.rejection!.kind, 'hook');
+        // v1.7.0 merged n1 before the refusal; bisection pushed it again.
+        expect(srv.log.map((c) => c.pk).toSet(), {'n1'});
+        expect(s.store.pendingCount, 0);
+      },
+    );
+
+    test('a statusless validation rejection marks its change', () async {
+      final srv = FakeServer();
+      final s = setup(server: srv, transport: _WsLike(srv));
+      final bad = s.store.setField('notes', '', 'title', 'no pk')!;
+      s.store.setField('notes', 'n2', 'title', 'ok');
+      await s.engine.sync();
+      expect(s.store.pending.single.key, pendingKey(bad));
+      expect(s.store.pending.single.rejection!.kind, 'validation');
+      expect(srv.log.single.pk, 'n2');
+    });
+
+    test('a statusless too-many error shrinks the batch', () async {
+      final srv = FakeServer(maxChangesPerPush: 3);
+      final s = setup(server: srv, transport: _WsLike(srv), pushBatchSize: 10);
+      for (var i = 0; i < 7; i++) {
+        s.store.setField('notes', 'n$i', 'title', 't$i');
+      }
+      await s.engine.sync();
+      expect(srv.log, hasLength(7));
+      expect(s.store.pendingCount, 0);
+    });
+
+    test('a statusless failure naming no rejection is transient: nothing is '
+        'marked, counted or bisected', () async {
+      final s = setup(serverErrorLimit: 2);
+      s.store.setField('notes', 'n1', 'title', 'a');
+      s.store.setField('notes', 'n2', 'title', 'b');
+      s.server.onPush = (_) =>
+          throw TransportError('CRDT ws: the WebSocket transport is closed');
+      for (var run = 0; run < 6; run++) {
+        await expectLater(s.engine.sync(), throwsA(isA<TransportError>()));
+      }
+      expect(s.server.pushes, hasLength(6));
+      expect(s.store.rejectedCount, 0);
+      expect(s.store.pendingCount, 2);
+    });
+  });
+
+  group('discardRejected never loses the server value', () {
+    test('it restores a value beyond the first page', () async {
+      final srv = FakeServer(pageLimit: 5)..seed('notes', 8);
+      final s = setup(server: srv);
+      await s.engine.sync();
+      expect(s.store.getCollection('notes'), hasLength(8));
+      // r7 holds the newest server row, beyond the first page; Go filters
+      // after its LIMIT, so a single filtered request would miss it.
+      final rejected = s.store.setField('notes', 'r7', 'f', 'mine')!;
+      srv.rejectField = 'f';
+      await s.engine.sync();
+      expect(s.store.rejectedCount, 1);
+      srv.rejectField = null;
+      await s.engine.discardRejected(pendingKey(rejected));
+      expect(s.store.getDocument('notes', 'r7')?['f'], 7);
+      expect(s.store.pending, isEmpty);
+    });
+
+    Future<({ChangeRecord rejected, Setup s})> rejectedOverServerValue() async {
+      final s = setup();
+      s.server.log
+        ..add(
+          ChangeRecord(
+            table: 'notes',
+            pk: 'n1',
+            field: 'locked',
+            crdtType: CrdtType.lww,
+            hlc: HLC(BigInt.from(1), 0, 'srv'),
+            nodeId: 'srv',
+            value: const JsonValue('server'),
+          ),
+        )
+        ..add(
+          ChangeRecord(
+            table: 'notes',
+            pk: 'n2',
+            field: 'x',
+            crdtType: CrdtType.lww,
+            hlc: HLC(BigInt.from(5), 0, 'srv'),
+            nodeId: 'srv',
+            value: const JsonValue('later'),
+          ),
+        );
+      await s.engine.sync();
+      final rejected = s.store.setField('notes', 'n1', 'locked', 'mine')!;
+      s.server.rejectField = 'locked';
+      await s.engine.sync();
+      s.server.rejectField = null;
+      return (rejected: rejected, s: s);
+    }
+
+    test('a discard whose re-pull fails offline changes nothing', () async {
+      final r = await rejectedOverServerValue();
+      final s = r.s;
+      s.server.onPull = (_) => throw NetworkError('offline');
+      await expectLater(
+        s.engine.discardRejected(pendingKey(r.rejected)),
+        throwsA(isA<NetworkError>()),
+      );
+      expect(s.store.pending.single.isRejected, isTrue);
+      expect(s.store.getDocument('notes', 'n1')!['locked'], 'mine');
+
+      s.server.onPull = null;
+      await s.engine.sync();
+      await s.engine.discardRejected(pendingKey(r.rejected));
+      expect(s.store.getDocument('notes', 'n1')!['locked'], 'server');
+      expect(s.store.pending, isEmpty);
+    });
+
+    test('a discard answered 401 changes nothing and needs auth', () async {
+      final r = await rejectedOverServerValue();
+      final s = r.s;
+      s.server.onPull = (_) => throw _status(401);
+      await expectLater(
+        s.engine.discardRejected(pendingKey(r.rejected)),
+        throwsA(
+          isA<TransportError>().having((e) => e.statusCode, 'status', 401),
+        ),
+      );
+      expect(s.engine.state, SyncEngineState.unauthorized);
+      expect(s.store.pending.single.isRejected, isTrue);
+      expect(s.store.getDocument('notes', 'n1')!['locked'], 'mine');
+      await expectLater(
+        s.engine.discardRejected(pendingKey(r.rejected)),
+        throwsStateError,
+      );
+    });
+
+    test(
+      'a discard re-applies a later pending edit on the same field',
+      () async {
+        final r = await rejectedOverServerValue();
+        final s = r.s;
+        final later = s.store.setField('notes', 'n1', 'locked', 'later')!;
+        await s.engine.discardRejected(pendingKey(r.rejected));
+        expect(s.store.getDocument('notes', 'n1')!['locked'], 'later');
+        expect(s.store.pending.single.key, pendingKey(later));
+      },
+    );
+
+    for (final viaDispose in [false, true]) {
+      final how = viaDispose ? 'dispose' : 'stop';
+      test('$how during a discard sends nothing after it returns', () async {
+        final s = setup();
+        final rejected = s.store.setField('notes', 'n1', 'locked', 'mine')!;
+        s.server.rejectField = 'locked';
+        await s.engine.sync();
+        expect(s.store.rejectedCount, 1);
+        s.server.rejectField = null;
+        // A run in flight, held on its pull.
+        final gate = s.server.pullGate = Completer<void>();
+        final run = s.engine.sync()..ignore();
+        await _until(() => s.server.pulls.length == 2);
+        // The user discards while the run is in flight; the discard waits.
+        final discard = s.engine.discardRejected(pendingKey(rejected))
+          ..ignore();
+        await pumpEventQueue();
+        s.server.pullGate = null;
+        if (viaDispose) {
+          await s.engine.dispose();
+        } else {
+          await s.engine.stop();
+        }
+        final at = s.server.requests;
+        gate.complete();
+        await expectLater(discard, throwsA(_isCancelled));
+        await expectLater(run, throwsA(_isCancelled));
+        await pumpEventQueue();
+        expect(s.server.requests, at, reason: 'a pull was sent after $how');
+        expect(s.store.pending.single.isRejected, isTrue);
+      });
+    }
+  });
+
+  group('no mark without evidence the server works', () {
+    test(
+      'a lone change failing with 500 is never marked, however many runs',
+      () async {
+        final s = setup(serverErrorLimit: 3);
+        final events = <SyncEngineEvent>[];
+        s.engine.events.listen(events.add);
+        s.store.setField('notes', 'n1', 'title', 'only edit');
+        s.server.onPush = (_) =>
+            throw _status(500, 'crdt: read state: db down');
+        for (var i = 0; i < 10; i++) {
+          await expectLater(s.engine.sync(), throwsA(isA<TransportError>()));
+        }
+        expect(s.store.rejectedCount, 0);
+        expect(s.store.pendingCount, 1);
+        expect(events.whereType<SyncInterrupted>(), hasLength(10));
+        expect(events.whereType<ChangeRejected>(), isEmpty);
+
+        s.server.onPush = null;
+        await s.engine.sync();
+        expect(s.store.pendingCount, 0);
+      },
+    );
+
+    test('a change merged earlier in the same run is evidence', () async {
+      final s = setup(pushBatchSize: 1, serverErrorLimit: 1);
+      s.store.setField('notes', 'n1', 'title', 'fine');
+      final poison = s.store.setField('notes', 'n2', 'title', 'poison')!;
+      s.server.onPush = (req) {
+        if (req.changes.any((c) => c.pk == 'n2')) {
+          throw _status(500, 'panic');
+        }
+      };
+      final report = await s.engine.sync();
+      expect(report.pushed, 1);
+      expect(report.rejected, 1);
+      expect(s.store.pending.single.key, pendingKey(poison));
+      expect(s.store.pending.single.rejection!.kind, 'server');
+    });
+
+    test('failed timer runs back off, and a success restores the interval', () {
+      fakeAsync((async) {
+        final srv = FakeServer()..failStatus = 503;
+        final clock = HybridClock('dev', nowMs: () => 1000);
+        final store = CrdtStore('dev', clock, persistDebounce: Duration.zero);
+        final engine = SyncEngine(
+          CrdtClient(nodeId: 'dev', transport: srv, clock: clock),
+          store,
+          tables: const ['notes'],
+          maxRetryDelay: const Duration(seconds: 80),
+          random: () => 1.0,
+        );
+        engine.start(interval: const Duration(seconds: 10));
+        int at(int seconds) {
+          async.elapse(Duration(seconds: seconds) - async.elapsed);
+          return srv.pulls.length;
+        }
+
+        // Fails at 10s, then waits 10, 20, 40 and 80 (the ceiling) seconds.
+        expect(at(10), 1);
+        expect(at(19), 1);
+        expect(at(20), 2);
+        expect(at(39), 2);
+        expect(at(40), 3);
+        expect(at(79), 3);
+        expect(at(80), 4);
+        expect(at(159), 4);
+        srv.failStatus = null;
+        expect(at(160), 5);
+        expect(engine.state, SyncEngineState.idle);
+        expect(at(170), 6);
+        engine.stop();
+        async.flushMicrotasks();
+      });
+    });
+  });
+
+  group('pull paging and latest_hlc', () {
+    test('a page the outbound hook hid entirely moves the cursor on', () async {
+      final srv = FakeServer(pageLimit: 3)..seed('notes', 5);
+      // Go's BeforeOutboundRead hides the first three rows; latest_hlc still
+      // covers them.
+      srv.hide = (c) => c.hlc.ts <= BigInt.from(3);
+      final s = setup(server: srv);
+      await s.engine.sync();
+      expect(srv.pulls.first.since.isZero, isTrue);
+      expect(srv.pulls[1].since, HLC(BigInt.from(2), 4294967295, ''));
+      expect(
+        s.store.getCollection('notes').map((d) => d['_pk']),
+        unorderedEquals(['r3', 'r4']),
+      );
+      expect(s.engine.cursor('notes'), HLC(BigInt.from(5), 0, 'srv'));
+    });
+
+    test(
+      'a rounded latestHlc backs off a microsecond before it is used',
+      () async {
+        // Real nanosecond timestamps, one microsecond and more apart. The
+        // envelope rounds latest_hlc up by 300 ns, past the next visible row.
+        final base = BigInt.parse('1760000000000000000');
+        final srv = FakeServer(pageLimit: 3);
+        for (final (offset, pk) in [
+          (0, 'h0'),
+          (10000, 'h1'),
+          (20000, 'h2'),
+          (20100, 'v'),
+        ]) {
+          srv.log.add(
+            ChangeRecord(
+              table: 'notes',
+              pk: pk,
+              field: 'f',
+              crdtType: CrdtType.lww,
+              hlc: HLC(base + BigInt.from(offset), 0, 'srv'),
+              nodeId: 'srv',
+              value: const JsonValue(1),
+            ),
+          );
+        }
+        srv.hide = (c) => c.pk.startsWith('h');
+        final s = setup(server: srv, transport: _Rounding(srv));
+        await s.engine.sync();
+        expect(s.store.getDocument('notes', 'v'), isNotNull);
+        // The first cursor came from the rounded value minus the margin.
+        expect(
+          srv.pulls[1].since,
+          HLC(base + BigInt.from(20300 - 1000 - 1), 4294967295, ''),
+        );
+      },
+    );
+  });
+
+  group('cancellation (review probes)', () {
+    test(
+      'stop while page 2 of a pull is held: the cursor stays at page 1',
+      () async {
+        final srv = FakeServer(pageLimit: 2)..seed('notes', 6);
+        final s = setup(server: srv);
+        s.store.setField('notes', 'mine', 'title', 'x');
+        Completer<void>? gate;
+        srv.onPull = (req) {
+          if (srv.pulls.length == 2) srv.pullGate = gate = Completer<void>();
+        };
+        final run = s.engine.sync()..ignore();
+        await _until(() => srv.pulls.length == 2);
+        final at = srv.requests;
+        await s.engine.stop();
+        gate!.complete();
+        await pumpEventQueue();
+        await expectLater(run, throwsA(_isCancelled));
+        expect(srv.requests, at);
+        expect(s.engine.cursor('notes'), HLC(BigInt.from(2), 0, 'srv'));
+        expect(
+          await KeyValueReplicaStorage(s.kv).readCursor('notes'),
+          HLC(BigInt.from(2), 0, 'srv'),
+        );
+        expect(s.store.pendingCount, 1);
+      },
+    );
+
+    test('stop while a bisection step is held: nothing more is sent', () async {
+      final s = setup();
+      s.store.setField('notes', 'n1', 'title', 'a');
+      s.store.setField('notes', 'n2', 'locked', 'b');
+      s.store.setField('notes', 'n3', 'title', 'c');
+      s.store.setField('notes', 'n4', 'title', 'd');
+      s.server.rejectField = 'locked';
+      Completer<void>? gate;
+      s.server.onPush = (req) {
+        if (s.server.pushes.length == 2) {
+          s.server.pushGate = gate = Completer<void>();
+        }
+      };
+      final run = s.engine.sync()..ignore();
+      await _until(() => s.server.pushesInFlight == 1 && gate != null);
+      final at = s.server.requests;
+      final pendingAt = s.store.pendingCount;
+      await s.engine.stop();
+      s.server.pushGate = null;
+      gate!.complete();
+      await pumpEventQueue();
+      await expectLater(run, throwsA(_isCancelled));
+      expect(s.server.requests, at);
+      expect(s.store.pendingCount, pendingAt);
+      expect(s.store.rejectedCount, 0);
+    });
+
+    test('CrdtError(cancelled) during bisection marks nothing more', () async {
+      final s = setup();
+      s.store.setField('notes', 'n1', 'title', 'a');
+      s.store.setField('notes', 'n2', 'locked', 'b');
+      s.server.rejectField = 'locked';
+      s.server.onPush = (req) {
+        if (s.server.pushes.length == 2) {
+          throw CrdtError('switched', code: CrdtErrorCode.cancelled);
+        }
+      };
+      await expectLater(s.engine.sync(), throwsA(_isCancelled));
+      expect(s.server.pushes, hasLength(2));
+      expect(s.store.rejectedCount, 0);
+      expect(s.store.pendingCount, 2);
+      expect(s.engine.state, SyncEngineState.idle);
+    });
+  });
+
+  group('review minors', () {
+    test(
+      'a second dispose returns the first one, which waits for the run',
+      () async {
+        final srv = FakeServer()..seed('notes', 2);
+        final gate = Completer<void>();
+        final cursors = _GatedCursors(gate.future);
+        final clock = HybridClock('dev', nowMs: () => 1000);
+        final store = CrdtStore('dev', clock, persistDebounce: Duration.zero);
+        final engine = SyncEngine(
+          CrdtClient(nodeId: 'dev', transport: srv, clock: clock),
+          store,
+          tables: const ['notes'],
+          cursors: cursors,
+        );
+        engine.sync().ignore();
+        await _until(() => cursors.writes == 1);
+        final first = engine.dispose();
+        final second = engine.dispose();
+        expect(identical(first, second), isTrue);
+        var done = false;
+        unawaited(second.then((_) => done = true));
+        await pumpEventQueue();
+        expect(done, isFalse);
+        gate.complete();
+        await second;
+        expect(done, isTrue);
+      },
+    );
+
+    test('after stop an attached stream applies nothing until start', () async {
+      final s = setup();
+      final sub = _Subscription();
+      s.engine.attachStream(sub);
+      await pumpEventQueue();
+      await s.engine.stop();
+      ChangeRecord change(String pk) => ChangeRecord(
+        table: 'notes',
+        pk: pk,
+        field: 'title',
+        crdtType: CrdtType.lww,
+        hlc: HLC(BigInt.from(7), 0, 'peer'),
+        nodeId: 'peer',
+        value: const JsonValue('live'),
+      );
+      sub.emit(StreamChange(change('old-account')));
+      expect(s.store.getDocument('notes', 'old-account'), isNull);
+      s.engine.start(interval: const Duration(hours: 1));
+      sub.emit(StreamChange(change('n1')));
+      expect(s.store.getDocument('notes', 'n1'), isNotNull);
+      await s.engine.dispose();
+    });
+
+    test('an error surfacing after stop belongs to a cancelled run', () async {
+      final srv = FakeServer()..seed('notes', 2);
+      final gate = Completer<void>();
+      final cursors = _GatedCursors(gate.future, fail: StateError('disk'));
+      final clock = HybridClock('dev', nowMs: () => 1000);
+      final store = CrdtStore('dev', clock, persistDebounce: Duration.zero);
+      final engine = SyncEngine(
+        CrdtClient(nodeId: 'dev', transport: srv, clock: clock),
+        store,
+        tables: const ['notes'],
+        cursors: cursors,
+      );
+      final events = <SyncEngineEvent>[];
+      engine.events.listen(events.add);
+      final run = engine.sync()..ignore();
+      await _until(() => cursors.writes == 1);
+      final stopping = engine.stop();
+      gate.complete();
+      await stopping;
+      await expectLater(run, throwsA(_isCancelled));
+      expect(engine.state, SyncEngineState.idle);
+      expect(events.whereType<SyncInterrupted>(), isEmpty);
+    });
+
+    test('a ClockSkew without a cursors store is refused', () {
+      final clock = HybridClock('dev');
+      expect(
+        () => SyncEngine(
+          CrdtClient(nodeId: 'dev', transport: FakeServer(), clock: clock),
+          CrdtStore('dev', clock),
+          tables: const ['notes'],
+          skew: ClockSkew(),
+        ),
+        throwsArgumentError,
+      );
+    });
+
+    test(
+      'a stop during bisection still reports what the bisection pushed',
+      () async {
+        final s = setup();
+        s.store.setField('notes', 'n1', 'title', 'a');
+        s.store.setField('notes', 'n2', 'locked', 'b');
+        s.store.setField('notes', 'n3', 'title', 'c');
+        s.server.rejectField = 'locked';
+        s.server.onPush = (req) {
+          // The whole batch fails on the hook; [n1] goes through; then 401.
+          if (s.server.pushes.length == 3) throw _status(401);
+        };
+        final report = await s.engine.sync();
+        expect(report.pushed, 1);
+        expect(s.engine.state, SyncEngineState.unauthorized);
+      },
+    );
+  });
 }
 
 /// A beforePush hook that rewrites every value, as an encryptor would.
@@ -849,9 +1406,10 @@ final class _Intercept implements Transport {
 
 /// A cursor store whose writes wait on a gate.
 final class _GatedCursors implements SyncCursorStore {
-  _GatedCursors(this.gate);
+  _GatedCursors(this.gate, {this.fail});
 
   final Future<void> gate;
+  final Object? fail;
   final Map<String, HLC> cursors = {};
   int writes = 0;
 
@@ -862,6 +1420,8 @@ final class _GatedCursors implements SyncCursorStore {
   Future<void> writeCursor(String table, HLC cursor) async {
     writes++;
     await gate;
+    final f = fail;
+    if (f != null) throw f;
     cursors[table] = cursor;
   }
 
@@ -902,4 +1462,47 @@ final class _Subscription implements CrdtSubscription {
 
   @override
   HLC? get lastHlc => null;
+}
+
+/// Mirrors WebSocketTransport: a failed push arrives as an error frame, a
+/// [TransportError] with no HTTP status and the server's text as its body.
+final class _WsLike implements Transport {
+  _WsLike(this.inner);
+  final Transport inner;
+
+  @override
+  Future<PullResponse> pull(PullRequest req) => inner.pull(req);
+
+  @override
+  Future<PushResponse> push(PushRequest req) async {
+    try {
+      return await inner.push(req);
+    } on TransportError catch (e) {
+      throw TransportError(
+        'CRDT ws error: ${serverMessage(e.body)}',
+        body: e.body,
+      );
+    }
+  }
+}
+
+/// A camel-DTO-like envelope on the web: latest_hlc arrives as a double,
+/// here rounded up by 300 ns, and is marked inexact.
+final class _Rounding implements Transport {
+  _Rounding(this.inner);
+  final Transport inner;
+
+  @override
+  Future<PullResponse> pull(PullRequest req) async {
+    final resp = await inner.pull(req);
+    final l = resp.latestHlc;
+    return PullResponse(
+      changes: resp.changes,
+      latestHlc: l.isZero ? l : HLC(l.ts + BigInt.from(300), l.c, l.node),
+      latestHlcExact: false,
+    );
+  }
+
+  @override
+  Future<PushResponse> push(PushRequest req) => inner.push(req);
 }

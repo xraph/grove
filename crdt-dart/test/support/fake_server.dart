@@ -74,6 +74,10 @@ final class FakeServer implements Transport {
   /// Called with each push after it is recorded; may throw.
   void Function(PushRequest req)? onPush;
 
+  /// Go's `BeforeOutboundRead` hook: hides a pulled change after the page's
+  /// `latest_hlc` was computed.
+  bool Function(ChangeRecord change)? hide;
+
   /// The push response's `latest_hlc` (the server's clock).
   HLC Function()? serverClock;
 
@@ -130,7 +134,14 @@ final class FakeServer implements Transport {
                   (f.fieldFilter.isEmpty || f.fieldFilter.contains(c.field)))
                 c,
           ];
-    return PullResponse(changes: filtered, latestHlc: latest);
+    final h = hide;
+    final visible = h == null
+        ? filtered
+        : [
+            for (final c in filtered)
+              if (!h(c)) c,
+          ];
+    return PullResponse(changes: visible, latestHlc: latest);
   }
 
   @override
