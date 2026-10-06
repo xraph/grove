@@ -1401,6 +1401,65 @@ void main() {
       },
     );
 
+    test('reports the applied form, and nothing for a cancelled change', () {
+      final store = newStore();
+      final heard = <ChangeRecord>[];
+      store.onRemoteChange(heard.add);
+      store.use(
+        FnPlugin(
+          'decrypt',
+          onBeforeMerge: (e) => e.remote.field == 'drop'
+              ? null
+              : e.remote.copyWith(value: const JsonValue('plain')),
+        ),
+      );
+      ChangeRecord r(String field) => ChangeRecord(
+        table: 't',
+        pk: 'p',
+        field: field,
+        crdtType: CrdtType.lww,
+        hlc: n(1),
+        nodeId: 'srv',
+        value: const JsonValue('cipher'),
+      );
+      store.applyChanges([r('f'), r('drop')]);
+      expect(heard.map((c) => (c.field, c.value)), [
+        ('f', const JsonValue('plain')),
+      ]);
+    });
+
+    test('applyAppliedChanges runs no hook and no listener', () {
+      final store = newStore();
+      var merges = 0;
+      var heard = 0;
+      store.onRemoteChange((_) => heard++);
+      store.use(
+        FnPlugin(
+          'count',
+          onBeforeMerge: (e) {
+            merges++;
+            return e.remote;
+          },
+          onAfterMerge: (_) => merges++,
+        ),
+      );
+      final affected = store.applyAppliedChanges([
+        ChangeRecord(
+          table: 't',
+          pk: 'p',
+          field: 'f',
+          crdtType: CrdtType.lww,
+          hlc: n(1),
+          nodeId: 'srv',
+          value: const JsonValue('v'),
+        ),
+      ]);
+      expect(affected, {(table: 't', pk: 'p')});
+      expect(store.getDocument('t', 'p')!['f'], 'v');
+      expect(merges, 0);
+      expect(heard, 0);
+    });
+
     test('a listener that throws does not abort the batch', () {
       final store = newStore();
       store.onRemoteChange((_) => throw StateError('observer'));

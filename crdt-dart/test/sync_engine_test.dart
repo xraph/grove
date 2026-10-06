@@ -1078,6 +1078,46 @@ void main() {
       },
     );
 
+    test(
+      'a newer value during the fetch survives a transforming beforeMerge',
+      () async {
+        final s = setup();
+        s.store.use(_Decrypt());
+        final rejected = await _rejectLocked(s);
+        expect(s.store.getDocument('notes', 'n1')?['locked'], 'mine');
+        final gate = s.server.pullGate = Completer<void>();
+        final discard = s.engine.discardRejected(pendingKey(rejected));
+        await _until(() => s.server.pulls.length == 3);
+        // Delivered as a stream would be: straight into applyChanges.
+        s.store.applyChanges([
+          ChangeRecord(
+            table: 'notes',
+            pk: 'n1',
+            field: 'locked',
+            crdtType: CrdtType.lww,
+            hlc: HLC(BigInt.two.pow(50), 0, 'srv'),
+            nodeId: 'srv',
+            value: const JsonValue('newer'),
+          ),
+        ]);
+        expect(s.store.getDocument('notes', 'n1')?['locked'], 'dec:newer');
+        s.server.pullGate = null;
+        // This fetch answer holds only the server's older value.
+        gate.complete();
+        await discard;
+        expect(s.store.getDocument('notes', 'n1')?['locked'], 'dec:newer');
+      },
+    );
+
+    test('a later pending edit is re-applied without beforeMerge', () async {
+      final s = setup();
+      s.store.use(_Decrypt());
+      final rejected = await _rejectLocked(s);
+      s.store.setField('notes', 'n1', 'locked', 'later');
+      await s.engine.discardRejected(pendingKey(rejected));
+      expect(s.store.getDocument('notes', 'n1')?['locked'], 'later');
+    });
+
     for (final viaDispose in [false, true]) {
       final how = viaDispose ? 'dispose' : 'stop';
       test('$how during a discard sends nothing after it returns', () async {
@@ -1639,4 +1679,41 @@ final class _Held implements Transport {
 
   @override
   Future<PushResponse> push(PushRequest req) => inner.push(req);
+}
+
+/// Seeds the server value `server` for notes/n1.locked, then makes a local
+/// `mine` that the server's hook rejects. Returns the rejected change.
+Future<ChangeRecord> _rejectLocked(Setup s) async {
+  s.server.log.add(
+    ChangeRecord(
+      table: 'notes',
+      pk: 'n1',
+      field: 'locked',
+      crdtType: CrdtType.lww,
+      hlc: HLC(BigInt.one, 0, 'srv'),
+      nodeId: 'srv',
+      value: const JsonValue('server'),
+    ),
+  );
+  await s.engine.sync();
+  final rejected = s.store.setField('notes', 'n1', 'locked', 'mine')!;
+  s.server.rejectField = 'locked';
+  await s.engine.sync();
+  s.server.rejectField = null;
+  return rejected;
+}
+
+/// Transforms remote values on merge the way a decryptor would, and throws
+/// on its own output, as a decryptor fed plaintext does.
+final class _Decrypt extends StorePlugin {
+  @override
+  String get name => 'decrypt';
+
+  @override
+  ChangeRecord? beforeMerge(MergeEvent e) {
+    final v = e.remote.value?.value;
+    if (e.remote.field != 'locked' || v is! String) return e.remote;
+    if (v.startsWith('dec:')) throw StateError('already decrypted');
+    return e.remote.copyWith(value: JsonValue('dec:$v'));
+  }
 }

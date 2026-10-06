@@ -133,8 +133,6 @@ final class _Cancelled implements Exception {
   const _Cancelled();
 }
 
-/// A drift correction re-stamped pending changes, so the batch being bisected
-/// holds stale records. Caught by the push leg, which re-reads the queue.
 /// A batch failed without a verdict and with no evidence that the server
 /// works, so its changes stay pushable. The push leg skips past them, and
 /// marks [deferred] only if a later batch of the same run supplies evidence.
@@ -151,6 +149,8 @@ final class _Stuck implements Exception {
   final List<(PendingChange, PushRejection)> deferred;
 }
 
+/// A drift correction re-stamped pending changes, so the batch being bisected
+/// holds stale records. Caught by the push leg, which re-reads the queue.
 final class _Restart implements Exception {
   const _Restart();
 }
@@ -1261,9 +1261,12 @@ final class SyncEngine {
           store.dropField(c.table, c.pk, c.field);
         }
         store.applyChanges(fetched);
-        // Idempotent and commutative: a change also in [fetched] is harmless.
-        store.applyChanges(recorded);
-        store.applyChanges([
+        // Already in applied form (past `beforeMerge`), so no hook runs on
+        // them twice. Idempotent and commutative: a change also in [fetched]
+        // is harmless.
+        store.applyAppliedChanges(recorded);
+        // Local changes never pass `beforeMerge`, so they skip it here too.
+        store.applyAppliedChanges([
           for (final q in store.pending)
             if (q.change.table == c.table &&
                 q.change.pk == c.pk &&

@@ -1612,7 +1612,23 @@ final class CrdtStore {
   /// [FormatException]) is reported through `onError` with that change and
   /// skipped; the rest of the batch still applies. A `beforeMerge` hook that
   /// returns null, or throws, skips its change.
-  Set<DocKey> applyChanges(List<ChangeRecord> changes) {
+  Set<DocKey> applyChanges(List<ChangeRecord> changes) =>
+      _applyRemote(changes, hooks: true);
+
+  /// Applies changes that need no plugin hooks: no `beforeMerge`, no
+  /// `afterMerge`, and no [onRemoteChange] listener runs. Otherwise as
+  /// [applyChanges] (a change that throws is reported and skipped; listeners
+  /// are notified; the replica is persisted).
+  ///
+  /// For changes already in their applied form: a remote change as
+  /// [onRemoteChange] reported it (it already passed `beforeMerge`, and a
+  /// transforming hook such as a decryptor must not see its own output), or a
+  /// local change from the pending queue (which never goes through
+  /// `beforeMerge`). `SyncEngine.discardRejected` re-applies both.
+  Set<DocKey> applyAppliedChanges(List<ChangeRecord> changes) =>
+      _applyRemote(changes, hooks: false);
+
+  Set<DocKey> _applyRemote(List<ChangeRecord> changes, {required bool hooks}) {
     _checkWritable();
     final affected = <DocKey>{};
     for (final raw in changes) {
@@ -1627,16 +1643,18 @@ final class CrdtStore {
           remote: change,
           conflictDetected: local != null,
         );
-        final allowed = _plugins.dispatchBeforeMerge(event);
+        final allowed = hooks ? _plugins.dispatchBeforeMerge(event) : change;
         if (allowed == null) continue;
         final c = _normalizeKeys(allowed);
         _applyChangeInternal(c);
         affected.add((table: c.table, pk: c.pk));
-        for (final listener in _remoteListeners.toList()) {
-          try {
-            listener(c);
-          } on Object {
-            // An observer must not abort the batch.
+        if (hooks) {
+          for (final listener in _remoteListeners.toList()) {
+            try {
+              listener(c);
+            } on Object {
+              // An observer must not abort the batch.
+            }
           }
         }
         if (_quarantined.contains((c.table, c.pk))) {
@@ -1646,6 +1664,7 @@ final class CrdtStore {
             ),
           );
         }
+        if (!hooks) continue;
         // The merge installed a new document object, so re-read the result.
         final result = _getDoc(c.table, c.pk)?.fields[c.field];
         event.result = result;
@@ -1670,8 +1689,11 @@ final class CrdtStore {
   }
 
   /// Calls [listener] with every remote change [applyChanges] applies, as
-  /// applied (after `beforeMerge`, with normalized names), in order. Returns
-  /// the function that removes it. A listener that throws is ignored.
+  /// applied (after `beforeMerge`, with normalized names), in order. A change
+  /// `beforeMerge` cancelled is not reported. Returns the function that
+  /// removes it. A listener that throws is ignored. Pass what it reports to
+  /// [applyAppliedChanges], never back to [applyChanges], which would run the
+  /// hooks on their own output.
   ///
   /// `SyncEngine.discardRejected` uses it to keep a newer value that arrives
   /// while it fetches the server's.
