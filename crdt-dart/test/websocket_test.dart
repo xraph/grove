@@ -18,6 +18,9 @@ final class FakeWs implements WsConnection {
   final _in = StreamController<String>.broadcast();
   final sent = <Map<String, Object?>>[];
   bool closed = false;
+
+  /// Frames sent after the socket was closed.
+  final lateSends = <Map<String, Object?>>[];
   Map<String, Object?>? Function(Map<String, Object?> frame) respond = (_) =>
       null;
 
@@ -28,6 +31,7 @@ final class FakeWs implements WsConnection {
   void send(String text) {
     final frame = jsonDecode(text) as Map<String, Object?>;
     sent.add(frame);
+    if (closed) lateSends.add(frame);
     final reply = respond(frame);
     if (reply != null) scheduleMicrotask(() => serverSends(reply));
   }
@@ -982,6 +986,143 @@ void main() {
         await failed;
         expect(alice.ofType('push_request'), hasLength(1));
         expect(c.latest.ofType('push_request'), hasLength(1));
+        await t.close();
+      });
+
+      test('an auth read that resolves after a newer one is discarded and the '
+          'earlier credentials never reopen a socket', () async {
+        final c = Connector();
+        final slow = Completer<Map<String, String>>();
+        final fast = Completer<Map<String, String>>();
+        final auth = _FnAuth(
+          (n) => switch (n) {
+            1 => {'authorization': 'Bearer alice'},
+            2 => slow.future, // the push's read, answered last
+            3 => fast.future, // the pull's read, answered first
+            _ => {'authorization': 'Bearer bob'},
+          },
+        );
+        final t = _transport(c, auth: auth);
+        await pumpEventQueue();
+        final alice = c.latest;
+        c.onNew = (ws) => ws.respond = (m) => switch (m['type']) {
+          'push_request' => {
+            'type': 'push_response',
+            'request_id': m['request_id'],
+            'payload': {'merged': 1, 'latest_hlc': _hlc0},
+          },
+          _ => {
+            'type': 'pull_response',
+            'request_id': m['request_id'],
+            'payload': {'changes': <Object?>[], 'latest_hlc': _hlc0},
+          },
+        };
+
+        final push = t.push(_pushReq());
+        final pull = t.pull(_pullReq());
+        await pumpEventQueue();
+        // The newer read (the pull's, bob) resolves first; then the older read
+        // resolves with alice's headers.
+        fast.complete({'authorization': 'Bearer bob'});
+        await pumpEventQueue();
+        slow.complete({'authorization': 'Bearer alice'});
+        expect((await pull).changes, isEmpty);
+        expect((await push).merged, 1);
+
+        // One bob handshake, no alice handshake after it, and nothing failed.
+        expect(
+          [for (final h in c.headers) h['authorization']],
+          ['Bearer alice', 'Bearer bob'],
+        );
+        expect(alice.sent, isEmpty);
+        expect(c.latest.ofType('push_request'), hasLength(1));
+        expect(c.latest.ofType('pull_request'), hasLength(1));
+        // The discarded read was made again (call 4).
+        expect(auth.calls, 4);
+        await t.close();
+      });
+
+      test('a discarded auth read that is made again can find the provider '
+          'cancelling', () async {
+        final c = Connector();
+        final slow = Completer<Map<String, String>>();
+        final fast = Completer<Map<String, String>>();
+        final auth = _FnAuth(
+          (n) => switch (n) {
+            1 => {'authorization': 'Bearer alice'},
+            2 => slow.future,
+            3 => fast.future,
+            _ => throw _cancelled(),
+          },
+        );
+        final t = _transport(c, auth: auth);
+        await pumpEventQueue();
+        final push = t.push(_pushReq());
+        final pushFailed = expectLater(
+          push,
+          throwsA(
+            isA<CrdtError>().having(
+              (e) => e.code,
+              'code',
+              CrdtErrorCode.cancelled,
+            ),
+          ),
+        );
+        final pull = t.pull(_pullReq());
+        final pullFailed = expectLater(pull, throwsA(isA<CrdtError>()));
+        await pumpEventQueue();
+        fast.complete({'authorization': 'Bearer bob'});
+        slow.complete({'authorization': 'Bearer alice'});
+        await pushFailed;
+        await pullFailed;
+        await t.close();
+      });
+
+      test('updatePresence concurrent with a credential switch sends only '
+          'on a socket handshaken with the credentials of its own read', () async {
+        // The same credential check as push and pull, and a closed or replaced
+        // socket is never written to. (The identity check after the read is
+        // defence in depth: a continuation runs in the same turn as the read
+        // that completed it, so no test can wedge a drop between the two.)
+        final c = Connector();
+        final late = Completer<Map<String, String>>();
+        final auth = _FnAuth(
+          (n) => switch (n) {
+            1 => {'authorization': 'Bearer alice'},
+            2 => late.future, // the presence update's read, answered last
+            _ => {
+              'authorization': 'Bearer bob',
+            }, // the push's read, any re-read
+          },
+        );
+        final t = _transport(c, auth: auth);
+        await pumpEventQueue();
+        final alice = c.latest;
+        c.onNew = (ws) => ws.respond = (m) => m['type'] == 'push_request'
+            ? {
+                'type': 'push_response',
+                'request_id': m['request_id'],
+                'payload': {'merged': 1, 'latest_hlc': _hlc0},
+              }
+            : null;
+
+        final presence = t.updatePresence(
+          const PresenceUpdate(nodeId: 'n', topic: 'r', data: {}),
+        );
+        await pumpEventQueue();
+        // The switch: a push reads bob and drops alice's socket.
+        await t.push(_pushReq());
+        expect(alice.closed, isTrue);
+        late.complete({'authorization': 'Bearer alice'});
+        await presence;
+
+        expect(alice.lateSends, isEmpty);
+        expect(alice.sent, isEmpty);
+        expect(
+          [for (final h in c.headers) h['authorization']],
+          ['Bearer alice', 'Bearer bob'],
+        );
+        expect(c.latest.ofType('presence_update'), hasLength(1));
         await t.close();
       });
 

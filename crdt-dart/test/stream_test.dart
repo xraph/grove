@@ -1125,6 +1125,136 @@ void main() {
       s.disconnect();
     });
 
+    test('200, an error frame, close, repeated, backs off like a refused '
+        'connection', () async {
+      final sleeps = <Duration>[];
+      final calls = _Calls();
+      final s = CrdtStream(
+        baseUrl: _base,
+        config: const StreamConfig(
+          reconnectDelay: Duration(seconds: 1),
+          maxReconnectDelay: Duration(seconds: 4),
+        ),
+        random: () => 1.0,
+        connect: _chunks([
+          // What the grove extension sends when it cannot start the stream.
+          ': hello\n\nevent: error\ndata: crdt: metadata store not initialized\n\n',
+        ], calls: calls),
+        sleep: (d) async {
+          sleeps.add(d);
+          if (sleeps.length > 3) await Completer<void>().future;
+        },
+      );
+      final events = _collect(s);
+      s.connect();
+      await pumpEventQueue();
+      expect(calls.count, 4);
+      expect(sleeps, const [
+        Duration(seconds: 1),
+        Duration(seconds: 2),
+        Duration(seconds: 4),
+        Duration(seconds: 4),
+      ]);
+      expect(_of<StreamError>(events), hasLength(4));
+      s.disconnect();
+    });
+
+    test('a connection that delivers a change, or stays open for 30 seconds, '
+        'is healthy and restarts the wait', () {
+      fakeAsync((async) {
+        final sleeps = <Duration>[];
+        final calls = _Calls();
+        final bodies = <StreamController<List<int>>>[];
+        var n = 0;
+        final s = CrdtStream(
+          baseUrl: _base,
+          config: const StreamConfig(
+            reconnectDelay: Duration(seconds: 1),
+            maxReconnectDelay: Duration(seconds: 8),
+            idleTimeout: Duration.zero,
+          ),
+          random: () => 1.0,
+          sleep: (d) async {
+            sleeps.add(d);
+            if (sleeps.length > 4) await Completer<void>().future;
+          },
+          connect: (url, h, abort) async {
+            calls.record(url, h, abort);
+            n++;
+            if (n <= 2) return const SseResponse(500, Stream.empty());
+            final body = StreamController<List<int>>();
+            bodies.add(body);
+            return SseResponse(200, body.stream);
+          },
+        );
+        s.connect();
+        async.flushMicrotasks();
+        // Two refusals: waits of 1 s and 2 s. The third connection only ever
+        // sends comments, and stays open 35 s.
+        expect(calls.count, 3);
+        for (var i = 0; i < 3; i++) {
+          async.elapse(const Duration(seconds: 10));
+          bodies[0].add(utf8.encode(': keep-alive\n\n'));
+          async.flushMicrotasks();
+        }
+        async.elapse(const Duration(seconds: 5));
+        unawaited(bodies[0].close());
+        async.flushMicrotasks();
+        // The wait after it is the first step again, not 4 s.
+        expect(sleeps, const [
+          Duration(seconds: 1),
+          Duration(seconds: 2),
+          Duration(seconds: 1),
+        ]);
+        // The fourth connection delivers a change, closes, and the wait after
+        // it is the first step again too.
+        bodies[1].add(utf8.encode(_sseEvent('change', _sampleChange(5))));
+        async.flushMicrotasks();
+        unawaited(bodies[1].close());
+        async.flushMicrotasks();
+        expect(sleeps.last, const Duration(seconds: 1));
+        expect(sleeps, hasLength(4));
+        s.disconnect();
+      });
+    });
+
+    test('the reason after an error is normal, not the idle of an earlier '
+        'recycle', () {
+      fakeAsync((async) {
+        final calls = _Calls();
+        var n = 0;
+        final s = CrdtStream(
+          baseUrl: _base,
+          config: const StreamConfig(
+            idleTimeout: Duration(seconds: 45),
+            reconnectDelay: Duration(seconds: 1),
+            maxReconnectDelay: Duration(seconds: 1),
+          ),
+          random: () => 1.0,
+          connect: (url, h, abort) async {
+            calls.record(url, h, abort);
+            n++;
+            if (n == 2) return const SseResponse(503, Stream.empty());
+            return SseResponse(200, StreamController<List<int>>().stream);
+          },
+        );
+        final events = _collect(s);
+        s.connect();
+        async.elapse(const Duration(seconds: 120));
+        expect(calls.count, greaterThanOrEqualTo(3));
+        // idle recycle, then a 503, then a connection: labelled normal.
+        final connected = _of<StreamConnected>(events).toList();
+        expect(connected.first.reason, ConnectionReason.normal);
+        expect(connected[1].reason, ConnectionReason.normal);
+        expect(_of<StreamError>(events).first.error, isA<TransportError>());
+        expect(
+          _of<StreamDisconnected>(events).first.reason,
+          ConnectionReason.idle,
+        );
+        s.disconnect();
+      });
+    });
+
     test('a stale loop stops touching state after disconnect', () {
       fakeAsync((async) {
         final gate = Completer<SseResponse>();

@@ -57,6 +57,10 @@ typedef SseConnect = Future<SseResponse> Function(
 SseConnect defaultSseConnect({http.Client? client}) =>
     platformSseConnect(client: client);
 
+/// How long a connection must stay open to count as healthy on its own, when
+/// it has delivered no change, changes or presence event.
+const _healthyAfter = Duration(seconds: 30);
+
 /// The most of an error response body kept for the error message.
 const _maxErrorBody = 4096;
 
@@ -83,6 +87,13 @@ const _errorBodyTimeout = Duration(seconds: 10);
 ///
 /// Header names are lower-cased before the request is made, so a header from
 /// `auth` replaces a static one whatever its case.
+///
+/// The reconnect wait grows with every failed connection and starts again from
+/// its first step only once a connection has proved healthy: it delivered a
+/// `change`, `changes` or `presence` event, or it stayed open for 30 seconds.
+/// A response of 200 followed by an `event: error` frame and a close (what the
+/// grove extension sends when it cannot start the stream) is a failed
+/// connection: it backs off exactly as a refused connection does.
 ///
 /// The server is expected to send a keep-alive (an SSE comment line) at least
 /// every 15 seconds. The default `idleTimeout` of 45 seconds is three missed
@@ -144,6 +155,9 @@ final class CrdtStream implements CrdtSubscription {
   final Set<void Function(CrdtStreamEvent)> _handlers = {};
   Completer<void>? _abort;
   bool _idleFired = false;
+  bool _errorFrameSeen = false;
+  Timer? _healthyTimer;
+  int _healthyGen = -1;
   ConnectionReason _nextReason = ConnectionReason.normal;
   bool _connected = false;
   HLC? _lastHlc;
@@ -186,6 +200,7 @@ final class CrdtStream implements CrdtSubscription {
   @override
   void disconnect() {
     _clearIdleTimer();
+    _healthyTimer?.cancel();
     _shouldReconnect = false;
     // Bump the generation so any loop still in flight sees it is stale on its
     // next check and stops touching _abort, _connected or the handlers, even
@@ -304,7 +319,12 @@ final class CrdtStream implements CrdtSubscription {
         _endForCancellation(failure);
         return;
       }
-      if (failure != null) _emit(StreamError(failure));
+      if (failure != null) {
+        _emit(StreamError(failure));
+        // The connection that follows a failure is labelled for the failure,
+        // not for an idle recycle that came before it.
+        _nextReason = ConnectionReason.normal;
+      }
 
       if (_connected) {
         _connected = false;
@@ -314,6 +334,7 @@ final class CrdtStream implements CrdtSubscription {
           ),
         );
       }
+      if (_errorFrameSeen) _nextReason = ConnectionReason.normal;
       if (idle) {
         // A quiet stream is not a failing one: do not grow the wait for it.
         _nextReason = ConnectionReason.idle;
@@ -333,6 +354,7 @@ final class CrdtStream implements CrdtSubscription {
   /// good. Nothing reconnects until a caller asks with [connect].
   void _endForCancellation(Object error) {
     _clearIdleTimer();
+    _healthyTimer?.cancel();
     _shouldReconnect = false;
     _generation++;
     _emit(StreamError(error));
@@ -371,6 +393,7 @@ final class CrdtStream implements CrdtSubscription {
     final abort = Completer<void>();
     _abort = abort;
     _idleFired = false;
+    _errorFrameSeen = false;
     try {
       // Read for every attempt: a cancellation thrown here ends the stream,
       // and nothing from an earlier attempt is reused.
@@ -432,6 +455,13 @@ final class CrdtStream implements CrdtSubscription {
       }
 
       _connected = true;
+      // A connection that stays open this long is healthy even if the server
+      // sends only keep-alive comments.
+      _healthyGen = gen;
+      _healthyTimer?.cancel();
+      _healthyTimer = Timer(_healthyAfter, () {
+        if (gen == _generation) _backoff.reset();
+      });
       _armIdleTimer(gen);
       final reason = _nextReason;
       _nextReason = ConnectionReason.normal;
@@ -440,6 +470,7 @@ final class CrdtStream implements CrdtSubscription {
       await _read(gen, response.body, abort);
       return gen == _generation && _idleFired;
     } finally {
+      if (_healthyGen == gen) _healthyTimer?.cancel();
       if (!abort.isCompleted) abort.complete();
       if (identical(_abort, abort)) _abort = null;
     }
@@ -466,7 +497,6 @@ final class CrdtStream implements CrdtSubscription {
     final parser = _SseParser((type, data) {
       if (gen == _generation) _processEvent(type, data);
     });
-    var sawBytes = false;
     final sub = body
         .transform(const Utf8Decoder(allowMalformed: true))
         .listen(
@@ -474,13 +504,6 @@ final class CrdtStream implements CrdtSubscription {
             // A newer generation may have taken over while this read was
             // pending. Stop without touching shared state.
             if (gen != _generation) return finish();
-            if (!sawBytes) {
-              // The server is talking: only now is this a working connection.
-              // One that answers 200 and hangs up at once never gets here, so
-              // it keeps backing off.
-              sawBytes = true;
-              _backoff.reset();
-            }
             _armIdleTimer(gen);
             try {
               parser.add(chunk);
@@ -577,7 +600,9 @@ final class CrdtStream implements CrdtSubscription {
           event = StreamPresence(PresenceEvent.fromJson(jsonDecode(data)));
         case 'error':
           // The grove extension sends `error` when it cannot start the stream
-          // (crdt-js drops it silently).
+          // (crdt-js drops it silently). The connection it arrives on has
+          // failed, however it was answered: it is not a healthy connection.
+          _errorFrameSeen = true;
           event = StreamError(TransportError(data));
         default:
           return;
@@ -596,6 +621,8 @@ final class CrdtStream implements CrdtSubscription {
       );
       return;
     }
+    // A change or a presence event is proof the stream works.
+    if (event is! StreamError) _backoff.reset();
     _emit(event);
   }
 

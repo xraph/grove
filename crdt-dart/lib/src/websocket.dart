@@ -173,6 +173,13 @@ final class _Pending {
 /// Nothing is replayed on the next socket, so a request never reaches a
 /// server under credentials other than the ones it was issued with.
 ///
+/// The provider must return equal headers (same names, ignoring case, and same
+/// values) for as long as the credentials are the same. Headers are compared
+/// on every send, so a provider that adds a nonce, a timestamp or a signature
+/// to each call makes the socket re-handshake on every send and fail the
+/// requests in flight on the one it drops. Put per-request values on
+/// `HttpTransport`, which reads auth per request and keeps no connection.
+///
 /// `requestTimeout` also bounds the connect, so a handshake that never
 /// finishes fails the request instead of hanging it.
 ///
@@ -263,6 +270,10 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
   @override
   Future<void> updatePresence(PresenceUpdate update) async {
     final socket = await _ready();
+    // The socket may have been replaced while this call was resuming.
+    if (!identical(_socket, socket)) {
+      throw NetworkError('CRDT ws connection closed');
+    }
     final sent = _send(
       socket,
       WebSocketMessage(WsMessageType.presenceUpdate, payload: update.toJson()),
@@ -432,7 +443,7 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
       if (_closed) throw _closedError();
       final Map<String, String> headers;
       try {
-        headers = await _readAuth();
+        headers = await _readFreshAuth();
       } on Object catch (error) {
         if (_isCancellation(error)) _revoke(error);
         rethrow;
@@ -502,7 +513,7 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
     // nothing from an earlier one is reused.
     final Map<String, String> headers;
     try {
-      headers = given ?? await _readAuth();
+      headers = given ?? await _readFreshAuth();
     } on Object catch (error, stack) {
       _openFailed(c, error, stack);
       return;
@@ -544,6 +555,26 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
     _adopt(socket, headers);
     if (identical(_opening, c)) _opening = null;
     c.complete(socket);
+  }
+
+  /// Numbers the auth reads, so a read that finishes after a newer one has
+  /// started can be told from the newest.
+  var _authSeq = 0;
+
+  /// The credentials from a read that is still the newest when it resolves.
+  ///
+  /// A read that resolves after a newer read has started is discarded, never
+  /// used to open or reopen a socket (an out-of-order answer could otherwise
+  /// put the earlier credentials back over the later ones), and the read is
+  /// made again. If the provider now throws a cancellation, that is what the
+  /// caller gets. Gives up after three stale reads in a row.
+  Future<Map<String, String>> _readFreshAuth() async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final seq = ++_authSeq;
+      final headers = await _readAuth();
+      if (seq == _authSeq) return headers;
+    }
+    throw NetworkError('CRDT ws credentials kept changing while reading');
   }
 
   /// The credentials. A cancellation passes through as thrown, any other
