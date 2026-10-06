@@ -7,7 +7,7 @@
 // keep their descriptions and assert what remains true: a state decoded from
 // the wire ages like an event-applied one.
 //
-// The last case needs `CrdtClient` and is ported in Task 16.
+// The last case drives `CrdtClient` against a recording presence transport.
 import 'package:grove_crdt/grove_crdt.dart';
 import 'package:test/test.dart';
 
@@ -111,13 +111,16 @@ void main() {
       );
     });
 
-    test(
-      'joinPresence seeds from the server snapshot',
-      () {},
-      skip:
-          'needs CrdtClient, which is ported in Task 16; the case moves to its '
-          'presence tests there.',
-    );
+    test('joinPresence seeds from the server snapshot', () async {
+      final transport = _SeedTransport([
+        _state('bob', now, {'name': 'Bob'}),
+      ]);
+      final client = CrdtClient(nodeId: 'me', transport: transport);
+      await client.joinPresence('t', {'name': 'Me'});
+      expect(transport.sent, hasLength(1));
+      expect(client.presence.getPresence('t').map((p) => p.nodeId), ['bob']);
+      await client.leaveAllPresence();
+    });
 
     // Not in the TS file. A state the server sent without a time decodes as
     // Go's zero time, which is far older than any cutoff. crdt-js treats a time
@@ -145,4 +148,24 @@ void main() {
       expect(pm.getPresence('t'), isEmpty);
     });
   });
+}
+
+/// A transport answering presence reads with a fixed snapshot.
+final class _SeedTransport implements Transport, PresenceTransport {
+  _SeedTransport(this.snapshot);
+
+  final List<PresenceState> snapshot;
+  final sent = <PresenceUpdate>[];
+
+  @override
+  Future<PullResponse> pull(PullRequest req) async => PullResponse();
+
+  @override
+  Future<PushResponse> push(PushRequest req) async => PushResponse(merged: 0);
+
+  @override
+  Future<void> updatePresence(PresenceUpdate u) async => sent.add(u);
+
+  @override
+  Future<List<PresenceState>> getPresence(String topic) async => snapshot;
 }

@@ -3,22 +3,19 @@
 // The `PresenceManager` describe runs against `PresenceManager` with an
 // injected clock. The `HttpTransport presence` describe runs against
 // `HttpTransport` with `package:http/testing.dart`'s MockClient in place of the
-// `fetch` mock. The `CRDTClient presence` describe needs `CrdtClient`, which is
-// ported in Task 16, so its cases are kept here as skipped and move there.
+// `fetch` mock. The `CRDTClient presence` describe runs `CrdtClient` over the
+// same MockClient, with fake_async in place of vitest's fake timers.
 //
 // The cases after the port are new in Dart: the immutability of the cached
 // answers, and `clear()` leaving nothing visible, which an account switch
 // relies on.
 import 'dart:convert';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:grove_crdt/grove_crdt.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:test/test.dart';
-
-const _needsClient =
-    'needs CrdtClient, which is ported in Task 16; the case moves to its '
-    'presence tests there.';
 
 PresenceEvent _event(
   String type,
@@ -488,50 +485,256 @@ void main() {
   });
 
   group('CRDTClient presence', () {
+    CrdtClient createClient(_Server server, {PresenceConfig? presence}) =>
+        CrdtClient(
+          baseUrl: Uri.parse('https://api.example.com/sync'),
+          nodeId: 'test-node',
+          tables: const ['users'],
+          httpClient: server.client,
+          presence: presence,
+        );
+
+    List<http.Request> presenceCalls(_Server server) => [
+      for (final r in server.requests)
+        if (r.url.path.contains('/presence')) r,
+    ];
+
+    Map<String, Object?> body(http.Request r) =>
+        jsonDecode(r.body) as Map<String, Object?>;
+
     group('updatePresence()', () {
-      test('sends presence update via transport', () {}, skip: _needsClient);
+      test('sends presence update via transport', () async {
+        final server = _Server(const <String, Object?>{});
+        final client = createClient(server, presence: const PresenceConfig());
 
-      test(
-        'throws when transport does not support presence',
-        () {},
-        skip: _needsClient,
-      );
+        await client.updatePresence('docs:1', {'name': 'Alice'});
 
-      test('starts heartbeat after update', () {}, skip: _needsClient);
+        final call = presenceCalls(server).first;
+        expect(body(call)['node_id'], 'test-node');
+        expect(body(call)['topic'], 'docs:1');
+        expect(body(call)['data'], {'name': 'Alice'});
+        await client.dispose();
+      });
 
-      test('heartbeat re-sends last presence data', () {}, skip: _needsClient);
+      test('throws when transport does not support presence', () async {
+        final client = CrdtClient(
+          nodeId: 'test-node',
+          transport: _NoPresenceTransport(),
+        );
+
+        await expectLater(
+          client.updatePresence('docs:1', {'name': 'Alice'}),
+          throwsA(
+            isA<UnsupportedError>().having(
+              (e) => e.message,
+              'message',
+              contains('does not support presence'),
+            ),
+          ),
+        );
+      });
+
+      test('starts heartbeat after update', () {
+        fakeAsync((async) {
+          final server = _Server(const <String, Object?>{});
+          final client = createClient(
+            server,
+            presence: const PresenceConfig(
+              heartbeatInterval: Duration(milliseconds: 100),
+            ),
+          );
+
+          client.updatePresence('docs:1', {
+            'cursor': {'x': 10, 'y': 20},
+          });
+          async.flushMicrotasks();
+          server.requests.clear();
+
+          // Advance past one heartbeat interval.
+          async.elapse(const Duration(milliseconds: 105));
+
+          expect(server.requests.length, greaterThanOrEqualTo(1));
+
+          // Clean up to prevent leaking timers.
+          client.leavePresence('docs:1');
+          async.flushMicrotasks();
+        });
+      });
+
+      test('heartbeat re-sends last presence data', () {
+        fakeAsync((async) {
+          final server = _Server(const <String, Object?>{});
+          final client = createClient(
+            server,
+            presence: const PresenceConfig(
+              heartbeatInterval: Duration(milliseconds: 100),
+            ),
+          );
+
+          client.updatePresence('docs:1', {
+            'cursor': {'x': 5},
+          });
+          async.flushMicrotasks();
+          server.requests.clear();
+
+          async.elapse(const Duration(milliseconds: 105));
+
+          final calls = presenceCalls(server);
+          expect(calls.length, greaterThanOrEqualTo(1));
+          expect(body(calls[0])['data'], {
+            'cursor': {'x': 5},
+          });
+
+          // Clean up.
+          client.leavePresence('docs:1');
+          async.flushMicrotasks();
+        });
+      });
     });
 
     group('leavePresence()', () {
-      test('sends null data to server', () {}, skip: _needsClient);
+      test('sends null data to server', () async {
+        final server = _Server(const <String, Object?>{});
+        final client = createClient(server, presence: const PresenceConfig());
 
-      test('stops heartbeat', () {}, skip: _needsClient);
+        await client.updatePresence('docs:1', {'name': 'Alice'});
+        server.requests.clear();
+
+        await client.leavePresence('docs:1');
+
+        final call = presenceCalls(server).first;
+        expect(body(call).containsKey('data'), isTrue);
+        expect(body(call)['data'], isNull);
+      });
+
+      test('stops heartbeat', () {
+        fakeAsync((async) {
+          final server = _Server(const <String, Object?>{});
+          final client = createClient(
+            server,
+            presence: const PresenceConfig(
+              heartbeatInterval: Duration(milliseconds: 100),
+            ),
+          );
+
+          client.updatePresence('docs:1', {'name': 'Alice'});
+          async.flushMicrotasks();
+          client.leavePresence('docs:1');
+          async.flushMicrotasks();
+          server.requests.clear();
+
+          // Advance past the heartbeat interval: it must not fire.
+          async.elapse(const Duration(milliseconds: 200));
+          async.flushTimers();
+
+          expect(presenceCalls(server), isEmpty);
+        });
+      });
     });
 
     group('getPresence()', () {
-      test(
-        'fetches presence from server via transport',
-        () {},
-        skip: _needsClient,
-      );
+      test('fetches presence from server via transport', () async {
+        final server = _Server({
+          'topic': 'docs:1',
+          'states': [
+            {
+              'node_id': 'peer-1',
+              'topic': 'docs:1',
+              'data': {'name': 'Alice'},
+              // Go parity: crdt.PresenceState.UpdatedAt is a time.Time, so
+              // the wire carries an RFC 3339 string, not the TS number.
+              'updated_at': '1970-01-01T00:00:01Z',
+            },
+          ],
+        });
+        final client = createClient(server);
 
-      test(
-        'throws when transport does not support getPresence',
-        () {},
-        skip: _needsClient,
-      );
+        final result = await client.getPresence('docs:1');
+        expect(result, hasLength(1));
+        expect(result[0].nodeId, 'peer-1');
+      });
+
+      test('throws when transport does not support getPresence', () async {
+        final client = CrdtClient(
+          nodeId: 'test-node',
+          transport: _NoPresenceTransport(),
+        );
+
+        await expectLater(
+          client.getPresence('docs:1'),
+          throwsA(
+            isA<UnsupportedError>().having(
+              (e) => e.message,
+              'message',
+              contains('does not support presence'),
+            ),
+          ),
+        );
+      });
     });
 
     group('leaveAllPresence()', () {
-      test('leaves all active topics', () {}, skip: _needsClient);
+      test('leaves all active topics', () {
+        fakeAsync((async) {
+          final server = _Server(const <String, Object?>{});
+          final client = createClient(
+            server,
+            presence: const PresenceConfig(
+              heartbeatInterval: Duration(milliseconds: 100),
+            ),
+          );
+
+          client.updatePresence('docs:1', {'name': 'Alice'});
+          client.updatePresence('docs:2', {'name': 'Alice'});
+          async.flushMicrotasks();
+          server.requests.clear();
+
+          client.leaveAllPresence();
+          async.flushMicrotasks();
+
+          // A leave went out for both topics, each with null data.
+          final calls = presenceCalls(server);
+          expect(calls, hasLength(2));
+          for (final call in calls) {
+            expect(body(call)['data'], isNull);
+          }
+
+          // The heartbeats are stopped.
+          server.requests.clear();
+          async.elapse(const Duration(milliseconds: 200));
+          async.flushTimers();
+
+          expect(presenceCalls(server), isEmpty);
+        });
+      });
     });
 
     group('presence field', () {
-      test('exposes PresenceManager on client', () {}, skip: _needsClient);
+      test('exposes PresenceManager on client', () {
+        final client = createClient(_Server(const <String, Object?>{}));
+        expect(client.presence, isA<PresenceManager>());
+      });
 
-      test("PresenceManager uses client's nodeID", () {}, skip: _needsClient);
+      test("PresenceManager uses client's nodeID", () {
+        final client = createClient(_Server(const <String, Object?>{}));
 
-      test('PresenceManager returns remote peers', () {}, skip: _needsClient);
+        // An event for the local node is left out.
+        client.presence.applyEvent(_join('test-node', 'room'));
+
+        expect(client.presence.getPresence('room'), isEmpty);
+      });
+
+      test('PresenceManager returns remote peers', () {
+        final client = createClient(_Server(const <String, Object?>{}));
+
+        client.presence.applyEvent(
+          _join('remote-peer', 'room', {'name': 'Bob'}),
+        );
+
+        final peers = client.presence.getPresence('room');
+        expect(peers, hasLength(1));
+        expect(peers[0].nodeId, 'remote-peer');
+      });
     });
   });
 
@@ -770,4 +973,15 @@ void main() {
       });
     });
   });
+}
+
+/// A transport with no presence support.
+final class _NoPresenceTransport implements Transport {
+  @override
+  Future<PullResponse> pull(PullRequest req) async =>
+      PullResponse(latestHlc: HLC(BigInt.one, 0, 's'));
+
+  @override
+  Future<PushResponse> push(PushRequest req) async =>
+      PushResponse(merged: 0, latestHlc: HLC(BigInt.one, 0, 's'));
 }

@@ -4,6 +4,7 @@ library;
 export 'src/apply.dart';
 export 'src/auth.dart';
 export 'src/backoff.dart';
+export 'src/client.dart';
 export 'src/clock_skew.dart';
 export 'src/compact.dart';
 export 'src/envelope.dart';
