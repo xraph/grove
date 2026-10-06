@@ -6,9 +6,9 @@ import 'wire_helpers.dart';
 
 /// Stable identity of a local change.
 ///
-/// Unique because one node never issues the same HLC twice. The parts are
-/// joined with U+0000, which cannot appear in a table, key or field name that
-/// came off the wire.
+/// Unique because one node never issues the same HLC twice, and the HLC string
+/// carries the node id. The parts are joined with U+0000 only as a separator;
+/// uniqueness does not rest on U+0000 being absent from a name.
 String pendingKey(ChangeRecord c) => '${c.table}\u0000${c.pk}\u0000${c.field}\u0000${hlcString(c.hlc)}';
 
 String _requiredString(Map<String, Object?> m, String key, String owner) {

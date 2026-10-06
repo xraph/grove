@@ -176,12 +176,24 @@ final class _MapBatch implements ReplicaKeyValueBatch {
   }
 }
 
+/// Percent-encodes a table or key for use inside a storage key. An unpaired
+/// surrogate becomes U+FFFD first, as the server holds it.
+String _enc(String s) {
+  var clean = s;
+  if (s.runes.any((r) => r >= 0xD800 && r <= 0xDFFF)) {
+    clean = String.fromCharCodes([for (final r in s.runes) r >= 0xD800 && r <= 0xDFFF ? 0xFFFD : r]);
+  }
+  return Uri.encodeComponent(clean);
+}
+
 /// [ReplicaStorage] and [SyncCursorStore] over a [ReplicaKeyValue].
 ///
 /// Keys, all under [prefix]:
 ///
 /// - `doc/<table>/<pk>`: the document as wire JSON. `<table>` and `<pk>` are
-///   percent-encoded, so a `/` inside either cannot collide.
+///   percent-encoded, so a `/` inside either cannot collide. An unpaired
+///   surrogate in either becomes U+FFFD first, which is how the server holds
+///   it, so two names the server cannot tell apart share one key here too.
 /// - `pending`: a JSON array of [PendingChange.toJson].
 /// - `cursor/<table>`: the pull cursor as wire JSON.
 /// - `meta/<key>`: the raw value.
@@ -190,7 +202,14 @@ final class _MapBatch implements ReplicaKeyValueBatch {
 /// surface as an error on the returned future, never as a synchronous throw.
 ///
 /// [clearAll] removes every key that starts with [prefix], so two replicas
-/// must not use prefixes where one starts with the other.
+/// must not use prefixes where one starts with the other. It scans and then
+/// batches, so it is not atomic against a concurrent writer: a write that lands
+/// between the two survives. Flush or dispose whatever writes to this storage
+/// before clearing it.
+///
+/// Meta keys and values are stored raw. A real store may refuse a key that
+/// holds an unpaired surrogate (forge's SQLite store throws an
+/// [ArgumentError]), so keep them ASCII.
 final class KeyValueReplicaStorage implements AtomicReplicaStorage, SyncCursorStore {
   /// Stores everything under [prefix] in [kv].
   KeyValueReplicaStorage(this.kv, {this.prefix = ''});
@@ -205,9 +224,9 @@ final class KeyValueReplicaStorage implements AtomicReplicaStorage, SyncCursorSt
 
   String get _pendingKey => '${prefix}pending';
 
-  String _docKey(String table, String pk) => '$_docPrefix${Uri.encodeComponent(table)}/${Uri.encodeComponent(pk)}';
+  String _docKey(String table, String pk) => '$_docPrefix${_enc(table)}/${_enc(pk)}';
 
-  String _cursorKey(String table) => '${prefix}cursor/${Uri.encodeComponent(table)}';
+  String _cursorKey(String table) => '${prefix}cursor/${_enc(table)}';
 
   String _encodePending(List<PendingChange> changes) => encodeWire([for (final c in changes) c.toJson()]);
 
@@ -225,6 +244,9 @@ final class KeyValueReplicaStorage implements AtomicReplicaStorage, SyncCursorSt
         pk = Uri.decodeComponent(parts[1]);
         doc = DocumentState.fromJson(jsonDecode(e.value));
       } on FormatException catch (err) {
+        throw FormatException('crdt: stored document "${e.key}" is unreadable: ${err.message}');
+      } on ArgumentError catch (err) {
+        // Uri.decodeComponent throws an ArgumentError for a bad percent-escape.
         throw FormatException('crdt: stored document "${e.key}" is unreadable: ${err.message}');
       }
       (out[table] ??= {})[pk] = doc;

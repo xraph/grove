@@ -122,7 +122,7 @@ void main() {
   });
 
   group('KeyValueReplicaStorage beyond the crdt-js cases', () {
-    test('the document key is percent-encoded, so no table or pk can collide', () async {
+    test('the document key is percent-encoded, so a slash in a table or pk cannot collide', () async {
       final kv = MapReplicaKeyValue();
       final s = KeyValueReplicaStorage(kv);
       // ('a/b', 'c') and ('a', 'b/c') join to the same string without encoding.
@@ -132,6 +132,22 @@ void main() {
       expect(loaded['a/b']!.keys, ['c']);
       expect(loaded['a']!.keys, ['b/c']);
       expect(kv.entries.keys.where((k) => k.startsWith('doc/')), hasLength(2));
+    });
+
+    test('an unpaired surrogate in a table or pk keys as U+FFFD, as the server holds it', () async {
+      final kv = MapReplicaKeyValue();
+      final s = KeyValueReplicaStorage(kv);
+      await s.saveDocument('t\uD800', 'a\uD800', doc('a\uD800', table: 't\uD800'));
+      await s.saveDocument('t\uFFFD', 'a\uDC00', doc('a\uDC00', table: 't\uFFFD'));
+      // All three names are one name to the server, so there is one document.
+      expect(kv.entries.keys, ['doc/t%EF%BF%BD/a%EF%BF%BD']);
+      final loaded = await s.loadState();
+      expect(loaded.keys, ['t\uFFFD']);
+      expect(loaded['t\uFFFD']!.keys, ['a\uFFFD']);
+      await s.deleteDocument('t\uD800', 'a\uD800');
+      expect(kv.entries, isEmpty);
+      await s.writeCursor('t\uD800', n(1));
+      expect(await s.readCursor('t\uFFFD'), n(1));
     });
 
     test('keeps empty and non-ASCII table and pk apart', () async {
@@ -237,6 +253,17 @@ void main() {
       await expectLater(KeyValueReplicaStorage(kv).loadState(), throwsFormatException);
     });
 
+    test('a bad percent-escape in a stored key is a FormatException that names the key', () async {
+      for (final bad in ['doc/%/1', 'doc/%ZZ/1', 'doc/t/%C3']) {
+        final kv = MapReplicaKeyValue()..entries[bad] = '{}';
+        await expectLater(
+          KeyValueReplicaStorage(kv).loadState(),
+          throwsA(isA<FormatException>().having((e) => e.message, 'message', contains(bad))),
+          reason: bad,
+        );
+      }
+    });
+
     test('loadPendingChanges rejects a stored queue that is not an array', () async {
       final kv = MapReplicaKeyValue()..entries['pending'] = '{}';
       await expectLater(KeyValueReplicaStorage(kv).loadPendingChanges(), throwsFormatException);
@@ -316,7 +343,7 @@ void main() {
         pending: [PendingChange(lwwChange(1))],
       );
       expect(kv.batches, 1);
-      expect(kv.puts, 0);
+      expect((kv.puts, kv.deletes, kv.reads), (0, 0, 0));
       expect(kv.inner.entries.keys, containsAll(['doc/t/1', 'doc/t/2', 'pending']));
     });
 
@@ -435,9 +462,14 @@ final class _CountingKv implements ReplicaKeyValue {
   final bool failBatch;
   int batches = 0;
   int puts = 0;
+  int reads = 0; // get and scan
+  int deletes = 0;
 
   @override
-  Future<String?> get(String key) => inner.get(key);
+  Future<String?> get(String key) {
+    reads++;
+    return inner.get(key);
+  }
 
   @override
   Future<void> put(String key, String value) {
@@ -446,10 +478,16 @@ final class _CountingKv implements ReplicaKeyValue {
   }
 
   @override
-  Future<void> delete(String key) => inner.delete(key);
+  Future<void> delete(String key) {
+    deletes++;
+    return inner.delete(key);
+  }
 
   @override
-  Future<Map<String, String>> scan(String prefix) => inner.scan(prefix);
+  Future<Map<String, String>> scan(String prefix) {
+    reads++;
+    return inner.scan(prefix);
+  }
 
   @override
   Future<void> batch(void Function(ReplicaKeyValueBatch batch) build) {
