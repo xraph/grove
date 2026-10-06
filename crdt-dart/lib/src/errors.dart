@@ -4,6 +4,8 @@
 /// where the failure came from an HTTP response, the status code.
 library;
 
+import 'clock_skew.dart';
+
 /// Structured error codes for CRDT operations.
 enum CrdtErrorCode {
   /// The server could not be reached.
@@ -90,18 +92,28 @@ base class CrdtError implements Exception {
 bool isRetryableStatus(int? status) =>
     status == null || status >= 500 || status == 429 || status == 408;
 
+/// The longest wait the transports honour from a `Retry-After` header. A
+/// server that asks for more is treated as asking for this much.
+const maxRetryAfter = Duration(seconds: 60);
+
 /// Error thrown by transport operations.
 ///
 /// A [CrdtError] subclass, so `on CrdtError` catches it too.
 final class TransportError extends CrdtError {
   /// Creates an error for a failed request. [body] is the decoded response
-  /// body (JSON, or text when it was not JSON) and [serverTime] the response's
-  /// `Date` header, when they were available.
-  TransportError(super.message, {super.statusCode, this.body, this.serverTime})
-    : super(
-        code: CrdtErrorCode.networkUnreachable,
-        retryable: isRetryableStatus(statusCode),
-      );
+  /// body (JSON, or text when it was not JSON), [serverTime] the response's
+  /// `Date` header and [headers] the response headers (keys lower-case), when
+  /// they were available.
+  TransportError(
+    super.message, {
+    super.statusCode,
+    this.body,
+    this.serverTime,
+    this.headers = const {},
+  }) : super(
+         code: CrdtErrorCode.networkUnreachable,
+         retryable: isRetryableStatus(statusCode),
+       );
 
   /// The decoded response body, if there was one. `classifyPushError` reads
   /// it.
@@ -109,6 +121,29 @@ final class TransportError extends CrdtError {
 
   /// The server's clock, from the response's `Date` header.
   final DateTime? serverTime;
+
+  /// The response headers, with lower-case keys. Empty when the failure has
+  /// no response.
+  final Map<String, String> headers;
+
+  /// How long the server asked the client to wait, from the `Retry-After`
+  /// header: a count of seconds or an HTTP date. Null when the header is
+  /// absent or malformed. A date in the past reads as zero. The value is not
+  /// capped; see [maxRetryAfter].
+  ///
+  /// An HTTP date is measured from the response's own `Date` header when it
+  /// has one, so a device clock that is off does not skew the wait.
+  Duration? get retryAfter {
+    final raw = headers['retry-after']?.trim();
+    if (raw == null || raw.isEmpty) return null;
+    if (RegExp(r'^\d{1,9}$').hasMatch(raw)) {
+      return Duration(seconds: int.parse(raw));
+    }
+    final at = parseHttpDate(raw);
+    if (at == null) return null;
+    final wait = at.difference(serverTime ?? DateTime.now().toUtc());
+    return wait.isNegative ? Duration.zero : wait;
+  }
 
   @override
   String get name => 'TransportError';
