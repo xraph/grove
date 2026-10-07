@@ -1,10 +1,13 @@
 package crdt
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
+	"sync"
 	"time"
 
 	log "github.com/xraph/go-utils/log"
@@ -141,50 +144,125 @@ func (c *SyncController) HandlePull(ctx context.Context, req *PullRequest) (*Pul
 // readChangesWindow reads the changes after since for every table and
 // returns them with the cursor to resume from. Each table is read with its
 // own page limit, so a table that fills its page still has unread rows past
-// that page's last HLC. The window is cut at the earliest such page end
-// across all tables; otherwise a newer row in another table would move the
-// cursor past the unread rows and the next read would skip them. The cut
-// compares (timestamp, counter) only, matching the shadow-table cursor.
+// that page's last cursor position. The window is cut at the earliest such
+// page end across all tables; otherwise a newer row in another table would
+// move the cursor past the unread rows and the next read would skip them.
+//
+// The cut and the returned cursor use the rows' cursor positions, not the
+// changes' HLCs. A restamped row (see mergePushed) delivers its own, older
+// clock as its HLC, but it sorts at its cursor position, so resuming from
+// the highest change HLC could land before rows already delivered (pulled
+// again, harmless) and the cut must not drop a row whose clock is old but
+// whose position is past it. Positions compare (timestamp, counter) only,
+// matching the shadow-table cursor.
 func (c *SyncController) readChangesWindow(ctx context.Context, tables []string, since HLC) ([]ChangeRecord, HLC, error) {
 	var all []ChangeRecord
+	var cursors []HLC
 	var cutoff *HLC
 	for _, table := range tables {
-		changes, err := c.metadata.ReadChangesSince(ctx, table, since)
+		page, err := c.metadata.readChangesPage(ctx, table, since, DefaultChangesLimit)
 		if err != nil {
 			return nil, HLC{}, fmt.Errorf("crdt: read changes for %s: %w", table, err)
 		}
-		all = append(all, changes...)
-		if len(changes) >= DefaultChangesLimit {
-			end := changes[len(changes)-1].HLC
+		all = append(all, page.changes...)
+		cursors = append(cursors, page.cursors...)
+		if page.full {
+			end := page.last
 			if cutoff == nil || cursorAfter(*cutoff, end) {
 				cutoff = &end
 			}
 		}
 	}
 
-	if cutoff != nil {
-		kept := all[:0]
-		for _, ch := range all {
-			if !cursorAfter(ch.HLC, *cutoff) {
-				kept = append(kept, ch)
-			}
-		}
-		all = kept
-	}
-
 	var latest HLC
-	for _, ch := range all {
-		if ch.HLC.After(latest) {
-			latest = ch.HLC
+	kept := all[:0]
+	for i, ch := range all {
+		if cutoff != nil && cursorAfter(cursors[i], *cutoff) {
+			continue
+		}
+		kept = append(kept, ch)
+		if cursorAfter(cursors[i], latest) {
+			latest = cursors[i]
 		}
 	}
-	return all, latest, nil
+	c.plugin.cursors.observe(latest)
+	return kept, latest, nil
 }
 
 // cursorAfter reports whether a sorts after b in the shadow-table cursor
 // order, which ignores the node id.
 func cursorAfter(a, b HLC) bool {
 	return a.Timestamp > b.Timestamp || (a.Timestamp == b.Timestamp && a.Counter > b.Counter)
+}
+
+// cursorSuccessor returns the first cursor position after h.
+func cursorSuccessor(h HLC) HLC {
+	if h.Counter == math.MaxUint32 {
+		return HLC{Timestamp: h.Timestamp + 1, NodeID: h.NodeID}
+	}
+	return HLC{Timestamp: h.Timestamp, Counter: h.Counter + 1, NodeID: h.NodeID}
+}
+
+// cursorAllocator hands out the cursor positions a sync server restamps
+// shadow rows with. It lives on the Plugin so every controller sharing one
+// plugin draws from the same sequence.
+//
+// A pull resumes from the highest cursor position it was given. A row whose
+// state a push changes must therefore land past every position handed out
+// before the write, or a peer that already pulled past it never sees the
+// change. next guarantees that within one process: each position is past
+// the plugin clock (and so past every HLC the clock has seen within its
+// drift bound), past every position this process allocated or delivered,
+// past the highest position stored in the row's table (rows written by an
+// earlier process or another instance), and past the row's own clock, so a
+// client that resumes from the highest change HLC it received never jumps
+// ahead of an unread row either.
+//
+// writeMu serializes allocation with the write that uses it, so positions
+// commit in the order they were allocated and a pull can never see a later
+// position while an earlier one is still unwritten.
+type cursorAllocator struct {
+	writeMu sync.Mutex
+
+	mu   sync.Mutex
+	high HLC
+}
+
+// observe records a cursor position this process handed out to a client.
+func (a *cursorAllocator) observe(h HLC) {
+	a.mu.Lock()
+	if cursorAfter(h, a.high) {
+		a.high = h
+	}
+	a.mu.Unlock()
+}
+
+// next returns a fresh cursor position: now, unless that is not past high
+// or one of the floors, in which case the first position after the highest
+// of them.
+func (a *cursorAllocator) next(now HLC, floors ...HLC) HLC {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	pos := now
+	for _, f := range append(floors, a.high) {
+		if !cursorAfter(pos, f) {
+			pos = cursorSuccessor(f)
+			pos.NodeID = now.NodeID
+		}
+	}
+	a.high = pos
+	return pos
+}
+
+// allocateCursor returns the cursor position for a row of table whose new
+// state carries the clock own. The caller holds plugin.cursors.writeMu
+// until the row is written.
+func (c *SyncController) allocateCursor(ctx context.Context, table string, own HLC) (HLC, error) {
+	stored, err := c.metadata.maxCursor(ctx, table)
+	if err != nil {
+		return HLC{}, err
+	}
+	return c.plugin.cursors.next(c.plugin.clock.Now(), own, stored), nil
 }
 
 // applySyncFilter filters changes based on selective sync criteria.
@@ -224,6 +302,11 @@ func applySyncFilter(changes []ChangeRecord, filter *SyncFilter) []ChangeRecord 
 
 // HandlePush processes a push request, merging remote changes locally.
 // This is the core logic used by both Forge and HTTP handlers.
+//
+// Every merge that changes a row's stored state moves the row to a fresh
+// cursor position, so a change stamped with a clock older than a peer's pull
+// cursor still reaches that peer on its next pull. The change keeps its own
+// clock, so no merge result changes on any replica; see mergePushed.
 func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*PushResponse, error) {
 	if c.metadata == nil {
 		return nil, fmt.Errorf("crdt: metadata store not initialized")
@@ -265,112 +348,13 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 	merged := 0
 
 	for _, processedChange := range processed {
-		// A tombstoned document-type change carrying a value is a PATH
-		// delete inside the nested document, not a record delete — it
-		// falls through to ApplyChange below (mirrors sync.go).
-		isDocPathDelete := processedChange.CRDTType == TypeDocument && len(processedChange.Value) > 0
-		if processedChange.Tombstone && !isDocPathDelete {
-			if writeErr := c.metadata.WriteTombstone(ctx, processedChange.Table, processedChange.PK, processedChange.HLC, processedChange.NodeID); writeErr != nil {
-				return nil, fmt.Errorf("crdt: merge tombstone: %w", writeErr)
-			}
-			merged++
-
-			// Run AfterInboundChange hook.
-			c.hooks.AfterInboundChange(ctx, processedChange) //nolint:errcheck // fire-and-forget post-hook
+		ok, err := c.mergePushed(ctx, processedChange)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
 			continue
 		}
-
-		// Read existing local state.
-		localState, err := c.metadata.ReadState(ctx, processedChange.Table, processedChange.PK)
-		if err != nil {
-			return nil, fmt.Errorf("crdt: read state: %w", err)
-		}
-
-		// The hook's remote view: the full-state carrier when present,
-		// otherwise the value-level projection of the change.
-		remoteFS := processedChange.State
-		if remoteFS == nil {
-			remoteFS = &FieldState{
-				Type:   processedChange.CRDTType,
-				HLC:    processedChange.HLC,
-				NodeID: processedChange.NodeID,
-				Value:  processedChange.Value,
-			}
-			if processedChange.CounterDelta != nil {
-				cs := NewPNCounterState()
-				cs.Increments[processedChange.NodeID] = processedChange.CounterDelta.Increment
-				cs.Decrements[processedChange.NodeID] = processedChange.CounterDelta.Decrement
-				remoteFS.CounterState = cs
-			}
-		}
-
-		var localFS *FieldState
-		if localState != nil {
-			localFS = localState.Fields[processedChange.Field]
-		}
-
-		// Run BeforeMerge plugin hooks.
-		mergeEv := &MergeEvent{
-			Table:            processedChange.Table,
-			PK:               processedChange.PK,
-			Field:            processedChange.Field,
-			Local:            localFS,
-			Remote:           remoteFS,
-			ConflictDetected: localFS != nil,
-		}
-		interceptedRemote, mergeErr := c.pluginChain.DispatchBeforeMerge(ctx, mergeEv)
-		if mergeErr != nil {
-			return nil, fmt.Errorf("crdt: before merge plugin: %w", mergeErr)
-		}
-		if interceptedRemote == nil {
-			continue // Plugin says skip this merge.
-		}
-
-		// A plugin that REPLACED the remote view wins verbatim (state-based
-		// merge of its substitute); otherwise the change applies through the
-		// canonical op-application seam, honoring every typed payload
-		// (counter deltas, set/list/text ops, document path writes, state
-		// carriers) — MergeField on the value projection would drop them.
-		var mergedFS *FieldState
-		if interceptedRemote != remoteFS {
-			mergedFS, err = c.plugin.merge.MergeField(localFS, interceptedRemote)
-		} else {
-			mergedFS, err = ApplyChange(c.plugin.merge, localFS, processedChange)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("crdt: merge field: %w", err)
-		}
-
-		// Run AfterMerge plugin hooks.
-		mergeEv.Result = mergedFS
-		if mergedFS != nil {
-			mergeEv.WinnerNodeID = mergedFS.NodeID
-		}
-		c.pluginChain.DispatchAfterMerge(ctx, mergeEv)
-
-		// Run BeforeMetadataWrite plugin hooks.
-		writeEv := &MetadataWriteEvent{
-			Table:  processedChange.Table,
-			PK:     processedChange.PK,
-			Field:  processedChange.Field,
-			State:  mergedFS,
-			NodeID: processedChange.NodeID,
-		}
-		mergedFS, err = c.pluginChain.DispatchBeforeMetadataWrite(ctx, writeEv)
-		if err != nil {
-			return nil, fmt.Errorf("crdt: before metadata write plugin: %w", err)
-		}
-		if mergedFS == nil {
-			continue // Plugin says skip this write.
-		}
-
-		if err := c.metadata.WriteFieldState(ctx, processedChange.Table, processedChange.PK, processedChange.Field, mergedFS); err != nil {
-			return nil, fmt.Errorf("crdt: write state: %w", err)
-		}
-
-		// Run AfterMetadataWrite plugin hooks.
-		writeEv.State = mergedFS
-		c.pluginChain.DispatchAfterMetadataWrite(ctx, writeEv)
 		merged++
 
 		// Run AfterInboundChange hook.
@@ -387,6 +371,198 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 		Merged:    merged,
 		LatestHLC: c.plugin.clock.Now(),
 	}, nil
+}
+
+// mergePushed merges one pushed change into the shadow table. It reports
+// whether the change counts as merged: false only when a plugin skipped it.
+//
+// Late stamps. Pulls page by each row's cursor position, and a pushed
+// change can carry a clock older than positions this server has already
+// handed out (a device that was offline pushes edits it made hours ago).
+// Before this restamping existed, the merged row kept the older clock as its
+// position, so a peer that had pulled past that clock never received the
+// merged state. Now every write that changes a row's stored state also
+// moves the row to a fresh cursor position from cursorAllocator, past every
+// position handed out before the merge, so the next pull of every peer
+// returns the row.
+//
+// The restamp moves only the cursor position (the hlc_ts and hlc_counter
+// columns). The state's own clock, which merges, last-writer-wins and
+// tombstones resolve by, is stored and delivered unchanged: ChangeRecord.HLC
+// is the same value it would have been had the peer pulled the row before
+// its cursor moved past it. A replica folds that record exactly as it would
+// have then, and folding pulled records does not depend on their order
+// (pulls carry full states for sets, lists, text and documents, per-node
+// totals for counters, and a register or delete clock otherwise), so
+// redelivery changes when a peer converges, never what it converges to. In
+// particular:
+//
+//   - An LWW value that loses leaves the stored state byte-for-byte as it
+//     was, so nothing is written and the row does not move. Peers keep the
+//     value they have.
+//   - An LWW value that wins is written with its own clock, as before, at a
+//     fresh position. If its clock is older than a peer's cursor that is what
+//     makes it reach the peer; if it is newer the fresh position is past it
+//     anyway. Either way the peer compares the same (clock, node) pair the
+//     server compared, so it picks the same winner.
+//   - A record tombstone is sticky and keeps the latest delete clock. A
+//     tombstone no newer than the stored one changes nothing and does not
+//     move the row; a newer one is written at a fresh position.
+//   - Document paths are LWW registers inside the document's state: a path
+//     write that loses leaves the document unchanged and does not move it.
+//   - Counters, sets, lists and text move whenever the merge changes their
+//     state, which a late op always does unless the server already has it.
+//     A late counter increment usually merges into another node's row, so
+//     a counter row is pulled as one change per node it holds (see
+//     counterChanges); a change for the row's own node alone would drop it.
+//
+// A merge that leaves the state unchanged writes nothing, so a retried push
+// does not move rows either.
+func (c *SyncController) mergePushed(ctx context.Context, processedChange *ChangeRecord) (bool, error) {
+	// Serialize the read-merge-write with the cursor allocation, so two
+	// pushes to one field cannot lose each other's merge and positions
+	// commit in allocation order.
+	c.plugin.cursors.writeMu.Lock()
+	defer c.plugin.cursors.writeMu.Unlock()
+
+	// Read existing local state.
+	localState, err := c.metadata.ReadState(ctx, processedChange.Table, processedChange.PK)
+	if err != nil {
+		return false, fmt.Errorf("crdt: read state: %w", err)
+	}
+
+	// A tombstoned document-type change carrying a value is a PATH
+	// delete inside the nested document, not a record delete. It
+	// falls through to ApplyChange below (mirrors sync.go).
+	isDocPathDelete := processedChange.CRDTType == TypeDocument && len(processedChange.Value) > 0
+	if processedChange.Tombstone && !isDocPathDelete {
+		if localState != nil && localState.Tombstone && !processedChange.HLC.After(localState.TombstoneHLC) {
+			return true, nil // Already deleted at this clock or later.
+		}
+		cursor, allocErr := c.allocateCursor(ctx, processedChange.Table, processedChange.HLC)
+		if allocErr != nil {
+			return false, fmt.Errorf("crdt: merge tombstone: %w", allocErr)
+		}
+		if writeErr := c.metadata.WriteTombstoneAt(ctx, processedChange.Table, processedChange.PK, processedChange.HLC, processedChange.NodeID, cursor); writeErr != nil {
+			return false, fmt.Errorf("crdt: merge tombstone: %w", writeErr)
+		}
+		return true, nil
+	}
+
+	// The hook's remote view: the full-state carrier when present,
+	// otherwise the value-level projection of the change.
+	remoteFS := processedChange.State
+	if remoteFS == nil {
+		remoteFS = &FieldState{
+			Type:   processedChange.CRDTType,
+			HLC:    processedChange.HLC,
+			NodeID: processedChange.NodeID,
+			Value:  processedChange.Value,
+		}
+		if processedChange.CounterDelta != nil {
+			cs := NewPNCounterState()
+			cs.Increments[processedChange.NodeID] = processedChange.CounterDelta.Increment
+			cs.Decrements[processedChange.NodeID] = processedChange.CounterDelta.Decrement
+			remoteFS.CounterState = cs
+		}
+	}
+
+	var localFS *FieldState
+	if localState != nil {
+		localFS = localState.Fields[processedChange.Field]
+	}
+
+	// Run BeforeMerge plugin hooks.
+	mergeEv := &MergeEvent{
+		Table:            processedChange.Table,
+		PK:               processedChange.PK,
+		Field:            processedChange.Field,
+		Local:            localFS,
+		Remote:           remoteFS,
+		ConflictDetected: localFS != nil,
+	}
+	interceptedRemote, mergeErr := c.pluginChain.DispatchBeforeMerge(ctx, mergeEv)
+	if mergeErr != nil {
+		return false, fmt.Errorf("crdt: before merge plugin: %w", mergeErr)
+	}
+	if interceptedRemote == nil {
+		return false, nil // Plugin says skip this merge.
+	}
+
+	// A plugin that REPLACED the remote view wins verbatim (state-based
+	// merge of its substitute); otherwise the change applies through the
+	// canonical op-application seam, honoring every typed payload
+	// (counter deltas, set/list/text ops, document path writes, state
+	// carriers). MergeField on the value projection would drop them.
+	var mergedFS *FieldState
+	if interceptedRemote != remoteFS {
+		mergedFS, err = c.plugin.merge.MergeField(localFS, interceptedRemote)
+	} else {
+		mergedFS, err = ApplyChange(c.plugin.merge, localFS, processedChange)
+	}
+	if err != nil {
+		return false, fmt.Errorf("crdt: merge field: %w", err)
+	}
+
+	// Run AfterMerge plugin hooks.
+	mergeEv.Result = mergedFS
+	if mergedFS != nil {
+		mergeEv.WinnerNodeID = mergedFS.NodeID
+	}
+	c.pluginChain.DispatchAfterMerge(ctx, mergeEv)
+
+	// Run BeforeMetadataWrite plugin hooks.
+	writeEv := &MetadataWriteEvent{
+		Table:  processedChange.Table,
+		PK:     processedChange.PK,
+		Field:  processedChange.Field,
+		State:  mergedFS,
+		NodeID: processedChange.NodeID,
+	}
+	mergedFS, err = c.pluginChain.DispatchBeforeMetadataWrite(ctx, writeEv)
+	if err != nil {
+		return false, fmt.Errorf("crdt: before metadata write plugin: %w", err)
+	}
+	if mergedFS == nil {
+		return false, nil // Plugin says skip this write.
+	}
+
+	if sameFieldState(localFS, mergedFS) {
+		return true, nil // Nothing changed: no write, no restamp.
+	}
+
+	cursor, err := c.allocateCursor(ctx, processedChange.Table, mergedFS.HLC)
+	if err != nil {
+		return false, fmt.Errorf("crdt: write state: %w", err)
+	}
+	if err := c.metadata.WriteFieldStateAt(ctx, processedChange.Table, processedChange.PK, processedChange.Field, mergedFS, cursor); err != nil {
+		return false, fmt.Errorf("crdt: write state: %w", err)
+	}
+
+	// Run AfterMetadataWrite plugin hooks.
+	writeEv.State = mergedFS
+	c.pluginChain.DispatchAfterMetadataWrite(ctx, writeEv)
+	return true, nil
+}
+
+// sameFieldState reports whether a merge left a field's stored state as it
+// was. It compares the stored encoding, clock included, so it is exact for
+// an LWW register that lost (the merge returns the local register) and
+// conservative elsewhere: a state that only re-encodes differently counts
+// as changed and is redelivered, which is harmless.
+func sameFieldState(local, merged *FieldState) bool {
+	if local == nil || merged == nil {
+		return false
+	}
+	a, err := json.Marshal(local)
+	if err != nil {
+		return false
+	}
+	b, err := json.Marshal(merged)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(a, b)
 }
 
 // StreamChangesSince returns a channel that yields new changes as they appear.
@@ -409,7 +585,7 @@ func (c *SyncController) StreamChangesSince(ctx context.Context, tables []string
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				allChanges, _, err := c.readChangesWindow(ctx, tables, lastHLC)
+				allChanges, windowEnd, err := c.readChangesWindow(ctx, tables, lastHLC)
 				if err != nil {
 					c.logger.Error("crdt: stream read error",
 						log.String("error", err.Error()),
@@ -430,14 +606,14 @@ func (c *SyncController) StreamChangesSince(ctx context.Context, tables []string
 					continue
 				}
 
-				if len(filtered) > 0 {
-					// Update last HLC for next poll.
-					for _, ch := range filtered {
-						if ch.HLC.After(lastHLC) {
-							lastHLC = ch.HLC
-						}
-					}
+				// Resume from the window's cursor position, as a pull
+				// does. The changes' HLCs are their own clocks, which a
+				// restamped row keeps below its position.
+				if cursorAfter(windowEnd, lastHLC) {
+					lastHLC = windowEnd
+				}
 
+				if len(filtered) > 0 {
 					select {
 					case ch <- filtered:
 					case <-ctx.Done():

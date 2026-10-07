@@ -22,6 +22,10 @@ type Plugin struct {
 	tables        []string
 	metadata      *MetadataStore
 	syncHooks     *SyncHookChain
+
+	// cursors allocates shadow-row cursor positions for every sync
+	// controller built on this plugin.
+	cursors cursorAllocator
 }
 
 // New creates a new CRDT plugin with the given options.
