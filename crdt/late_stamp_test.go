@@ -982,3 +982,75 @@ func TestLateStamp_AfterMetadataWriteRunsUnlocked(t *testing.T) {
 		HLC: at(lateBase, "dev-a"), Value: json.RawMessage(`"v"`)})
 	assert.Equal(t, []bool{true}, probe.free)
 }
+
+// controllerTransport points a Syncer at an in-process controller.
+type controllerTransport struct{ ctrl *SyncController }
+
+func (c controllerTransport) Pull(ctx context.Context, req *PullRequest) (*PullResponse, error) {
+	return c.ctrl.HandlePull(ctx, req)
+}
+
+func (c controllerTransport) Push(ctx context.Context, req *PushRequest) (*PushResponse, error) {
+	return c.ctrl.HandlePush(ctx, req)
+}
+
+// A hub pulls from upstream with a Syncer and serves its own clients with
+// a SyncController. Ordinary polling lag means the Syncer writes rows whose
+// clocks are older than its clients' cursors; they must still reach them.
+func TestLateStamp_HubSyncerRowsReachHubClients(t *testing.T) {
+	ctx := context.Background()
+	up := newLateServer(t, newMemShadow())
+	hubDB := newMemShadow()
+	hub := newLateServer(t, hubDB)
+	T := lateBase
+	sec := int64(time.Second)
+	up.now.Store(T + 2*sec)
+	hub.now.Store(T + 2*sec)
+
+	// A device writes upstream at T+1s.
+	up.push(t, ChangeRecord{Table: "notes", PK: "n1", Field: "title", CRDTType: TypeLWW, NodeID: "dev-d",
+		HLC: at(T+sec, "dev-d"), Value: json.RawMessage(`"from-upstream"`)})
+
+	// A hub client writes and pulls at T+3s, so its cursor passes T+1s.
+	hub.now.Store(T + 3*sec)
+	c := newReplica("dev-c")
+	hub.push(t, c.local(t, ChangeRecord{Table: "notes", PK: "other", Field: "title", CRDTType: TypeLWW,
+		HLC: at(T+3*sec, ""), Value: json.RawMessage(`"c"`)}))
+	c.pull(t, hub, "notes")
+
+	// The hub's Syncer polls upstream at T+4s.
+	hub.now.Store(T + 4*sec)
+	syncer := NewSyncer(hub.ctrl.plugin, WithTransport(controllerTransport{up.ctrl}), WithSyncTables("notes"))
+	_, err := syncer.Sync(ctx)
+	require.NoError(t, err)
+
+	got := c.pull(t, hub, "notes")
+	require.Len(t, got, 1, "the hub client receives the upstream row")
+	assert.Equal(t, at(T+sec, "dev-d"), got[0].HLC, "the row keeps its own clock")
+	assert.Equal(t, "from-upstream", c.value("notes", "n1", "title"))
+
+	// Pulling the same row again changes nothing: no write, no restamp.
+	writes := hubDB.writeCount()
+	_, err = NewSyncer(hub.ctrl.plugin, WithTransport(controllerTransport{up.ctrl}), WithSyncTables("notes")).Sync(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, writes, hubDB.writeCount())
+	assert.Empty(t, c.pull(t, hub, "notes"))
+
+	// An upstream delete stamped before the client's cursor reaches it.
+	up.push(t, ChangeRecord{Table: "notes", PK: "n1", Field: "_tombstone", Tombstone: true, NodeID: "dev-d", HLC: at(T+2*sec, "dev-d")})
+	hub.now.Store(T + 5*sec)
+	_, err = syncer.Sync(ctx)
+	require.NoError(t, err)
+	got = c.pull(t, hub, "notes")
+	require.Len(t, got, 1, "the hub client receives the upstream delete")
+	assert.True(t, got[0].Tombstone)
+	assert.Equal(t, at(T+2*sec, "dev-d"), c.tombs["notes/n1"])
+
+	// An older delete changes nothing on the hub.
+	up.push(t, ChangeRecord{Table: "notes", PK: "n1", Field: "_tombstone", Tombstone: true, NodeID: "dev-e", HLC: at(T+sec, "dev-e")})
+	writes = hubDB.writeCount()
+	_, err = syncer.Sync(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, writes, hubDB.writeCount())
+	assert.Empty(t, c.pull(t, hub, "notes"))
+}
