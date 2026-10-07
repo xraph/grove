@@ -108,21 +108,9 @@ func (c *SyncController) HandlePull(ctx context.Context, req *PullRequest) (*Pul
 	}
 	pullStart := time.Now()
 
-	var allChanges []ChangeRecord
-	var latestHLC HLC
-
-	for _, table := range req.Tables {
-		changes, err := c.metadata.ReadChangesSince(ctx, table, req.Since)
-		if err != nil {
-			return nil, fmt.Errorf("crdt: read changes for %s: %w", table, err)
-		}
-		allChanges = append(allChanges, changes...)
-
-		for _, ch := range changes {
-			if ch.HLC.After(latestHLC) {
-				latestHLC = ch.HLC
-			}
-		}
+	allChanges, latestHLC, err := c.readChangesWindow(ctx, req.Tables, req.Since)
+	if err != nil {
+		return nil, err
 	}
 
 	// Update our clock with the remote node's timestamp.
@@ -148,6 +136,55 @@ func (c *SyncController) HandlePull(ctx context.Context, req *PullRequest) (*Pul
 		Changes:   filtered,
 		LatestHLC: latestHLC,
 	}, nil
+}
+
+// readChangesWindow reads the changes after since for every table and
+// returns them with the cursor to resume from. Each table is read with its
+// own page limit, so a table that fills its page still has unread rows past
+// that page's last HLC. The window is cut at the earliest such page end
+// across all tables; otherwise a newer row in another table would move the
+// cursor past the unread rows and the next read would skip them. The cut
+// compares (timestamp, counter) only, matching the shadow-table cursor.
+func (c *SyncController) readChangesWindow(ctx context.Context, tables []string, since HLC) ([]ChangeRecord, HLC, error) {
+	var all []ChangeRecord
+	var cutoff *HLC
+	for _, table := range tables {
+		changes, err := c.metadata.ReadChangesSince(ctx, table, since)
+		if err != nil {
+			return nil, HLC{}, fmt.Errorf("crdt: read changes for %s: %w", table, err)
+		}
+		all = append(all, changes...)
+		if len(changes) >= DefaultChangesLimit {
+			end := changes[len(changes)-1].HLC
+			if cutoff == nil || cursorAfter(*cutoff, end) {
+				cutoff = &end
+			}
+		}
+	}
+
+	if cutoff != nil {
+		kept := all[:0]
+		for _, ch := range all {
+			if !cursorAfter(ch.HLC, *cutoff) {
+				kept = append(kept, ch)
+			}
+		}
+		all = kept
+	}
+
+	var latest HLC
+	for _, ch := range all {
+		if ch.HLC.After(latest) {
+			latest = ch.HLC
+		}
+	}
+	return all, latest, nil
+}
+
+// cursorAfter reports whether a sorts after b in the shadow-table cursor
+// order, which ignores the node id.
+func cursorAfter(a, b HLC) bool {
+	return a.Timestamp > b.Timestamp || (a.Timestamp == b.Timestamp && a.Counter > b.Counter)
 }
 
 // applySyncFilter filters changes based on selective sync criteria.
@@ -207,21 +244,27 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 	}
 	pushStart := time.Now()
 
-	merged := 0
-
+	// Run BeforeInboundChange for the whole batch before merging anything,
+	// so a hook rejection fails the push with nothing applied instead of
+	// after the earlier changes already merged. A nil result skips that
+	// change (it is filtered out and not counted in Merged).
+	processed := make([]*ChangeRecord, 0, len(req.Changes))
 	for _, change := range req.Changes {
 		// Update our clock with each incoming change.
 		c.plugin.clock.Update(change.HLC)
 
-		// Run BeforeInboundChange hook.
 		processedChange, err := c.hooks.BeforeInboundChange(ctx, &change)
 		if err != nil {
 			return nil, fmt.Errorf("crdt: inbound change hook: %w", err)
 		}
-		if processedChange == nil {
-			continue // Hook says skip this change.
+		if processedChange != nil {
+			processed = append(processed, processedChange)
 		}
+	}
 
+	merged := 0
+
+	for _, processedChange := range processed {
 		// A tombstoned document-type change carrying a value is a PATH
 		// delete inside the nested document, not a record delete — it
 		// falls through to ApplyChange below (mirrors sync.go).
@@ -366,16 +409,12 @@ func (c *SyncController) StreamChangesSince(ctx context.Context, tables []string
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				var allChanges []ChangeRecord
-				for _, table := range tables {
-					changes, err := c.metadata.ReadChangesSince(ctx, table, lastHLC)
-					if err != nil {
-						c.logger.Error("crdt: stream read error",
-							log.String("error", err.Error()),
-						)
-						continue
-					}
-					allChanges = append(allChanges, changes...)
+				allChanges, _, err := c.readChangesWindow(ctx, tables, lastHLC)
+				if err != nil {
+					c.logger.Error("crdt: stream read error",
+						log.String("error", err.Error()),
+					)
+					continue
 				}
 
 				if len(allChanges) == 0 {
