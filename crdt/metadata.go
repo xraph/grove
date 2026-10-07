@@ -328,7 +328,9 @@ const DefaultChangesLimit = 10000
 // ReadChangesSince reads change records from the shadow table whose cursor
 // position is after since. Used by the sync protocol.
 // An optional limit can be provided (first value used); 0 means use
-// DefaultChangesLimit. Each shadow row yields one change.
+// DefaultChangesLimit. Each shadow row yields one change. A full page can
+// run past the limit to finish a run of rows sharing its last position
+// (see readChangesPage).
 //
 // Each change carries the row's own clock (the state's authorship stamp) as
 // its HLC, not the cursor position. The two differ for a row a sync server
@@ -362,6 +364,12 @@ type changePage struct {
 
 // readChangesPage reads up to limit shadow rows whose cursor position is
 // after since, in cursor order, and turns them into change records.
+//
+// Rows can share a cursor position (one local write stamps every field it
+// touches with the same HLC), so a full page can end partway through a run
+// of them. Resuming after the last position would skip the rest of the
+// run, so a full page also takes every other row at that position and can
+// run past limit.
 func (ms *MetadataStore) readChangesPage(ctx context.Context, table string, since HLC, limit int) (changePage, error) {
 	shadowTable := ShadowTableName(table)
 
@@ -381,24 +389,60 @@ func (ms *MetadataStore) readChangesPage(ctx context.Context, table string, sinc
 	defer rows.Close()
 
 	var page changePage
+	if err := scanPageRows(rows, table, &page, nil); err != nil {
+		return changePage{}, err
+	}
+	page.full = len(page.changes) >= limit
+	if !page.full {
+		return page, nil
+	}
+
+	edge, err := ms.executor.QueryContext(ctx, fmt.Sprintf(
+		`SELECT pk_hash, field_name, hlc_ts, hlc_counter, node_id, tombstone, crdt_state
+		FROM %s
+		WHERE hlc_ts = $1 AND hlc_counter = $2`,
+		shadowTable,
+	), page.last.Timestamp, page.last.Counter)
+	if err != nil {
+		return changePage{}, fmt.Errorf("crdt: read changes at page edge: %w", err)
+	}
+	defer edge.Close()
+
+	have := make(map[string]bool)
+	for i := len(page.cursors) - 1; i >= 0 && !cursorAfter(page.last, page.cursors[i]); i-- {
+		have[shadowRowKey(page.changes[i].PK, page.changes[i].Field, page.cursors[i].NodeID)] = true
+	}
+	if err := scanPageRows(edge, table, &page, have); err != nil {
+		return changePage{}, err
+	}
+	return page, nil
+}
+
+// shadowRowKey identifies a shadow row: its primary key.
+func shadowRowKey(pk, field, node string) string {
+	return pk + "\x00" + field + "\x00" + node
+}
+
+// scanPageRows appends rows to page in order, skipping any row whose key
+// (see shadowRowKey) is in skip.
+func scanPageRows(rows Rows, table string, page *changePage, skip map[string]bool) error {
 	for rows.Next() {
 		var row MetadataRow
 		if err := rows.Scan(
 			&row.PKHash, &row.FieldName, &row.HLCTS, &row.HLCCount,
 			&row.NodeID, &row.Tombstone, &row.CRDTState,
 		); err != nil {
-			return changePage{}, fmt.Errorf("crdt: scan change: %w", err)
+			return fmt.Errorf("crdt: scan change: %w", err)
+		}
+		if skip[shadowRowKey(row.PKHash, row.FieldName, row.NodeID)] {
+			continue
 		}
 		cursor := rowCursor(&row)
 		page.last = cursor
 		page.changes = append(page.changes, rowChange(table, &row))
 		page.cursors = append(page.cursors, cursor)
 	}
-	if err := rows.Err(); err != nil {
-		return changePage{}, err
-	}
-	page.full = len(page.changes) >= limit
-	return page, nil
+	return rows.Err()
 }
 
 // rowChange turns one shadow row into the change record a pull delivers.

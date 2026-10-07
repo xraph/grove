@@ -134,6 +134,16 @@ func (m *memShadow) QueryContext(_ context.Context, query string, args ...any) (
 			}
 		}
 		return &memRows{vals: out}, nil
+	case strings.Contains(query, "WHERE hlc_ts = $1 AND hlc_counter = $2"):
+		// Every row at one cursor position: the run a full page ends in.
+		ts, counter := args[0].(int64), args[1].(uint32)
+		var out [][]any
+		for _, r := range m.sorted(t) {
+			if r.ts == ts && r.counter == counter {
+				out = append(out, r.full())
+			}
+		}
+		return &memRows{vals: out}, nil
 	case strings.Contains(query, "ORDER BY hlc_ts DESC, hlc_counter DESC LIMIT 1"):
 		m.maxReads++
 		var last *memRow
