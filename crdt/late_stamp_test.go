@@ -20,8 +20,9 @@ import (
 
 // memShadow is an Executor that keeps shadow rows in memory and answers the
 // queries MetadataStore issues the way SQL would: the upserts keyed by
-// (pk_hash, field_name, node_id), the per-record read, the changes-since
-// cursor with its ORDER BY and LIMIT, and the max-cursor lookup.
+// (pk_hash, field_name, node_id), the per-record read (with a cursor cut
+// when the query has one), the changes-since cursor with its ORDER BY and
+// LIMIT, and the max-cursor lookup.
 type memShadow struct {
 	mu     sync.Mutex
 	tables map[string]map[string]*memRow
@@ -143,11 +144,21 @@ func (m *memShadow) QueryContext(_ context.Context, query string, args ...any) (
 		}
 		return &memRows{vals: [][]any{{last.ts, last.counter}}}, nil
 	case strings.Contains(query, "WHERE pk_hash = $1"):
+		// A per-record read, cut at a cursor position when the query
+		// has one.
+		cut := strings.Contains(query, "hlc_ts < $2")
 		var out [][]any
 		for _, r := range t {
-			if r.pk == args[0].(string) {
-				out = append(out, r.full())
+			if r.pk != args[0].(string) {
+				continue
 			}
+			if cut {
+				ts, counter := args[1].(int64), args[2].(uint32)
+				if r.ts > ts || (r.ts == ts && r.counter > counter) {
+					continue
+				}
+			}
+			out = append(out, r.full())
 		}
 		return &memRows{vals: out}, nil
 	}
@@ -804,4 +815,53 @@ func TestLateStamp_LegacyRowsReadAsBefore(t *testing.T) {
 	state, err := s.ctrl.metadata.ReadState(context.Background(), "notes", "n2")
 	require.NoError(t, err)
 	assert.Equal(t, at(lateBase+1, "dev-b"), state.TombstoneHLC)
+}
+
+// pos is a stored row's cursor position.
+func (r *memRow) pos() HLC { return HLC{Timestamp: r.ts, Counter: r.counter} }
+
+// ReadStateAt cuts on each row's own clock, not its cursor position. A
+// restamped row sits at a position past its clock, and memShadow honours a
+// position cut, so cutting on positions would drop the row (with every
+// field state it holds) from each time before the restamp.
+func TestLateStamp_ReadStateAtCutsOnOwnClock(t *testing.T) {
+	db := newMemShadow()
+	s := newLateServer(t, db)
+	ctx := context.Background()
+	T := lateBase
+	sec := int64(time.Second)
+
+	s.now.Store(T + 2*sec)
+	s.push(t, ChangeRecord{Table: "notes", PK: "n1", Field: "views", CRDTType: TypeCounter, NodeID: "dev-b",
+		HLC: at(T+sec, "dev-b"), CounterDelta: &CounterDelta{Increment: 7}})
+	s.now.Store(T + 10*sec)
+	s.push(t, ChangeRecord{Table: "notes", PK: "n1", Field: "views", CRDTType: TypeCounter, NodeID: "dev-a",
+		HLC: at(T, "dev-a"), CounterDelta: &CounterDelta{Increment: 3}})
+	s.now.Store(T + 20*sec)
+	s.push(t, ChangeRecord{Table: "notes", PK: "n1", Field: "_tombstone", Tombstone: true, NodeID: "dev-c",
+		HLC: at(T+3*sec, "dev-c")})
+
+	cut := HLC{Timestamp: T + 5*sec}
+	views := db.row("n1", "views", "dev-b")
+	require.NotNil(t, views)
+	require.True(t, cursorAfter(views.pos(), cut), "the merged counter row sits past the cut")
+	tomb := db.row("n1", "_tombstone", "dev-c")
+	require.NotNil(t, tomb)
+	require.True(t, cursorAfter(tomb.pos(), cut), "the late delete sits past the cut")
+
+	st, err := s.ctrl.metadata.ReadStateAt(ctx, "notes", "n1", cut)
+	require.NoError(t, err)
+	assert.Equal(t, int64(10), resolveForTest(st.Fields["views"]), "a row whose clock is before the cut is in it")
+	assert.True(t, st.Tombstone)
+	assert.Equal(t, at(T+3*sec, "dev-c"), st.TombstoneHLC)
+
+	st, err = s.ctrl.metadata.ReadStateAt(ctx, "notes", "n1", HLC{Timestamp: T + 2*sec})
+	require.NoError(t, err)
+	assert.Equal(t, int64(10), resolveForTest(st.Fields["views"]))
+	assert.False(t, st.Tombstone, "a delete whose clock is past the cut is not in it")
+
+	st, err = s.ctrl.metadata.ReadStateAt(ctx, "notes", "n1", HLC{Timestamp: T + sec/2})
+	require.NoError(t, err)
+	assert.Empty(t, st.Fields, "a row whose clock is past the cut is not in it")
+	assert.False(t, st.Tombstone)
 }
