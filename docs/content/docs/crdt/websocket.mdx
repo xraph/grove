@@ -281,6 +281,20 @@ Client                                Server
 
 Requests and responses are matched by `id`. Events (changes, presence) are pushed without an `id` and dispatched to the appropriate subscriber.
 
+## Subscribing to changes
+
+Send `subscribe` with the tables you want. If you already hold a cursor, pass it as `since` and the server streams only the changes after it:
+
+```json
+{"type": "subscribe", "payload": {"tables": ["documents"], "since": {"ts": "1706000000000000000", "c": 0, "node": "node-1"}}}
+```
+
+Leave `since` out and the first subscribe starts from the beginning of each table. A second `subscribe` on the same connection replaces the first. Without `since` it carries on from the last change you were sent. Each poll arrives as one `changes` frame holding an array of change records.
+
+Send `unsubscribe` to stop the stream. The server doesn't reply, and you can subscribe again on the same connection.
+
+To see who's in a topic right now, send `presence_get` with `{"topic": "documents:doc-1"}` and a `request_id`. You get back a `presence_snapshot` with the same `request_id`, or an `error` frame if presence is disabled.
+
 ## Error Handling
 
 WebSocket errors are delivered as error frames:

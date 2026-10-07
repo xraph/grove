@@ -463,6 +463,8 @@ type WebSocketHandler struct {
 	mu            sync.Mutex
 	subscribing   bool
 	tables        []string
+	since         *HLC   // cursor from the latest subscribe, consumed by streamLoop
+	generation    uint64 // bumped by subscribe/unsubscribe; frames from older streams are dropped
 	closed        atomic.Bool
 	resubscribeCh chan struct{} // signals stream restart on new subscription
 }
@@ -536,8 +538,11 @@ func (h *WebSocketHandler) handleMessage(ctx context.Context, msg WebSocketMessa
 		h.sendResponse(msg.RequestID, WSPushResponse, resp)
 
 	case WSSubscribe:
+		// since is optional: without it the first subscribe streams from
+		// HLC zero and a resubscribe continues from the last change sent.
 		var sub struct {
 			Tables []string `json:"tables"`
+			Since  *HLC     `json:"since,omitempty"`
 		}
 		if err := json.Unmarshal(msg.Payload, &sub); err != nil {
 			h.sendError(msg.RequestID, "invalid subscribe request")
@@ -545,17 +550,40 @@ func (h *WebSocketHandler) handleMessage(ctx context.Context, msg WebSocketMessa
 		}
 		h.mu.Lock()
 		h.tables = sub.Tables
+		h.since = sub.Since
+		h.generation++
 		if !h.subscribing {
 			h.subscribing = true
 			go h.streamLoop(ctx)
 		} else {
-			// Signal the existing stream loop to restart with new tables.
-			select {
-			case h.resubscribeCh <- struct{}{}:
-			default:
-			}
+			h.signalResubscribe()
 		}
 		h.mu.Unlock()
+
+	case WSUnsubscribe:
+		h.mu.Lock()
+		h.tables = nil
+		h.since = nil
+		h.generation++
+		h.signalResubscribe()
+		h.mu.Unlock()
+
+	case WSPresenceGet:
+		var req struct {
+			Topic string `json:"topic"`
+		}
+		if len(msg.Payload) > 0 {
+			if err := json.Unmarshal(msg.Payload, &req); err != nil {
+				h.sendError(msg.RequestID, "invalid presence get request")
+				return
+			}
+		}
+		snapshot, err := h.ctrl.HandleGetPresence(ctx, req.Topic)
+		if err != nil {
+			h.sendError(msg.RequestID, err.Error())
+			return
+		}
+		h.sendResponse(msg.RequestID, WSPresenceSnap, snapshot)
 
 	case WSPresenceUpdate:
 		if h.ctrl.Presence() == nil {
@@ -583,15 +611,29 @@ func (h *WebSocketHandler) handleMessage(ctx context.Context, msg WebSocketMessa
 	}
 }
 
+// signalResubscribe wakes streamLoop to pick up a new subscription.
+// The caller holds h.mu.
+func (h *WebSocketHandler) signalResubscribe() {
+	select {
+	case h.resubscribeCh <- struct{}{}:
+	default:
+	}
+}
+
 func (h *WebSocketHandler) streamLoop(ctx context.Context) {
 	presenceCh := h.ctrl.SubscribePresence(ctx)
 	lastHLC := HLC{}
 
 	for {
-		// Read current table list.
+		// Read the current subscription.
 		h.mu.Lock()
 		tables := make([]string, len(h.tables))
 		copy(tables, h.tables)
+		if h.since != nil {
+			lastHLC = *h.since
+			h.since = nil
+		}
+		gen := h.generation
 		h.mu.Unlock()
 
 		if len(tables) == 0 {
@@ -604,8 +646,12 @@ func (h *WebSocketHandler) streamLoop(ctx context.Context) {
 			}
 		}
 
-		ch, err := h.ctrl.StreamChangesSince(ctx, tables, lastHLC)
+		// Each subscription gets its own poller, stopped when the
+		// subscription is replaced.
+		streamCtx, cancel := context.WithCancel(ctx)
+		ch, err := h.ctrl.StreamChangesSince(streamCtx, tables, lastHLC)
 		if err != nil {
+			cancel()
 			h.logger.Error("crdt: ws stream error", log.String("error", err.Error()))
 			return
 		}
@@ -615,20 +661,25 @@ func (h *WebSocketHandler) streamLoop(ctx context.Context) {
 		for !restarted {
 			select {
 			case <-ctx.Done():
+				cancel()
 				return
 			case <-h.resubscribeCh:
-				// Tables changed — restart the stream.
 				restarted = true
 			case changes, ok := <-ch:
 				if !ok {
+					cancel()
 					return
 				}
-				for _, change := range changes {
-					h.sendResponse("", WSChange, change)
-					if change.HLC.After(lastHLC) {
-						lastHLC = change.HLC
+				h.mu.Lock()
+				if h.generation == gen {
+					h.sendResponse("", WSChanges, changes)
+					for _, change := range changes {
+						if change.HLC.After(lastHLC) {
+							lastHLC = change.HLC
+						}
 					}
 				}
+				h.mu.Unlock()
 			case event, ok := <-presenceCh:
 				if !ok {
 					continue
@@ -636,6 +687,7 @@ func (h *WebSocketHandler) streamLoop(ctx context.Context) {
 				h.sendResponse("", WSPresenceEvent, event)
 			}
 		}
+		cancel()
 	}
 }
 
