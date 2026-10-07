@@ -35,6 +35,7 @@ import {
   documentResolve,
   tagKey,
   setElementKey,
+  canonicalSetState,
 } from "./merge.js";
 import {
   newTextState,
@@ -478,7 +479,8 @@ export class CRDTStore {
     const hlc = this.clock.now();
     // Name the observed tags so the remove is exact everywhere (true
     // observed-remove semantics; receivers don't guess by HLC).
-    const setState = this.getDoc(table, pk)?.fields[field]?.set_state;
+    const stored = this.getDoc(table, pk)?.fields[field]?.set_state;
+    const setState = stored ? canonicalSetState(stored) : undefined;
     const tags = elements.flatMap(
       (elem) => setState?.entries[setElementKey(elem)] ?? []
     );

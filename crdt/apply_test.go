@@ -387,3 +387,59 @@ func TestApplyChange_SetKeysMatchJSONMarshal(t *testing.T) {
 		})
 	}
 }
+
+// legacySetState is a set stored before element keys were canonical: the
+// element "a<b" keyed by the raw bytes a client sent, with tag t.
+func legacySetState(t Tag, removed bool) *FieldState {
+	s := NewORSetState()
+	s.Entries[`"a<b"`] = []Tag{t}
+	if removed {
+		s.Removed[removedKey(`"a<b"`, t)] = true
+	}
+	return s.ToFieldState(t.HLC, t.NodeID)
+}
+
+func TestSetLegacyKeys_RemoveMatches(t *testing.T) {
+	tag := Tag{NodeID: "js", HLC: HLC{Timestamp: 100, NodeID: "js"}}
+	fs, err := ApplyChange(nil, legacySetState(tag, false), &ChangeRecord{
+		Table: "t", PK: "1", Field: "tags", CRDTType: TypeSet, NodeID: "js",
+		HLC:   HLC{Timestamp: 200, NodeID: "js"},
+		SetOp: &SetOperation{Op: SetOpRemove, Elements: json.RawMessage(`["a<b"]`), Tags: []Tag{tag}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := SetFromFieldState(fs).Elements(); len(got) != 0 {
+		t.Fatalf("remove did not match the legacy key; elements: %s", got)
+	}
+}
+
+func TestSetLegacyKeys_MergeDoesNotDuplicate(t *testing.T) {
+	old := legacySetState(Tag{NodeID: "js", HLC: HLC{Timestamp: 100, NodeID: "js"}}, false)
+	fresh := NewORSetState()
+	if err := fresh.Add("a<b", "go", HLC{Timestamp: 150, NodeID: "go"}); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := NewMergeEngine().MergeField(old, fresh.ToFieldState(HLC{Timestamp: 150, NodeID: "go"}, "go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := SetFromFieldState(merged).Elements(); len(got) != 1 {
+		t.Fatalf("want one element, got %s", got)
+	}
+}
+
+func TestSetLegacyKeys_RemovedMarkerSurvives(t *testing.T) {
+	tag := Tag{NodeID: "js", HLC: HLC{Timestamp: 100, NodeID: "js"}}
+	// The same add arrives again under the canonical key, as a replica
+	// that re-keyed its state would send it. It must stay removed.
+	readd := NewORSetState()
+	readd.Entries["\"a"+"\\"+"u003cb\""] = []Tag{tag} // the json.Marshal key
+	merged, err := NewMergeEngine().MergeField(legacySetState(tag, true), readd.ToFieldState(tag.HLC, "js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := SetFromFieldState(merged).Elements(); len(got) != 0 {
+		t.Fatalf("removed element came back: %s", got)
+	}
+}

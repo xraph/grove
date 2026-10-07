@@ -162,6 +162,59 @@ function utf8Rank(unit: number): number {
   return unit;
 }
 
+const canonicalCache = new WeakMap<ORSetState, ORSetState>();
+
+/**
+ * The state with every element key in setElementKey form. States written
+ * before keys were canonical can hold an element under its JSON.stringify
+ * key (such as "a<b", or an object with unsorted fields); left alone, it
+ * would show up twice next to its canonical twin and a remove could miss
+ * it. Removed markers are copied to the new key so a removed element stays
+ * removed. Returns the same object when nothing needs re-keying. Mirrors
+ * Go canonicalORSet.
+ */
+export function canonicalSetState(state: ORSetState): ORSetState {
+  const hit = canonicalCache.get(state);
+  if (hit) return hit;
+
+  let rekey: Map<string, string> | null = null;
+  for (const key of Object.keys(state.entries)) {
+    if (!MAY_NEED_REKEY.test(key)) continue;
+    let canon: string;
+    try {
+      canon = setElementKey(JSON.parse(key));
+    } catch {
+      continue;
+    }
+    if (canon !== key) (rekey ??= new Map()).set(key, canon);
+  }
+  if (!rekey) {
+    canonicalCache.set(state, state);
+    return state;
+  }
+
+  const entries: Record<string, ORSetTag[]> = {};
+  for (const [key, tags] of Object.entries(state.entries)) {
+    const k = rekey.get(key) ?? key;
+    entries[k] = [...(entries[k] ?? []), ...tags];
+  }
+  for (const k of Object.keys(entries)) entries[k] = deduplicateTags(entries[k]);
+  const removed: Record<string, boolean> = { ...state.removed };
+  for (const [old, canon] of rekey) {
+    for (const t of state.entries[old]) {
+      if (state.removed[removedKey(old, t)]) removed[removedKey(canon, t)] = true;
+    }
+  }
+  const out = { entries, removed };
+  canonicalCache.set(state, out);
+  canonicalCache.set(out, out);
+  return out;
+}
+
+// setElementKey output never holds a raw <, > or &, U+2028 or U+2029, and
+// only objects can have their fields out of order.
+const MAY_NEED_REKEY = new RegExp("[<>&{" + String.fromCharCode(0x2028, 0x2029) + "]");
+
 /**
  * Compute the deterministic tag key matching Go's tagKey() from set.go.
  * Format: "nodeID:HLC{ts:<ts> c:<c> node:<node>}"
@@ -201,8 +254,10 @@ export function mergeSet(
   local: ORSetState | null,
   remote: ORSetState | null
 ): ORSetState {
-  if (local == null) return remote!;
-  if (remote == null) return local;
+  if (local == null) return canonicalSetState(remote!);
+  if (remote == null) return canonicalSetState(local);
+  local = canonicalSetState(local);
+  remote = canonicalSetState(remote);
 
   const merged = newORSetState();
 
@@ -236,6 +291,7 @@ export function mergeSet(
  * Port of ORSetState.Elements() from set.go.
  */
 export function setElements(state: ORSetState): unknown[] {
+  state = canonicalSetState(state);
   const result: unknown[] = [];
   const keys = Object.keys(state.entries).sort(compareUTF8);
 
@@ -605,7 +661,7 @@ export function mergeFieldState(
     }
 
     case "set": {
-      const localSet = local?.set_state ?? newORSetState();
+      const localSet = canonicalSetState(local?.set_state ?? newORSetState());
       let entries = localSet.entries;
       let removed = localSet.removed;
 

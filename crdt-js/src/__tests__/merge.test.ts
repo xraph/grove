@@ -854,7 +854,7 @@ describe("set element keys (Go parity)", () => {
   const jsHLC: HLC = { ts: 200, c: 0, node: "js" };
 
   it("removes an element a Go writer added under its json.Marshal key", () => {
-    // Go ORSetState.Add keys "a<b" as json.Marshal does: "a<b".
+    // Go ORSetState.Add keys "a<b" as json.Marshal does: "a\u003cb".
     const goState: ORSetState = { entries: { '"a\\u003cb"': [{ node: "go", hlc: goHLC }] }, removed: {} };
     const local = { type: "set" as const, hlc: goHLC, node_id: "go", set_state: goState };
     const removed = mergeFieldState(local, {
@@ -882,5 +882,37 @@ describe("set element keys (Go parity)", () => {
     // In UTF-16 the emoji's high surrogate (D83D) sorts before FF01.
     const state: ORSetState = { entries: { '"\u{1F600}"': tag, '"！"': tag }, removed: {} };
     expect(setElements(state)).toEqual(["！", "\u{1F600}"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Set states written before element keys were canonical
+// ---------------------------------------------------------------------------
+
+describe("set states with legacy element keys", () => {
+  const t1: ORSetTag = { node: "js", hlc: { ts: 100, c: 0, node: "js" } };
+  // "a<b" keyed by JSON.stringify, as crdt-js stored it before.
+  const legacy = (removed: boolean): ORSetState => ({
+    entries: { '"a<b"': [t1] },
+    removed: removed ? { ['"a<b"|' + tagKey(t1)]: true } : {},
+  });
+
+  it("does not show an element twice next to its canonical twin", () => {
+    const fresh: ORSetState = { entries: { '"a\\u003cb"': [{ node: "go", hlc: { ts: 150, c: 0, node: "go" } }] }, removed: {} };
+    expect(setElements(mergeSet(legacy(false), fresh))).toEqual(["a<b"]);
+  });
+
+  it("keeps a removed element removed when it reappears under the canonical key", () => {
+    const readd: ORSetState = { entries: { '"a\\u003cb"': [t1] }, removed: {} };
+    expect(setElements(mergeSet(legacy(true), readd))).toEqual([]);
+  });
+
+  it("lets a remove match an element stored under its legacy key", () => {
+    const local = { type: "set" as const, hlc: t1.hlc, node_id: "js", set_state: legacy(false) };
+    const out = mergeFieldState(local, {
+      table: "t", pk: "1", field: "tags", crdt_type: "set", hlc: { ts: 200, c: 0, node: "js" }, node_id: "js",
+      set_op: { op: "remove", elements: ["a<b"], tags: [t1] },
+    });
+    expect(setElements(out.set_state!)).toEqual([]);
   });
 });
