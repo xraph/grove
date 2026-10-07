@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -341,6 +342,29 @@ func applySyncFilter(changes []ChangeRecord, filter *SyncFilter) []ChangeRecord 
 	return result
 }
 
+// ErrPushRejected marks a push the server refused deterministically: it
+// failed validation or a BeforeInboundChange hook rejected one of its
+// changes. Nothing from the push was merged, and sending the same changes
+// again gets the same answer, so clients should not retry it. Test for it
+// with errors.Is; the HTTP handlers answer it with 422.
+var ErrPushRejected = errors.New("crdt: push rejected")
+
+// pushRejection keeps the original error text and makes errors.Is match
+// ErrPushRejected as well as the underlying cause.
+type pushRejection struct{ err error }
+
+func (r *pushRejection) Error() string   { return r.err.Error() }
+func (r *pushRejection) Unwrap() []error { return []error{r.err, ErrPushRejected} }
+
+// PushErrorStatus is the HTTP status for an error from HandlePush: 422 for
+// a deterministic rejection, 500 for anything else.
+func PushErrorStatus(err error) int {
+	if errors.Is(err, ErrPushRejected) {
+		return http.StatusUnprocessableEntity
+	}
+	return http.StatusInternalServerError
+}
+
 // HandlePush processes a push request, merging remote changes locally.
 // This is the core logic used by both Forge and HTTP handlers.
 //
@@ -359,7 +383,7 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 			if c.metrics != nil {
 				c.metrics.ValidationErrors.Add(1)
 			}
-			return nil, err
+			return nil, &pushRejection{err}
 		}
 	}
 
@@ -379,7 +403,7 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 
 		processedChange, err := c.hooks.BeforeInboundChange(ctx, &change)
 		if err != nil {
-			return nil, fmt.Errorf("crdt: inbound change hook: %w", err)
+			return nil, &pushRejection{fmt.Errorf("crdt: inbound change hook: %w", err)}
 		}
 		if processedChange != nil {
 			processed = append(processed, processedChange)
@@ -912,7 +936,7 @@ func (c *SyncController) httpHandlePush(w http.ResponseWriter, r *http.Request) 
 
 	resp, err := c.HandlePush(r.Context(), &req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, PushErrorStatus(err), err.Error())
 		return
 	}
 

@@ -674,3 +674,37 @@ func TestSyncController_SubscribePresence_FansOutToEveryConsumer(t *testing.T) {
 		}
 	}
 }
+
+func TestNewHTTPHandler_Push_DeterministicRejectionIs422(t *testing.T) {
+	ok := ChangeRecord{
+		Table: "docs", PK: "1", Field: "title", CRDTType: TypeLWW, NodeID: "remote",
+		HLC: HLC{Timestamp: time.Now().UnixNano(), NodeID: "remote"}, Value: json.RawMessage(`"v"`),
+	}
+	unknownType := ok
+	unknownType.CRDTType = "nope"
+
+	for _, tc := range []struct {
+		name    string
+		opts    []SyncControllerOption
+		changes []ChangeRecord
+		wantErr string
+	}{
+		{"hook rejection", []SyncControllerOption{WithControllerSyncHook(&errorInboundHook{})}, []ChangeRecord{ok}, "crdt: inbound change hook: inbound rejected"},
+		{"validation", []SyncControllerOption{WithValidation(DefaultValidationConfig())}, []ChangeRecord{unknownType}, "crdt: change[0]: crdt: unknown crdt type: nope"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(NewHTTPHandler(newTestPluginWithChanges(nil), tc.opts...))
+			defer server.Close()
+
+			body, _ := json.Marshal(PushRequest{Changes: tc.changes, NodeID: "remote"})
+			resp, err := http.Post(server.URL+"/push", "application/json", bytes.NewReader(body)) //nolint:noctx // test
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.Equal(t, http.StatusUnprocessableEntity, resp.StatusCode)
+			var errBody map[string]string
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&errBody))
+			assert.Equal(t, tc.wantErr, errBody["error"])
+		})
+	}
+}

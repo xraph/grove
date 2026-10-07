@@ -911,7 +911,7 @@ func (c *crdtForgeController) handlePush(ctx forge.Context) error {
 
 	resp, err := c.ctrl.HandlePush(ctx.Request().Context(), &req)
 	if err != nil {
-		return ctx.JSON(500, map[string]string{"error": err.Error()})
+		return ctx.JSON(crdt.PushErrorStatus(err), map[string]string{"error": err.Error()})
 	}
 
 	return ctx.JSON(200, resp)
