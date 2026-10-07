@@ -389,8 +389,8 @@ func (ms *MetadataStore) readChangesPage(ctx context.Context, table string, sinc
 	defer rows.Close()
 
 	var page changePage
-	if err := scanPageRows(rows, table, &page, nil); err != nil {
-		return changePage{}, err
+	if scanErr := scanPageRows(rows, table, &page, nil); scanErr != nil {
+		return changePage{}, scanErr
 	}
 	page.full = len(page.changes) >= limit
 	if !page.full {
@@ -412,8 +412,8 @@ func (ms *MetadataStore) readChangesPage(ctx context.Context, table string, sinc
 	for i := len(page.cursors) - 1; i >= 0 && !cursorAfter(page.last, page.cursors[i]); i-- {
 		have[shadowRowKey(page.changes[i].PK, page.changes[i].Field, page.cursors[i].NodeID)] = true
 	}
-	if err := scanPageRows(edge, table, &page, have); err != nil {
-		return changePage{}, err
+	if scanErr := scanPageRows(edge, table, &page, have); scanErr != nil {
+		return changePage{}, scanErr
 	}
 	return page, nil
 }
