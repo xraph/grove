@@ -64,6 +64,9 @@ type FieldHistoryResponse struct {
 
 // ReadStateAt reads the CRDT state for a record as it existed at a specific HLC timestamp.
 // This queries the shadow table for all field states with hlc_ts <= the target time.
+// The cut compares the rows' cursor positions (when this server last stored
+// them), while each returned field keeps its own clock; the two differ only
+// for rows a sync server restamped after a merge.
 func (ms *MetadataStore) ReadStateAt(ctx context.Context, table, pk string, at HLC) (*State, error) {
 	shadowTable := ShadowTableName(table)
 
@@ -94,27 +97,18 @@ func (ms *MetadataStore) ReadStateAt(ctx context.Context, table, pk string, at H
 		}
 
 		if row.FieldName == "_tombstone" && row.Tombstone {
-			state.Tombstone = true
-			state.TombstoneHLC = HLC{
-				Timestamp: row.HLCTS,
-				Counter:   row.HLCCount,
-				NodeID:    row.NodeID,
+			at := rowTombstoneHLC(&row)
+			if !state.Tombstone || at.After(state.TombstoneHLC) {
+				state.Tombstone = true
+				state.TombstoneHLC = at
 			}
 			continue
 		}
 
-		var fs FieldState
-		if row.CRDTState != nil {
-			if err := json.Unmarshal(row.CRDTState, &fs); err != nil {
-				continue
-			}
+		fs, err := rowFieldState(&row)
+		if err != nil {
+			continue
 		}
-		fs.HLC = HLC{
-			Timestamp: row.HLCTS,
-			Counter:   row.HLCCount,
-			NodeID:    row.NodeID,
-		}
-		fs.NodeID = row.NodeID
 
 		if existing, ok := state.Fields[row.FieldName]; ok {
 			merged, mergeErr := engine.MergeField(existing, &fs)
@@ -164,8 +158,9 @@ func (ms *MetadataStore) ReadFieldHistory(ctx context.Context, table, pk, field 
 			return nil, fmt.Errorf("crdt: scan history: %w", err)
 		}
 
+		row := MetadataRow{HLCTS: hlcTS, HLCCount: hlcCount, NodeID: nodeID}
 		entry := FieldHistoryEntry{
-			HLC:    HLC{Timestamp: hlcTS, Counter: hlcCount, NodeID: nodeID},
+			HLC:    rowCursor(&row),
 			NodeID: nodeID,
 		}
 
@@ -174,6 +169,7 @@ func (ms *MetadataStore) ReadFieldHistory(ctx context.Context, table, pk, field 
 			if err := json.Unmarshal(stateJSON, &fs); err == nil {
 				entry.Value = fs.Value
 				entry.Type = fs.Type
+				entry.HLC = semanticHLC(&row, fs.HLC)
 			}
 		}
 
