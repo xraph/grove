@@ -349,12 +349,12 @@ func applySyncFilter(changes []ChangeRecord, filter *SyncFilter) []ChangeRecord 
 // with errors.Is; the HTTP handlers answer it with 422.
 var ErrPushRejected = errors.New("crdt: push rejected")
 
-// pushRejection keeps the original error text and makes errors.Is match
+// pushRejectedError keeps the original error text and makes errors.Is match
 // ErrPushRejected as well as the underlying cause.
-type pushRejection struct{ err error }
+type pushRejectedError struct{ err error }
 
-func (r *pushRejection) Error() string   { return r.err.Error() }
-func (r *pushRejection) Unwrap() []error { return []error{r.err, ErrPushRejected} }
+func (r *pushRejectedError) Error() string   { return r.err.Error() }
+func (r *pushRejectedError) Unwrap() []error { return []error{r.err, ErrPushRejected} }
 
 // PushErrorStatus is the HTTP status for an error from HandlePush: 422 for
 // a deterministic rejection, 500 for anything else.
@@ -383,7 +383,7 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 			if c.metrics != nil {
 				c.metrics.ValidationErrors.Add(1)
 			}
-			return nil, &pushRejection{err}
+			return nil, &pushRejectedError{err}
 		}
 	}
 
@@ -403,7 +403,7 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 
 		processedChange, err := c.hooks.BeforeInboundChange(ctx, &change)
 		if err != nil {
-			return nil, &pushRejection{fmt.Errorf("crdt: inbound change hook: %w", err)}
+			return nil, &pushRejectedError{fmt.Errorf("crdt: inbound change hook: %w", err)}
 		}
 		if processedChange != nil {
 			processed = append(processed, processedChange)
