@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	log "github.com/xraph/go-utils/log"
+
 	"github.com/xraph/grove/crdt"
 )
 

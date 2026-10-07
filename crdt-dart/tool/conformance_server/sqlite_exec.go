@@ -6,8 +6,9 @@ import (
 	"encoding/json"
 	"regexp"
 
-	"github.com/xraph/grove/crdt"
 	_ "modernc.org/sqlite"
+
+	"github.com/xraph/grove/crdt"
 )
 
 // MetadataStore writes PostgreSQL-style $1 placeholders; SQLite reads ?1.
