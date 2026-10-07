@@ -399,7 +399,8 @@ type PresenceSnapshot struct {
 | `HandlePresenceUpdate` | `(ctx, *PresenceUpdate) (*PresenceEvent, error)` | Process a presence update (validates, delegates to manager) |
 | `HandleGetPresence` | `(ctx, topic string) (*PresenceSnapshot, error)` | Get presence snapshot for a topic |
 | `Presence` | `() *PresenceManager` | Access the underlying manager (nil if disabled) |
-| `PresenceChannel` | `() <-chan PresenceEvent` | Broadcast channel for stream integration |
+| `SubscribePresence` | `(ctx) <-chan PresenceEvent` | Per-stream channel that gets every presence event until `ctx` is done |
+| `PresenceChannel` | `() <-chan PresenceEvent` | Deprecated: one channel shared by every caller, so readers split the events |
 | `Close` | `()` | Clean up controller resources |
 
 ### Helper
