@@ -662,6 +662,12 @@ console.log(store.canUndo); // boolean
 console.log(store.canRedo); // boolean
 ```
 
+Undo and redo are ordinary writes. Each one goes out as new changes with fresh clocks and sits in the pending queue like any other edit, so the next sync carries it to the server and every other replica sees the same result. A few things follow from that:
+
+- Undoing a field's first write sets it to `null`, because the wire has no field delete.
+- Undoing a record delete only works while the tombstone is still pending. Once the server has it, `undo()` returns `false`, since the server never brings a deleted record back.
+- Undo needs room in the pending queue. With `throwOnOverflow` set and the queue full, `undo()` throws `OfflineQueueFull` and keeps the entry for later.
+
 ### React Hook
 
 ```tsx

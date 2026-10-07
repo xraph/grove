@@ -108,8 +108,10 @@ describe("copy-on-write store", () => {
     expect(store.getText("notes", "n1", "body")).toBe("hello");
     expect(store.undo()).toBe(true);
     expect(store.getText("notes", "n1", "body")).toBe("");
-    // The field is gone entirely, not left behind as an empty text state.
-    expect(store.exportTable("notes")["n1"].fields).not.toHaveProperty("body");
+    // The undo is a delete of the inserted range, queued for push, so the
+    // field stays behind with its characters tombstoned.
+    const queued = store.getPendingChanges();
+    expect(queued[queued.length - 1].text_op?.op).toBe("delete");
   });
 
   it("gives afterMerge the post-merge field state as the result", () => {
