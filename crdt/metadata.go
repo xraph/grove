@@ -216,6 +216,46 @@ func (ms *MetadataStore) maxCursor(ctx context.Context, table string) (HLC, erro
 	return h, rows.Err()
 }
 
+// readTombstone reports whether a record is deleted and its latest delete
+// clock. It reads only the record's tombstone rows, so a field row that
+// cannot be decoded does not stop a delete from being merged.
+func (ms *MetadataStore) readTombstone(ctx context.Context, table, pk string) (bool, HLC, error) {
+	query := fmt.Sprintf(
+		`SELECT pk_hash, field_name, hlc_ts, hlc_counter, node_id, tombstone, crdt_state
+		FROM %s WHERE pk_hash = $1 AND field_name = '_tombstone'`,
+		ShadowTableName(table),
+	)
+	rows, err := ms.executor.QueryContext(ctx, query, pk)
+	if err != nil {
+		return false, HLC{}, fmt.Errorf("crdt: read tombstone: %w", err)
+	}
+	defer rows.Close()
+
+	deleted := false
+	var latest HLC
+	for rows.Next() {
+		var row MetadataRow
+		if err := rows.Scan(
+			&row.PKHash, &row.FieldName, &row.HLCTS, &row.HLCCount,
+			&row.NodeID, &row.Tombstone, &row.CRDTState,
+		); err != nil {
+			return false, HLC{}, fmt.Errorf("crdt: scan tombstone: %w", err)
+		}
+		if row.FieldName != "_tombstone" || !row.Tombstone {
+			continue
+		}
+		at := rowTombstoneHLC(&row)
+		if !deleted || at.After(latest) {
+			deleted = true
+			latest = at
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, HLC{}, fmt.Errorf("crdt: iterate tombstones: %w", err)
+	}
+	return deleted, latest, nil
+}
+
 // ReadState reads the full CRDT state for a record from the shadow table.
 func (ms *MetadataStore) ReadState(ctx context.Context, table, pk string) (*State, error) {
 	shadowTable := ShadowTableName(table)

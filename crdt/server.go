@@ -204,8 +204,8 @@ func cursorSuccessor(h HLC) HLC {
 }
 
 // cursorAllocator hands out the cursor positions a sync server restamps
-// shadow rows with. It lives on the Plugin so every controller sharing one
-// plugin draws from the same sequence.
+// shadow rows with. It lives on the Plugin so every controller and Syncer
+// sharing one plugin draws from the same sequence.
 //
 // A pull resumes from the highest cursor position it was given. A row whose
 // state a push changes must therefore land past every position handed out
@@ -214,13 +214,36 @@ func cursorSuccessor(h HLC) HLC {
 // the plugin clock (and so past every HLC the clock has seen within its
 // drift bound), past every position this process allocated or delivered,
 // past the highest position stored in the row's table (rows written by an
-// earlier process or another instance), and past the row's own clock, so a
-// client that resumes from the highest change HLC it received never jumps
-// ahead of an unread row either.
+// earlier process or another instance; see cursorBatch for when it is
+// read), and past the row's own clock, so a client that resumes from the
+// highest change HLC it received never jumps ahead of an unread row either.
 //
 // writeMu serializes allocation with the write that uses it, so positions
 // commit in the order they were allocated and a pull can never see a later
-// position while an earlier one is still unwritten.
+// position while an earlier one is still unwritten. It also serializes the
+// read-merge-write of SyncController.HandlePush and the Syncer's merge of
+// pulled changes, so two of those merging into one row cannot lose each
+// other's merge.
+//
+// What writeMu does not cover:
+//
+//   - Local writes. Plugin.AfterMutation reads, merges and writes the
+//     server's own rows without the lock and without an allocated
+//     position, so a push merging into the same row at the same moment can
+//     still lose one of the two merges. The lost-update guarantee is
+//     between pushes (and Syncer merges) only. Taking writeMu there would
+//     deadlock any merge or metadata hook that writes a CRDT table through
+//     grove, because those hooks run under it.
+//   - Other instances. Two servers sharing one database each have their
+//     own writeMu and allocator, so their positions can interleave out of
+//     commit order, and a pull from one can pass a position the other has
+//     not committed yet. Reading the table's stored maximum narrows that
+//     window but does not close it.
+//
+// The BeforeMerge, AfterMerge and BeforeMetadataWrite plugin hooks run
+// under writeMu, since they sit between the read and the write; a slow one
+// stalls every push on the plugin. AfterMetadataWrite and the sync hooks
+// run after it is released.
 type cursorAllocator struct {
 	writeMu sync.Mutex
 
@@ -254,15 +277,39 @@ func (a *cursorAllocator) next(now HLC, floors ...HLC) HLC {
 	return pos
 }
 
-// allocateCursor returns the cursor position for a row of table whose new
-// state carries the clock own. The caller holds plugin.cursors.writeMu
-// until the row is written.
-func (c *SyncController) allocateCursor(ctx context.Context, table string, own HLC) (HLC, error) {
-	stored, err := c.metadata.maxCursor(ctx, table)
-	if err != nil {
-		return HLC{}, err
+// cursorBatch allocates the cursor positions for one batch of writes: one
+// push, or one page of changes a Syncer pulled. It reads each table's
+// highest stored position once per batch rather than once per row. Within
+// this process the allocator's high mark already covers every position it
+// allocated, so after the first write the stored maximum adds nothing; it
+// only matters for rows written by an earlier process (a restart) or by
+// another instance, and reading it per batch keeps a restarted server past
+// its old rows.
+type cursorBatch struct {
+	plugin *Plugin
+	store  *MetadataStore
+	maxes  map[string]HLC
+}
+
+// newCursorBatch starts a batch that reads stored maxima through store.
+func (p *Plugin) newCursorBatch(store *MetadataStore) *cursorBatch {
+	return &cursorBatch{plugin: p, store: store, maxes: make(map[string]HLC)}
+}
+
+// allocate returns the cursor position for a row of table whose new state
+// carries the clock own. The caller holds plugin.cursors.writeMu until the
+// row is written.
+func (b *cursorBatch) allocate(ctx context.Context, table string, own HLC) (HLC, error) {
+	stored, ok := b.maxes[table]
+	if !ok {
+		var err error
+		stored, err = b.store.maxCursor(ctx, table)
+		if err != nil {
+			return HLC{}, err
+		}
+		b.maxes[table] = stored
 	}
-	return c.plugin.cursors.next(c.plugin.clock.Now(), own, stored), nil
+	return b.plugin.cursors.next(b.plugin.clock.Now(), own, stored), nil
 }
 
 // applySyncFilter filters changes based on selective sync criteria.
@@ -346,9 +393,10 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 	}
 
 	merged := 0
+	batch := c.plugin.newCursorBatch(c.metadata)
 
 	for _, processedChange := range processed {
-		ok, err := c.mergePushed(ctx, processedChange)
+		ok, err := c.mergePushed(ctx, batch, processedChange)
 		if err != nil {
 			return nil, err
 		}
@@ -418,35 +466,58 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 //
 // A merge that leaves the state unchanged writes nothing, so a retried push
 // does not move rows either.
-func (c *SyncController) mergePushed(ctx context.Context, processedChange *ChangeRecord) (bool, error) {
+//
+// The read-merge-write runs under the plugin's cursor write lock (see
+// cursorAllocator); the AfterMetadataWrite hooks run after it is released.
+func (c *SyncController) mergePushed(ctx context.Context, batch *cursorBatch, processedChange *ChangeRecord) (bool, error) {
+	ok, written, err := c.mergePushedLocked(ctx, batch, processedChange)
+	if err != nil {
+		return false, err
+	}
+	if written != nil {
+		c.pluginChain.DispatchAfterMetadataWrite(ctx, written)
+	}
+	return ok, nil
+}
+
+// mergePushedLocked does mergePushed's read-merge-write under the cursor
+// write lock. It returns the write event to pass to the AfterMetadataWrite
+// hooks, or nil when it wrote no field state.
+func (c *SyncController) mergePushedLocked(ctx context.Context, batch *cursorBatch, processedChange *ChangeRecord) (bool, *MetadataWriteEvent, error) {
 	// Serialize the read-merge-write with the cursor allocation, so two
 	// pushes to one field cannot lose each other's merge and positions
 	// commit in allocation order.
 	c.plugin.cursors.writeMu.Lock()
 	defer c.plugin.cursors.writeMu.Unlock()
 
-	// Read existing local state.
-	localState, err := c.metadata.ReadState(ctx, processedChange.Table, processedChange.PK)
-	if err != nil {
-		return false, fmt.Errorf("crdt: read state: %w", err)
-	}
-
 	// A tombstoned document-type change carrying a value is a PATH
 	// delete inside the nested document, not a record delete. It
 	// falls through to ApplyChange below (mirrors sync.go).
 	isDocPathDelete := processedChange.CRDTType == TypeDocument && len(processedChange.Value) > 0
 	if processedChange.Tombstone && !isDocPathDelete {
-		if localState != nil && localState.Tombstone && !processedChange.HLC.After(localState.TombstoneHLC) {
-			return true, nil // Already deleted at this clock or later.
+		// Only the tombstone rows matter here, so a field row that
+		// fails to decode cannot fail the delete.
+		deleted, deletedAt, err := c.metadata.readTombstone(ctx, processedChange.Table, processedChange.PK)
+		if err != nil {
+			return false, nil, fmt.Errorf("crdt: merge tombstone: %w", err)
 		}
-		cursor, allocErr := c.allocateCursor(ctx, processedChange.Table, processedChange.HLC)
-		if allocErr != nil {
-			return false, fmt.Errorf("crdt: merge tombstone: %w", allocErr)
+		if deleted && !processedChange.HLC.After(deletedAt) {
+			return true, nil, nil // Already deleted at this clock or later.
 		}
-		if writeErr := c.metadata.WriteTombstoneAt(ctx, processedChange.Table, processedChange.PK, processedChange.HLC, processedChange.NodeID, cursor); writeErr != nil {
-			return false, fmt.Errorf("crdt: merge tombstone: %w", writeErr)
+		cursor, err := batch.allocate(ctx, processedChange.Table, processedChange.HLC)
+		if err != nil {
+			return false, nil, fmt.Errorf("crdt: merge tombstone: %w", err)
 		}
-		return true, nil
+		if err := c.metadata.WriteTombstoneAt(ctx, processedChange.Table, processedChange.PK, processedChange.HLC, processedChange.NodeID, cursor); err != nil {
+			return false, nil, fmt.Errorf("crdt: merge tombstone: %w", err)
+		}
+		return true, nil, nil
+	}
+
+	// Read existing local state.
+	localState, err := c.metadata.ReadState(ctx, processedChange.Table, processedChange.PK)
+	if err != nil {
+		return false, nil, fmt.Errorf("crdt: read state: %w", err)
 	}
 
 	// The hook's remote view: the full-state carrier when present,
@@ -483,10 +554,10 @@ func (c *SyncController) mergePushed(ctx context.Context, processedChange *Chang
 	}
 	interceptedRemote, mergeErr := c.pluginChain.DispatchBeforeMerge(ctx, mergeEv)
 	if mergeErr != nil {
-		return false, fmt.Errorf("crdt: before merge plugin: %w", mergeErr)
+		return false, nil, fmt.Errorf("crdt: before merge plugin: %w", mergeErr)
 	}
 	if interceptedRemote == nil {
-		return false, nil // Plugin says skip this merge.
+		return false, nil, nil // Plugin says skip this merge.
 	}
 
 	// A plugin that REPLACED the remote view wins verbatim (state-based
@@ -501,7 +572,7 @@ func (c *SyncController) mergePushed(ctx context.Context, processedChange *Chang
 		mergedFS, err = ApplyChange(c.plugin.merge, localFS, processedChange)
 	}
 	if err != nil {
-		return false, fmt.Errorf("crdt: merge field: %w", err)
+		return false, nil, fmt.Errorf("crdt: merge field: %w", err)
 	}
 
 	// Run AfterMerge plugin hooks.
@@ -521,28 +592,26 @@ func (c *SyncController) mergePushed(ctx context.Context, processedChange *Chang
 	}
 	mergedFS, err = c.pluginChain.DispatchBeforeMetadataWrite(ctx, writeEv)
 	if err != nil {
-		return false, fmt.Errorf("crdt: before metadata write plugin: %w", err)
+		return false, nil, fmt.Errorf("crdt: before metadata write plugin: %w", err)
 	}
 	if mergedFS == nil {
-		return false, nil // Plugin says skip this write.
+		return false, nil, nil // Plugin says skip this write.
 	}
 
 	if sameFieldState(localFS, mergedFS) {
-		return true, nil // Nothing changed: no write, no restamp.
+		return true, nil, nil // Nothing changed: no write, no restamp.
 	}
 
-	cursor, err := c.allocateCursor(ctx, processedChange.Table, mergedFS.HLC)
+	cursor, err := batch.allocate(ctx, processedChange.Table, mergedFS.HLC)
 	if err != nil {
-		return false, fmt.Errorf("crdt: write state: %w", err)
+		return false, nil, fmt.Errorf("crdt: write state: %w", err)
 	}
 	if err := c.metadata.WriteFieldStateAt(ctx, processedChange.Table, processedChange.PK, processedChange.Field, mergedFS, cursor); err != nil {
-		return false, fmt.Errorf("crdt: write state: %w", err)
+		return false, nil, fmt.Errorf("crdt: write state: %w", err)
 	}
 
-	// Run AfterMetadataWrite plugin hooks.
 	writeEv.State = mergedFS
-	c.pluginChain.DispatchAfterMetadataWrite(ctx, writeEv)
-	return true, nil
+	return true, writeEv, nil
 }
 
 // sameFieldState reports whether a merge left a field's stored state as it

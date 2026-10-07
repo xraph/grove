@@ -21,13 +21,15 @@ import (
 // memShadow is an Executor that keeps shadow rows in memory and answers the
 // queries MetadataStore issues the way SQL would: the upserts keyed by
 // (pk_hash, field_name, node_id), the per-record read (with a cursor cut
-// when the query has one), the changes-since cursor with its ORDER BY and
-// LIMIT, and the max-cursor lookup.
+// when the query has one), the tombstone read, the changes-since cursor
+// with its ORDER BY and LIMIT, and the max-cursor lookup.
 type memShadow struct {
 	mu     sync.Mutex
 	tables map[string]map[string]*memRow
 	seq    int
 	writes int
+	// maxReads counts max-cursor lookups.
+	maxReads int
 }
 
 type memRow struct {
@@ -133,6 +135,7 @@ func (m *memShadow) QueryContext(_ context.Context, query string, args ...any) (
 		}
 		return &memRows{vals: out}, nil
 	case strings.Contains(query, "ORDER BY hlc_ts DESC, hlc_counter DESC LIMIT 1"):
+		m.maxReads++
 		var last *memRow
 		for _, r := range t {
 			if last == nil || r.ts > last.ts || (r.ts == last.ts && r.counter > last.counter) {
@@ -145,11 +148,15 @@ func (m *memShadow) QueryContext(_ context.Context, query string, args ...any) (
 		return &memRows{vals: [][]any{{last.ts, last.counter}}}, nil
 	case strings.Contains(query, "WHERE pk_hash = $1"):
 		// A per-record read, cut at a cursor position when the query
-		// has one.
+		// has one, and limited to tombstone rows when it asks for them.
 		cut := strings.Contains(query, "hlc_ts < $2")
+		onlyTomb := strings.Contains(query, "field_name = '_tombstone'")
 		var out [][]any
 		for _, r := range t {
 			if r.pk != args[0].(string) {
+				continue
+			}
+			if onlyTomb && r.field != "_tombstone" {
 				continue
 			}
 			if cut {
@@ -192,6 +199,12 @@ func (m *memShadow) allCursors() []HLC {
 		}
 	}
 	return out
+}
+
+func (m *memShadow) maxReadCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.maxReads
 }
 
 func (m *memShadow) writeCount() int {
@@ -904,4 +917,68 @@ func TestLateStamp_CounterPullsAsOneRecord(t *testing.T) {
 	all := d.pull(t, s, "notes")
 	assert.Len(t, all, nodes)
 	assert.Equal(t, int64(nodes+2), d.value("notes", "n1", "views"))
+}
+
+// A record delete reads only the record's tombstone rows, so a field row
+// it cannot decode does not fail the delete.
+func TestLateStamp_TombstoneIgnoresMalformedFieldRow(t *testing.T) {
+	db := newMemShadow()
+	s := newLateServer(t, db)
+	db.tables["notes"] = map[string]*memRow{
+		"n1\x00title\x00dev-a": {pk: "n1", field: "title", node: "dev-a", ts: lateBase, state: json.RawMessage(`{bad`), seq: 1},
+	}
+	db.seq = 1
+
+	s.push(t, ChangeRecord{Table: "notes", PK: "n1", Field: "_tombstone", Tombstone: true, NodeID: "dev-b", HLC: at(lateBase+1, "dev-b")})
+	require.NotNil(t, db.row("n1", "_tombstone", "dev-b"))
+
+	writes := db.writeCount()
+	s.push(t, ChangeRecord{Table: "notes", PK: "n1", Field: "_tombstone", Tombstone: true, NodeID: "dev-c", HLC: at(lateBase, "dev-c")})
+	assert.Equal(t, writes, db.writeCount(), "an older delete is still a no-op")
+}
+
+// A push reads each table's stored maximum position once, not once per
+// changed row.
+func TestLateStamp_PushReadsTableMaxOncePerTable(t *testing.T) {
+	db := newMemShadow()
+	s := newLateServer(t, db)
+	changes := make([]ChangeRecord, 0, 20)
+	for i := range 20 {
+		table := "notes"
+		if i%4 == 0 {
+			table = "tasks"
+		}
+		changes = append(changes, ChangeRecord{Table: table, PK: fmt.Sprintf("p%d", i), Field: "title", CRDTType: TypeLWW,
+			NodeID: "dev-a", HLC: at(lateBase+int64(i), "dev-a"), Value: json.RawMessage(`"v"`)})
+	}
+	s.push(t, changes...)
+	assert.Equal(t, 2, db.maxReadCount())
+}
+
+// lockProbe records whether the cursor write lock is free when
+// AfterMetadataWrite runs.
+type lockProbe struct {
+	BaseCRDTPlugin
+	plugin *Plugin
+	free   []bool
+}
+
+func (l *lockProbe) AfterMetadataWrite(_ context.Context, _ *MetadataWriteEvent) error {
+	ok := l.plugin.cursors.writeMu.TryLock()
+	if ok {
+		l.plugin.cursors.writeMu.Unlock()
+	}
+	l.free = append(l.free, ok)
+	return nil
+}
+
+// AfterMetadataWrite runs after the write lock is released, so a slow
+// hook does not stall every other push.
+func TestLateStamp_AfterMetadataWriteRunsUnlocked(t *testing.T) {
+	s := newLateServer(t, newMemShadow())
+	probe := &lockProbe{plugin: s.ctrl.plugin}
+	s.ctrl.AddPlugin(probe)
+	s.push(t, ChangeRecord{Table: "notes", PK: "n1", Field: "title", CRDTType: TypeLWW, NodeID: "dev-a",
+		HLC: at(lateBase, "dev-a"), Value: json.RawMessage(`"v"`)})
+	assert.Equal(t, []bool{true}, probe.free)
 }
