@@ -865,3 +865,43 @@ func TestLateStamp_ReadStateAtCutsOnOwnClock(t *testing.T) {
 	assert.Empty(t, st.Fields, "a row whose clock is past the cut is not in it")
 	assert.False(t, st.Tombstone)
 }
+
+// A counter row is pulled as one change carrying the full counter state,
+// however many nodes touched it, and keeps its own node's delta for
+// clients that predate state carriers.
+func TestLateStamp_CounterPullsAsOneRecord(t *testing.T) {
+	s := newLateServer(t, newMemShadow())
+	T := lateBase
+	ms := int64(time.Millisecond)
+	const nodes = 64
+	for i := range nodes {
+		node := fmt.Sprintf("dev-%03d", i)
+		s.now.Store(T + int64(i+1)*ms)
+		s.push(t, ChangeRecord{Table: "notes", PK: "n1", Field: "views", CRDTType: TypeCounter, NodeID: node,
+			HLC: at(T+int64(i+1)*ms, node), CounterDelta: &CounterDelta{Increment: 1}})
+	}
+	c := newReplica("dev-c")
+	c.pull(t, s, "notes")
+	require.Equal(t, int64(nodes), c.value("notes", "n1", "views"))
+
+	s.now.Store(T + int64(time.Second))
+	s.push(t, ChangeRecord{Table: "notes", PK: "n1", Field: "views", CRDTType: TypeCounter, NodeID: "dev-000",
+		HLC: at(T+int64(time.Second), "dev-000"), CounterDelta: &CounterDelta{Increment: 3}})
+
+	got := c.pull(t, s, "notes")
+	require.Len(t, got, 1, "one changed counter row is one record")
+	ch := got[0]
+	require.NotNil(t, ch.State, "the record carries the full counter state")
+	require.NotNil(t, ch.State.CounterState)
+	assert.Len(t, ch.State.CounterState.Increments, nodes)
+	assert.Equal(t, "dev-000", ch.NodeID)
+	assert.Equal(t, &CounterDelta{Increment: 3}, ch.CounterDelta, "the row's own node keeps its delta")
+	assert.Equal(t, int64(nodes+2), c.value("notes", "n1", "views"))
+
+	// A replica that folds every row from scratch converges too, and each
+	// row is one record.
+	d := newReplica("dev-d")
+	all := d.pull(t, s, "notes")
+	assert.Len(t, all, nodes)
+	assert.Equal(t, int64(nodes+2), d.value("notes", "n1", "views"))
+}

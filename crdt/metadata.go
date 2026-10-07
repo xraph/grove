@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 )
 
 // MetadataStore reads and writes CRDT metadata in shadow tables.
@@ -289,8 +288,7 @@ const DefaultChangesLimit = 10000
 // ReadChangesSince reads change records from the shadow table whose cursor
 // position is after since. Used by the sync protocol.
 // An optional limit can be provided (first value used); 0 means use
-// DefaultChangesLimit. The limit counts shadow rows: a counter row yields
-// one change per node it holds, so the result can be longer than the limit.
+// DefaultChangesLimit. Each shadow row yields one change.
 //
 // Each change carries the row's own clock (the state's authorship stamp) as
 // its HLC, not the cursor position. The two differ for a row a sync server
@@ -310,7 +308,7 @@ func (ms *MetadataStore) ReadChangesSince(ctx context.Context, table string, sin
 
 // changePage is one page of a table's changes after a cursor.
 type changePage struct {
-	// changes are the page's change records in cursor order.
+	// changes are the page's change records in cursor order, one per row.
 	changes []ChangeRecord
 	// cursors holds the cursor position of each change's row, parallel to
 	// changes.
@@ -343,7 +341,6 @@ func (ms *MetadataStore) readChangesPage(ctx context.Context, table string, sinc
 	defer rows.Close()
 
 	var page changePage
-	n := 0
 	for rows.Next() {
 		var row MetadataRow
 		if err := rows.Scan(
@@ -352,23 +349,20 @@ func (ms *MetadataStore) readChangesPage(ctx context.Context, table string, sinc
 		); err != nil {
 			return changePage{}, fmt.Errorf("crdt: scan change: %w", err)
 		}
-		n++
 		cursor := rowCursor(&row)
 		page.last = cursor
-		for _, cr := range rowChanges(table, &row) {
-			page.changes = append(page.changes, cr)
-			page.cursors = append(page.cursors, cursor)
-		}
+		page.changes = append(page.changes, rowChange(table, &row))
+		page.cursors = append(page.cursors, cursor)
 	}
 	if err := rows.Err(); err != nil {
 		return changePage{}, err
 	}
-	page.full = n >= limit
+	page.full = len(page.changes) >= limit
 	return page, nil
 }
 
-// rowChanges turns one shadow row into the change records a pull delivers.
-func rowChanges(table string, row *MetadataRow) []ChangeRecord {
+// rowChange turns one shadow row into the change record a pull delivers.
+func rowChange(table string, row *MetadataRow) ChangeRecord {
 	cr := ChangeRecord{
 		Table:     table,
 		PK:        row.PKHash,
@@ -380,22 +374,32 @@ func rowChanges(table string, row *MetadataRow) []ChangeRecord {
 
 	if row.Tombstone {
 		cr.HLC = rowTombstoneHLC(row)
-		return []ChangeRecord{cr}
+		return cr
 	}
 	if row.CRDTState == nil {
-		return []ChangeRecord{cr}
+		return cr
 	}
 
 	var fs FieldState
 	if err := json.Unmarshal(row.CRDTState, &fs); err != nil {
-		return []ChangeRecord{cr}
+		return cr
 	}
 	cr.HLC = semanticHLC(row, fs.HLC)
 	cr.CRDTType = fs.Type
 	cr.Value = fs.Value
 	switch fs.Type {
 	case TypeCounter:
-		return counterChanges(cr, fs.CounterState)
+		// A merged counter row holds every node's totals, but a counter
+		// delta carries only one node's, so a delta alone would drop the
+		// other nodes' increments: a late increment usually merges into
+		// another node's row. The full state carries them all in one
+		// record, and every client merges a state carrier before it looks
+		// at the delta. The row's own node keeps its delta for clients
+		// that predate state carriers, which then see only that node's
+		// totals, as they did before.
+		state := fs
+		cr.State = &state
+		cr.CounterDelta = extractCounterDelta(fs.CounterState, row.NodeID)
 	case TypeSet, TypeList, TypeDocument, TypeText:
 		// State-based propagation: ops can't reconstruct these
 		// losslessly from a resolved value (set removes were
@@ -403,45 +407,7 @@ func rowChanges(table string, row *MetadataRow) []ChangeRecord {
 		state := fs
 		cr.State = &state
 	}
-	return []ChangeRecord{cr}
-}
-
-// counterChanges delivers a counter row as one change per node in its
-// state, each carrying that node's totals as its counter delta. A merged
-// counter row holds every node's totals, but a counter change can carry
-// only one node's, so a single change for the row's own node would drop the
-// other nodes' increments: a peer that never saw them would never get them.
-// A replica folds each delta as that node's snapshot (the per-node maximum),
-// so repeats and stale totals from older rows are harmless.
-func counterChanges(base ChangeRecord, cs *PNCounterState) []ChangeRecord {
-	if cs == nil {
-		return []ChangeRecord{base}
-	}
-	nodes := make(map[string]struct{}, len(cs.Increments)+len(cs.Decrements))
-	for n := range cs.Increments {
-		nodes[n] = struct{}{}
-	}
-	for n := range cs.Decrements {
-		nodes[n] = struct{}{}
-	}
-	if len(nodes) == 0 {
-		base.CounterDelta = extractCounterDelta(cs, base.NodeID)
-		return []ChangeRecord{base}
-	}
-	ids := make([]string, 0, len(nodes))
-	for n := range nodes {
-		ids = append(ids, n)
-	}
-	sort.Strings(ids)
-
-	out := make([]ChangeRecord, 0, len(ids))
-	for _, n := range ids {
-		cr := base
-		cr.NodeID = n
-		cr.CounterDelta = extractCounterDelta(cs, n)
-		out = append(out, cr)
-	}
-	return out
+	return cr
 }
 
 // WriteFieldStatesAtomic writes multiple field states in a single transaction

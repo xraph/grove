@@ -413,8 +413,8 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 //   - Counters, sets, lists and text move whenever the merge changes their
 //     state, which a late op always does unless the server already has it.
 //     A late counter increment usually merges into another node's row, so
-//     a counter row is pulled as one change per node it holds (see
-//     counterChanges); a change for the row's own node alone would drop it.
+//     a counter row is pulled with its full state (see rowChange); a delta
+//     for the row's own node alone would drop it.
 //
 // A merge that leaves the state unchanged writes nothing, so a retried push
 // does not move rows either.
