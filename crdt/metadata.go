@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 )
 
 // MetadataStore reads and writes CRDT metadata in shadow tables.
@@ -69,8 +70,24 @@ type MetadataRow struct {
 	CRDTState json.RawMessage `json:"crdt_state"`
 }
 
-// WriteFieldState writes a single field's CRDT state to the shadow table.
+// WriteFieldState writes a single field's CRDT state to the shadow table,
+// at the cursor position of the state's own clock. Use WriteFieldStateAt to
+// place the row at a different cursor position.
 func (ms *MetadataStore) WriteFieldState(ctx context.Context, table, pk, field string, fs *FieldState) error {
+	return ms.WriteFieldStateAt(ctx, table, pk, field, fs, fs.HLC)
+}
+
+// WriteFieldStateAt writes a single field's CRDT state to the shadow table
+// and places the row at the given cursor position.
+//
+// A shadow row has two clocks. The state's own clock (fs.HLC, stored inside
+// crdt_state) is the field's authorship stamp: merges and last-writer-wins
+// resolution use it, and pulls deliver it as ChangeRecord.HLC. The cursor
+// position (the hlc_ts and hlc_counter columns) only decides which pulls
+// return the row: ReadChangesSince pages by it. The two are equal unless a
+// sync server restamps a row so that pulls issued before a merge see the
+// merged state (see SyncController.HandlePush).
+func (ms *MetadataStore) WriteFieldStateAt(ctx context.Context, table, pk, field string, fs *FieldState, cursor HLC) error {
 	shadowTable := ShadowTableName(table)
 	stateJSON, err := json.Marshal(fs)
 	if err != nil {
@@ -86,7 +103,7 @@ func (ms *MetadataStore) WriteFieldState(ctx context.Context, table, pk, field s
 	)
 
 	_, err = ms.executor.ExecContext(ctx, query,
-		pk, field, fs.HLC.Timestamp, fs.HLC.Counter, fs.NodeID, false, stateJSON,
+		pk, field, cursor.Timestamp, cursor.Counter, fs.NodeID, false, stateJSON,
 	)
 	if err != nil {
 		return fmt.Errorf("crdt: write field state: %w", err)
@@ -94,25 +111,110 @@ func (ms *MetadataStore) WriteFieldState(ctx context.Context, table, pk, field s
 	return nil
 }
 
-// WriteTombstone marks a record as deleted in the shadow table.
+// tombstoneState is the crdt_state stored on a record tombstone row. It
+// keeps the delete's own clock, so the row's cursor position can move
+// without changing which writes the delete beats. Rows written before it
+// existed have a NULL crdt_state and use the cursor columns instead.
+type tombstoneState struct {
+	HLC    HLC    `json:"hlc"`
+	NodeID string `json:"node_id"`
+}
+
+// WriteTombstone marks a record as deleted in the shadow table, at the
+// cursor position of the delete's own clock.
 func (ms *MetadataStore) WriteTombstone(ctx context.Context, table, pk string, clock HLC, nodeID string) error {
+	return ms.WriteTombstoneAt(ctx, table, pk, clock, nodeID, clock)
+}
+
+// WriteTombstoneAt marks a record as deleted in the shadow table and places
+// the tombstone row at the given cursor position. The delete's own clock is
+// kept in crdt_state; see WriteFieldStateAt for the two clocks.
+func (ms *MetadataStore) WriteTombstoneAt(ctx context.Context, table, pk string, clock HLC, nodeID string, cursor HLC) error {
 	shadowTable := ShadowTableName(table)
+	stateJSON, err := json.Marshal(tombstoneState{HLC: clock, NodeID: nodeID})
+	if err != nil {
+		return fmt.Errorf("crdt: marshal tombstone: %w", err)
+	}
 
 	query := fmt.Sprintf(
 		`INSERT INTO %s (pk_hash, field_name, hlc_ts, hlc_counter, node_id, tombstone, crdt_state)
-		VALUES ($1, '_tombstone', $2, $3, $4, TRUE, NULL)
+		VALUES ($1, '_tombstone', $2, $3, $4, TRUE, $5)
 		ON CONFLICT (pk_hash, field_name, node_id)
-		DO UPDATE SET hlc_ts = $2, hlc_counter = $3, tombstone = TRUE`,
+		DO UPDATE SET hlc_ts = $2, hlc_counter = $3, tombstone = TRUE, crdt_state = $5`,
 		shadowTable,
 	)
 
-	_, err := ms.executor.ExecContext(ctx, query,
-		pk, clock.Timestamp, clock.Counter, nodeID,
+	_, err = ms.executor.ExecContext(ctx, query,
+		pk, cursor.Timestamp, cursor.Counter, nodeID, stateJSON,
 	)
 	if err != nil {
 		return fmt.Errorf("crdt: write tombstone: %w", err)
 	}
 	return nil
+}
+
+// rowCursor is a row's cursor position: the hlc_ts and hlc_counter columns
+// ReadChangesSince pages by, with the row's node id.
+func rowCursor(row *MetadataRow) HLC {
+	return HLC{Timestamp: row.HLCTS, Counter: row.HLCCount, NodeID: row.NodeID}
+}
+
+// semanticHLC is a row's own clock: the timestamp and counter its stored
+// state carries, with the row's node id. A state without a clock (a row
+// written by an older version, or a hand-built one) falls back to the
+// cursor columns, which every writer before restamping kept equal to it.
+func semanticHLC(row *MetadataRow, stored HLC) HLC {
+	h := rowCursor(row)
+	if stored.Timestamp != 0 || stored.Counter != 0 {
+		h.Timestamp = stored.Timestamp
+		h.Counter = stored.Counter
+	}
+	return h
+}
+
+// rowTombstoneHLC is the delete clock of a record tombstone row.
+func rowTombstoneHLC(row *MetadataRow) HLC {
+	var ts tombstoneState
+	if len(row.CRDTState) > 0 {
+		_ = json.Unmarshal(row.CRDTState, &ts) //nolint:errcheck // a malformed state falls back to the cursor columns
+	}
+	return semanticHLC(row, ts.HLC)
+}
+
+// rowFieldState decodes a field row's stored state and stamps it with the
+// row's own clock and node.
+func rowFieldState(row *MetadataRow) (FieldState, error) {
+	var fs FieldState
+	if row.CRDTState != nil {
+		if err := json.Unmarshal(row.CRDTState, &fs); err != nil {
+			return fs, err
+		}
+	}
+	fs.HLC = semanticHLC(row, fs.HLC)
+	fs.NodeID = row.NodeID
+	return fs, nil
+}
+
+// maxCursor returns the highest cursor position stored in a table's shadow
+// table, or the zero HLC when it is empty.
+func (ms *MetadataStore) maxCursor(ctx context.Context, table string) (HLC, error) {
+	query := fmt.Sprintf(
+		`SELECT hlc_ts, hlc_counter FROM %s ORDER BY hlc_ts DESC, hlc_counter DESC LIMIT 1`,
+		ShadowTableName(table),
+	)
+	rows, err := ms.executor.QueryContext(ctx, query)
+	if err != nil {
+		return HLC{}, fmt.Errorf("crdt: read max cursor: %w", err)
+	}
+	defer rows.Close()
+
+	var h HLC
+	if rows.Next() {
+		if err := rows.Scan(&h.Timestamp, &h.Counter); err != nil {
+			return HLC{}, fmt.Errorf("crdt: scan max cursor: %w", err)
+		}
+	}
+	return h, rows.Err()
 }
 
 // ReadState reads the full CRDT state for a record from the shadow table.
@@ -143,27 +245,20 @@ func (ms *MetadataStore) ReadState(ctx context.Context, table, pk string) (*Stat
 		}
 
 		if row.FieldName == "_tombstone" && row.Tombstone {
-			state.Tombstone = true
-			state.TombstoneHLC = HLC{
-				Timestamp: row.HLCTS,
-				Counter:   row.HLCCount,
-				NodeID:    row.NodeID,
+			// Tombstones are sticky and keep the latest delete clock
+			// across every node's tombstone row.
+			at := rowTombstoneHLC(&row)
+			if !state.Tombstone || at.After(state.TombstoneHLC) {
+				state.Tombstone = true
+				state.TombstoneHLC = at
 			}
 			continue
 		}
 
-		var fs FieldState
-		if row.CRDTState != nil {
-			if err := json.Unmarshal(row.CRDTState, &fs); err != nil {
-				return nil, fmt.Errorf("crdt: unmarshal field state for %s: %w", row.FieldName, err)
-			}
+		fs, err := rowFieldState(&row)
+		if err != nil {
+			return nil, fmt.Errorf("crdt: unmarshal field state for %s: %w", row.FieldName, err)
 		}
-		fs.HLC = HLC{
-			Timestamp: row.HLCTS,
-			Counter:   row.HLCCount,
-			NodeID:    row.NodeID,
-		}
-		fs.NodeID = row.NodeID
 
 		// Merge with existing field state (multiple nodes may have entries).
 		if existing, ok := state.Fields[row.FieldName]; ok {
@@ -191,16 +286,46 @@ func (ms *MetadataStore) ReadState(ctx context.Context, table, pk string) (*Stat
 // unbounded result sets on large shadow tables.
 const DefaultChangesLimit = 10000
 
-// ReadChangesSince reads change records from the shadow table that happened
-// after the given HLC timestamp. Used by the sync protocol.
-// An optional limit can be provided (first value used); 0 means use DefaultChangesLimit.
+// ReadChangesSince reads change records from the shadow table whose cursor
+// position is after since. Used by the sync protocol.
+// An optional limit can be provided (first value used); 0 means use
+// DefaultChangesLimit. The limit counts shadow rows: a counter row yields
+// one change per node it holds, so the result can be longer than the limit.
+//
+// Each change carries the row's own clock (the state's authorship stamp) as
+// its HLC, not the cursor position. The two differ for a row a sync server
+// restamped, so a caller paging through a table resumes from the cursor
+// positions, as SyncController does, not from the HLCs of the changes.
 func (ms *MetadataStore) ReadChangesSince(ctx context.Context, table string, since HLC, limits ...int) ([]ChangeRecord, error) {
-	shadowTable := ShadowTableName(table)
-
 	limit := DefaultChangesLimit
 	if len(limits) > 0 && limits[0] > 0 {
 		limit = limits[0]
 	}
+	page, err := ms.readChangesPage(ctx, table, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	return page.changes, nil
+}
+
+// changePage is one page of a table's changes after a cursor.
+type changePage struct {
+	// changes are the page's change records in cursor order.
+	changes []ChangeRecord
+	// cursors holds the cursor position of each change's row, parallel to
+	// changes.
+	cursors []HLC
+	// full is true when the page holds limit rows, so rows past last may
+	// still be unread.
+	full bool
+	// last is the cursor position of the page's last row.
+	last HLC
+}
+
+// readChangesPage reads up to limit shadow rows whose cursor position is
+// after since, in cursor order, and turns them into change records.
+func (ms *MetadataStore) readChangesPage(ctx context.Context, table string, since HLC, limit int) (changePage, error) {
+	shadowTable := ShadowTableName(table)
 
 	query := fmt.Sprintf(
 		`SELECT pk_hash, field_name, hlc_ts, hlc_counter, node_id, tombstone, crdt_state
@@ -213,55 +338,110 @@ func (ms *MetadataStore) ReadChangesSince(ctx context.Context, table string, sin
 
 	rows, err := ms.executor.QueryContext(ctx, query, since.Timestamp, since.Counter, limit)
 	if err != nil {
-		return nil, fmt.Errorf("crdt: read changes: %w", err)
+		return changePage{}, fmt.Errorf("crdt: read changes: %w", err)
 	}
 	defer rows.Close()
 
-	var changes []ChangeRecord
+	var page changePage
+	n := 0
 	for rows.Next() {
 		var row MetadataRow
 		if err := rows.Scan(
 			&row.PKHash, &row.FieldName, &row.HLCTS, &row.HLCCount,
 			&row.NodeID, &row.Tombstone, &row.CRDTState,
 		); err != nil {
-			return nil, fmt.Errorf("crdt: scan change: %w", err)
+			return changePage{}, fmt.Errorf("crdt: scan change: %w", err)
 		}
-
-		cr := ChangeRecord{
-			Table: table,
-			PK:    row.PKHash,
-			Field: row.FieldName,
-			HLC: HLC{
-				Timestamp: row.HLCTS,
-				Counter:   row.HLCCount,
-				NodeID:    row.NodeID,
-			},
-			NodeID:    row.NodeID,
-			Tombstone: row.Tombstone,
+		n++
+		cursor := rowCursor(&row)
+		page.last = cursor
+		for _, cr := range rowChanges(table, &row) {
+			page.changes = append(page.changes, cr)
+			page.cursors = append(page.cursors, cursor)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return changePage{}, err
+	}
+	page.full = n >= limit
+	return page, nil
+}
 
-		if row.CRDTState != nil {
-			var fs FieldState
-			if err := json.Unmarshal(row.CRDTState, &fs); err == nil {
-				cr.CRDTType = fs.Type
-				cr.Value = fs.Value
-				switch fs.Type {
-				case TypeCounter:
-					cr.CounterDelta = extractCounterDelta(fs.CounterState, row.NodeID)
-				case TypeSet, TypeList, TypeDocument, TypeText:
-					// State-based propagation: ops can't reconstruct these
-					// losslessly from a resolved value (set removes were
-					// previously dropped entirely), so carry the full state.
-					state := fs
-					cr.State = &state
-				}
-			}
-		}
-
-		changes = append(changes, cr)
+// rowChanges turns one shadow row into the change records a pull delivers.
+func rowChanges(table string, row *MetadataRow) []ChangeRecord {
+	cr := ChangeRecord{
+		Table:     table,
+		PK:        row.PKHash,
+		Field:     row.FieldName,
+		HLC:       rowCursor(row),
+		NodeID:    row.NodeID,
+		Tombstone: row.Tombstone,
 	}
 
-	return changes, rows.Err()
+	if row.Tombstone {
+		cr.HLC = rowTombstoneHLC(row)
+		return []ChangeRecord{cr}
+	}
+	if row.CRDTState == nil {
+		return []ChangeRecord{cr}
+	}
+
+	var fs FieldState
+	if err := json.Unmarshal(row.CRDTState, &fs); err != nil {
+		return []ChangeRecord{cr}
+	}
+	cr.HLC = semanticHLC(row, fs.HLC)
+	cr.CRDTType = fs.Type
+	cr.Value = fs.Value
+	switch fs.Type {
+	case TypeCounter:
+		return counterChanges(cr, fs.CounterState)
+	case TypeSet, TypeList, TypeDocument, TypeText:
+		// State-based propagation: ops can't reconstruct these
+		// losslessly from a resolved value (set removes were
+		// previously dropped entirely), so carry the full state.
+		state := fs
+		cr.State = &state
+	}
+	return []ChangeRecord{cr}
+}
+
+// counterChanges delivers a counter row as one change per node in its
+// state, each carrying that node's totals as its counter delta. A merged
+// counter row holds every node's totals, but a counter change can carry
+// only one node's, so a single change for the row's own node would drop the
+// other nodes' increments: a peer that never saw them would never get them.
+// A replica folds each delta as that node's snapshot (the per-node maximum),
+// so repeats and stale totals from older rows are harmless.
+func counterChanges(base ChangeRecord, cs *PNCounterState) []ChangeRecord {
+	if cs == nil {
+		return []ChangeRecord{base}
+	}
+	nodes := make(map[string]struct{}, len(cs.Increments)+len(cs.Decrements))
+	for n := range cs.Increments {
+		nodes[n] = struct{}{}
+	}
+	for n := range cs.Decrements {
+		nodes[n] = struct{}{}
+	}
+	if len(nodes) == 0 {
+		base.CounterDelta = extractCounterDelta(cs, base.NodeID)
+		return []ChangeRecord{base}
+	}
+	ids := make([]string, 0, len(nodes))
+	for n := range nodes {
+		ids = append(ids, n)
+	}
+	sort.Strings(ids)
+
+	out := make([]ChangeRecord, 0, len(ids))
+	for _, n := range ids {
+		cr := base
+		cr.NodeID = n
+		cr.CounterDelta = extractCounterDelta(cs, n)
+		out = append(out, cr)
+	}
+	return out
 }
 
 // WriteFieldStatesAtomic writes multiple field states in a single transaction
