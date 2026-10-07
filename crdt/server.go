@@ -32,7 +32,9 @@ type SyncController struct {
 	presenceTTL        time.Duration
 	presenceBufferSize int
 	presence           *PresenceManager
-	presenceCh         chan PresenceEvent // buffered channel for broadcasting to SSE streams
+	presenceMu         sync.Mutex
+	presenceSubs       map[chan PresenceEvent]struct{} // one buffered channel per stream
+	presenceLegacy     chan PresenceEvent              // shared channel behind PresenceChannel
 
 	// Time-travel configuration (nil when disabled).
 	timeTravel *TimeTravelConfig
@@ -77,18 +79,10 @@ func NewSyncController(plugin *Plugin, opts ...SyncControllerOption) *SyncContro
 		if bufSize <= 0 {
 			bufSize = 256
 		}
-		c.presenceCh = make(chan PresenceEvent, bufSize)
-		c.presence = NewPresenceManager(c.presenceTTL, func(event PresenceEvent) {
-			// Non-blocking send to the broadcast channel.
-			select {
-			case c.presenceCh <- event:
-			default:
-				c.logger.Warn("crdt: presence event dropped (channel full)",
-					log.String("topic", event.Topic),
-					log.String("node_id", event.NodeID),
-				)
-			}
-		}, c.logger)
+		c.presenceBufferSize = bufSize
+		c.presenceSubs = make(map[chan PresenceEvent]struct{})
+		c.presenceLegacy = make(chan PresenceEvent, bufSize)
+		c.presence = NewPresenceManager(c.presenceTTL, c.broadcastPresence, c.logger)
 	}
 
 	// Initialize room manager if enabled (requires presence).
@@ -798,10 +792,60 @@ func (c *SyncController) Logger() log.Logger {
 	return c.logger
 }
 
-// PresenceChannel returns the channel for receiving presence events to
-// broadcast over SSE streams. Returns nil if presence is disabled.
+// SubscribePresence returns a channel that receives every presence event
+// until ctx is done. Each call gets its own channel, so every stream sees
+// every event. Returns nil if presence is disabled. The channel is never
+// closed; stop reading it once ctx is done.
+func (c *SyncController) SubscribePresence(ctx context.Context) <-chan PresenceEvent {
+	if c.presence == nil {
+		return nil
+	}
+	ch := c.addPresenceSub()
+	go func() {
+		<-ctx.Done()
+		c.presenceMu.Lock()
+		delete(c.presenceSubs, ch)
+		c.presenceMu.Unlock()
+	}()
+	return ch
+}
+
+// PresenceChannel returns one channel shared by every caller, so concurrent
+// readers split the events between them. Returns nil if presence is disabled.
+//
+// Deprecated: use SubscribePresence, which gives each stream every event.
 func (c *SyncController) PresenceChannel() <-chan PresenceEvent {
-	return c.presenceCh
+	return c.presenceLegacy
+}
+
+func (c *SyncController) addPresenceSub() chan PresenceEvent {
+	ch := make(chan PresenceEvent, c.presenceBufferSize)
+	c.presenceMu.Lock()
+	c.presenceSubs[ch] = struct{}{}
+	c.presenceMu.Unlock()
+	return ch
+}
+
+// broadcastPresence hands event to every subscriber without blocking; a
+// subscriber whose buffer is full misses the event. The legacy shared
+// channel drops silently once full, since it may have no reader at all.
+func (c *SyncController) broadcastPresence(event PresenceEvent) {
+	select {
+	case c.presenceLegacy <- event:
+	default:
+	}
+	c.presenceMu.Lock()
+	defer c.presenceMu.Unlock()
+	for ch := range c.presenceSubs {
+		select {
+		case ch <- event:
+		default:
+			c.logger.Warn("crdt: presence event dropped (channel full)",
+				log.String("topic", event.Topic),
+				log.String("node_id", event.NodeID),
+			)
+		}
+	}
 }
 
 // Close cleans up the controller's resources (presence manager, etc.).

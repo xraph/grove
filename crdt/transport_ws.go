@@ -584,7 +584,7 @@ func (h *WebSocketHandler) handleMessage(ctx context.Context, msg WebSocketMessa
 }
 
 func (h *WebSocketHandler) streamLoop(ctx context.Context) {
-	presenceCh := h.ctrl.PresenceChannel()
+	presenceCh := h.ctrl.SubscribePresence(ctx)
 	lastHLC := HLC{}
 
 	for {

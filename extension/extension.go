@@ -999,7 +999,7 @@ func (c *crdtForgeController) handleStream(ctx forge.Context, stream forge.Strea
 	}
 
 	// Get presence channel (nil if presence is disabled).
-	presenceCh := c.ctrl.PresenceChannel()
+	presenceCh := c.ctrl.SubscribePresence(stream.Context())
 
 	// Send a comment frame whenever the stream has been idle for a whole
 	// interval. The timer restarts after every event, so a busy stream sends

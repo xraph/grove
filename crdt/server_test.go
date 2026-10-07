@@ -650,3 +650,27 @@ func (h *pkRejectHook) BeforeInboundChange(_ context.Context, c *ChangeRecord) (
 	}
 	return c, nil
 }
+
+func TestSyncController_SubscribePresence_FansOutToEveryConsumer(t *testing.T) {
+	ctrl := NewSyncController(newTestPlugin(), WithPresenceEnabled(true))
+	defer ctrl.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := ctrl.SubscribePresence(ctx)
+	b := ctrl.SubscribePresence(ctx)
+
+	_, err := ctrl.HandlePresenceUpdate(ctx, &PresenceUpdate{
+		NodeID: "n1", Topic: "room", Data: json.RawMessage(`{"x":1}`),
+	})
+	require.NoError(t, err)
+
+	for name, ch := range map[string]<-chan PresenceEvent{"a": a, "b": b} {
+		select {
+		case ev := <-ch:
+			assert.Equal(t, "n1", ev.NodeID, name)
+		case <-time.After(time.Second):
+			t.Fatalf("consumer %s never received the presence event", name)
+		}
+	}
+}
