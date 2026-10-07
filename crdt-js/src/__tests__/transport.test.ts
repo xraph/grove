@@ -353,3 +353,25 @@ describe("timeout, retry, empty body", () => {
     await expect(t.pull({ tables: ["a"], node_id: "n1" })).rejects.toThrow();
   });
 });
+
+describe("HttpTransport push rejection", () => {
+  it("does not retry a 500 carrying the Go server's hook rejection", async () => {
+    const fetchFn = mockFetch({ error: "crdt: inbound change hook: pk not writable" }, 500);
+    const transport = new HttpTransport({ baseURL: "https://api.example.com/sync", fetch: fetchFn });
+
+    const err = await transport.push({ changes: [], node_id: "n1" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TransportError);
+    expect((err as TransportError).retryable).toBe(false);
+    expect((fetchFn as any).mock.calls).toHaveLength(1);
+  });
+
+  it("still retries a plain 500", async () => {
+    const fetchFn = mockFetch({ error: "crdt: write state: disk full" }, 500);
+    const transport = new HttpTransport({
+      baseURL: "https://api.example.com/sync", fetch: fetchFn, retries: 2,
+    });
+
+    await transport.push({ changes: [], node_id: "n1" }).catch(() => {});
+    expect((fetchFn as any).mock.calls).toHaveLength(3);
+  });
+});
