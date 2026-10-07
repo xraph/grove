@@ -811,3 +811,36 @@ describe("Document CRDT merge", () => {
     expect(resolved.address).toEqual({ street: "123 Main St", city: "Springfield" });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Field clock under redelivery (Go ApplyChange keeps the newer HLC)
+// ---------------------------------------------------------------------------
+
+describe("mergeFieldState field clock", () => {
+  const older: HLC = { ts: 100, c: 0, node: "a" };
+  const newer: HLC = { ts: 200, c: 0, node: "b" };
+
+  const changeAt = (
+    crdt_type: ChangeRecord["crdt_type"],
+    hlc: HLC,
+    extra: Partial<ChangeRecord>,
+  ): ChangeRecord => ({
+    table: "t", pk: "1", field: "f", crdt_type, hlc, node_id: hlc.node, ...extra,
+  });
+
+  const cases: Array<[string, (hlc: HLC) => ChangeRecord]> = [
+    ["counter", (hlc) => changeAt("counter", hlc, { counter_delta: { inc: 1, dec: 0 } })],
+    ["set", (hlc) => changeAt("set", hlc, { set_op: { op: "add", elements: [hlc.node] } })],
+    ["list", (hlc) => changeAt("list", hlc, {
+      list_op: { op: "insert", node_id: hlc, parent_id: { ts: 0, c: 0, node: "" }, value: hlc.node },
+    })],
+    ["document", (hlc) => changeAt("document", hlc, { value: { path: `p.${hlc.node}`, value: 1 } })],
+  ];
+
+  it.each(cases)("%s: a redelivered older change does not regress the field HLC", (_type, make) => {
+    const afterNewer = mergeFieldState(null, make(newer));
+    const afterOlder = mergeFieldState(afterNewer, make(older));
+    expect(afterOlder.hlc).toEqual(newer);
+    expect(afterOlder.node_id).toBe("b");
+  });
+});

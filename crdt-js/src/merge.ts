@@ -481,6 +481,21 @@ export function mergeFullFieldState(
 }
 
 /**
+ * The HLC/node pair of whichever of local state or the incoming change is
+ * newer, used to stamp a field after applying an op. Mirrors Go pickNewer:
+ * a redelivered older op must not regress the field clock.
+ */
+function pickNewer(
+  local: FieldState | null,
+  change: ChangeRecord
+): { hlc: HLC; node_id: string } {
+  if (local && hlcAfter(local.hlc, change.hlc)) {
+    return { hlc: local.hlc, node_id: local.node_id };
+  }
+  return { hlc: change.hlc, node_id: change.node_id };
+}
+
+/**
  * Merge a ChangeRecord into existing FieldState.
  * Dispatches to the correct merge function based on CRDTType.
  * Mirrors Go crdt.ApplyChange.
@@ -526,8 +541,7 @@ export function mergeFieldState(
       }
       return {
         type: "counter",
-        hlc: change.hlc,
-        node_id: change.node_id,
+        ...pickNewer(local, change),
         counter_state: localCounter,
       };
     }
@@ -570,8 +584,7 @@ export function mergeFieldState(
 
       return {
         type: "set",
-        hlc: change.hlc,
-        node_id: change.node_id,
+        ...pickNewer(local, change),
         set_state: entries === localSet.entries && removed === localSet.removed
           ? localSet
           : { entries, removed },
@@ -624,8 +637,7 @@ export function mergeFieldState(
 
       return {
         type: "list",
-        hlc: change.hlc,
-        node_id: change.node_id,
+        ...pickNewer(local, change),
         list_state: nodes === localList.nodes ? localList : { nodes },
       };
     }
@@ -644,8 +656,7 @@ export function mergeFieldState(
             const prefix = path + ".";
             return {
               type: "document",
-              hlc: change.hlc,
-              node_id: change.node_id,
+              ...pickNewer(local, change),
               doc_state: {
                 fields: withoutKeys(
                   localDoc.fields,
@@ -664,16 +675,14 @@ export function mergeFieldState(
           };
           return {
             type: "document",
-            hlc: change.hlc,
-            node_id: change.node_id,
+            ...pickNewer(local, change),
             doc_state: mergeDocumentState(localDoc, remoteDoc),
           };
         }
       }
       return {
         type: "document",
-        hlc: change.hlc,
-        node_id: change.node_id,
+        ...pickNewer(local, change),
         doc_state: localDoc,
       };
     }
@@ -683,13 +692,9 @@ export function mergeFieldState(
       const nextText = change.text_op
         ? applyTextOpTo(localText, change.text_op, change.node_id, change.hlc)
         : localText;
-      // Stamp with whichever of local/change is newer (Go pickNewer
-      // parity) — a redelivered older op must not regress the field clock.
-      const keepLocal = local && hlcAfter(local.hlc, change.hlc);
       return {
         type: "text",
-        hlc: keepLocal ? local.hlc : change.hlc,
-        node_id: keepLocal ? local.node_id : change.node_id,
+        ...pickNewer(local, change),
         text_state: nextText,
       };
     }
