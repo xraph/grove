@@ -33,6 +33,7 @@ import {
   listNodeIds,
   documentResolve,
   tagKey,
+  setElementKey,
 } from "./merge.js";
 import {
   newTextState,
@@ -466,7 +467,7 @@ export class CRDTStore {
     // observed-remove semantics; receivers don't guess by HLC).
     const setState = this.getDoc(table, pk)?.fields[field]?.set_state;
     const tags = elements.flatMap(
-      (elem) => setState?.entries[JSON.stringify(elem)] ?? []
+      (elem) => setState?.entries[setElementKey(elem)] ?? []
     );
     const change: ChangeRecord = {
       table,

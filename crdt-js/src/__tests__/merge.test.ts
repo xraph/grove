@@ -844,3 +844,43 @@ describe("mergeFieldState field clock", () => {
     expect(afterOlder.node_id).toBe("b");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Set element keys follow Go json.Marshal bytes
+// ---------------------------------------------------------------------------
+
+describe("set element keys (Go parity)", () => {
+  const goHLC: HLC = { ts: 100, c: 0, node: "go" };
+  const jsHLC: HLC = { ts: 200, c: 0, node: "js" };
+
+  it("removes an element a Go writer added under its json.Marshal key", () => {
+    // Go ORSetState.Add keys "a<b" as json.Marshal does: "a<b".
+    const goState: ORSetState = { entries: { '"a\\u003cb"': [{ node: "go", hlc: goHLC }] }, removed: {} };
+    const local = { type: "set" as const, hlc: goHLC, node_id: "go", set_state: goState };
+    const removed = mergeFieldState(local, {
+      table: "t", pk: "1", field: "tags", crdt_type: "set", hlc: jsHLC, node_id: "js",
+      set_op: { op: "remove", elements: ["a<b"] },
+    });
+    expect(setElements(removed.set_state!)).toEqual([]);
+  });
+
+  it("keys objects by sorted field names, so key order does not split an element", () => {
+    let state = mergeFieldState(null, {
+      table: "t", pk: "1", field: "tags", crdt_type: "set", hlc: goHLC, node_id: "go",
+      set_op: { op: "add", elements: [{ b: 1, a: 2 }] },
+    });
+    state = mergeFieldState(state, {
+      table: "t", pk: "1", field: "tags", crdt_type: "set", hlc: jsHLC, node_id: "js",
+      set_op: { op: "add", elements: [{ a: 2, b: 1 }] },
+    });
+    expect(Object.keys(state.set_state!.entries)).toEqual(['{"a":2,"b":1}']);
+  });
+
+  it("orders elements by UTF-8 bytes like Go sort.Strings", () => {
+    const tag = [{ node: "go", hlc: goHLC }];
+    // U+FF01 encodes as EF BC 81, U+1F600 as F0 9F 98 80: Go puts U+FF01 first.
+    // In UTF-16 the emoji's high surrogate (D83D) sorts before FF01.
+    const state: ORSetState = { entries: { '"\u{1F600}"': tag, '"！"': tag }, removed: {} };
+    expect(setElements(state)).toEqual(["！", "\u{1F600}"]);
+  });
+});

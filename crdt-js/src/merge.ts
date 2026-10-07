@@ -105,6 +105,64 @@ export function counterValue(state: PNCounterState): number {
 // --- OR-Set ---
 
 /**
+ * The key an OR-Set element is stored under: the bytes Go's json.Marshal
+ * produces for the same value, so a remove matches an element whichever
+ * side added it. Object fields are sorted, and <, >, &, U+2028 and U+2029
+ * are escaped, which JSON.stringify does not do.
+ */
+export function setElementKey(elem: unknown): string {
+  return goMarshal(elem);
+}
+
+function goMarshal(v: unknown): string {
+  if (v === null || v === undefined || typeof v === "function" || typeof v === "symbol") {
+    return "null";
+  }
+  if (typeof (v as { toJSON?: unknown }).toJSON === "function") {
+    return goMarshal((v as { toJSON: () => unknown }).toJSON());
+  }
+  if (Array.isArray(v)) {
+    return "[" + v.map(goMarshal).join(",") + "]";
+  }
+  if (typeof v === "object") {
+    const obj = v as Record<string, unknown>;
+    const keys = Object.keys(obj)
+      .filter((k) => obj[k] !== undefined && typeof obj[k] !== "function")
+      .sort(compareUTF8);
+    return "{" + keys.map((k) => goEscape(JSON.stringify(k)) + ":" + goMarshal(obj[k])).join(",") + "}";
+  }
+  return goEscape(JSON.stringify(v));
+}
+
+function goEscape(json: string): string {
+  return json.replace(/[<>&\u2028\u2029]/g, (ch) =>
+    "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"));
+}
+
+/**
+ * Compare strings by their UTF-8 bytes, the order Go's sort.Strings uses.
+ * Plain JS comparison orders UTF-16 code units, which puts characters
+ * above U+FFFF before U+E000 to U+FFFF.
+ */
+export function compareUTF8(a: string, b: string): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const x = a.charCodeAt(i);
+    const y = b.charCodeAt(i);
+    if (x !== y) return utf8Rank(x) - utf8Rank(y);
+  }
+  return a.length - b.length;
+}
+
+// Shift surrogates above U+E000 to U+FFFF so code units compare in code
+// point order, which is UTF-8 byte order.
+function utf8Rank(unit: number): number {
+  if (unit >= 0xd800 && unit <= 0xdfff) return unit + 0x2000;
+  if (unit >= 0xe000) return unit - 0x800;
+  return unit;
+}
+
+/**
  * Compute the deterministic tag key matching Go's tagKey() from set.go.
  * Format: "nodeID:HLC{ts:<ts> c:<c> node:<node>}"
  */
@@ -179,7 +237,7 @@ export function mergeSet(
  */
 export function setElements(state: ORSetState): unknown[] {
   const result: unknown[] = [];
-  const keys = Object.keys(state.entries).sort();
+  const keys = Object.keys(state.entries).sort(compareUTF8);
 
   for (const key of keys) {
     const tags = state.entries[key];
@@ -556,7 +614,7 @@ export function mergeFieldState(
         if (op.op === "add") {
           const newTag: ORSetTag = { node: change.node_id, hlc: change.hlc };
           for (const elem of op.elements) {
-            const key = JSON.stringify(elem);
+            const key = setElementKey(elem);
             entries = withEntry(entries, key, withAppended(entries[key], newTag));
           }
         } else if (op.op === "remove") {
@@ -565,14 +623,14 @@ export function mergeFieldState(
             // Exact observed-remove: the op names the tags it saw, scoped
             // to the elements it removes.
             for (const elem of op.elements) {
-              const key = JSON.stringify(elem);
+              const key = setElementKey(elem);
               for (const t of op.tags) keys.push(removedKey(key, t));
             }
           } else {
             // Legacy remove: only tags older than the remove's HLC —
             // concurrent-or-newer adds survive (add-wins). Matches Go.
             for (const elem of op.elements) {
-              const key = JSON.stringify(elem);
+              const key = setElementKey(elem);
               for (const t of entries[key] ?? []) {
                 if (hlcAfter(change.hlc, t.hlc)) keys.push(removedKey(key, t));
               }

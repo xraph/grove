@@ -355,3 +355,35 @@ func TestSyncer_InboundSetOp_Persisted(t *testing.T) {
 		t.Fatalf("persisted state missing removed tag; writes: %v", written)
 	}
 }
+
+func TestApplyChange_SetKeysMatchJSONMarshal(t *testing.T) {
+	// Elements arrive as the sender serialized them. Keying by those raw
+	// bytes would split one element from the same value added through
+	// ORSetState.Add, which keys by json.Marshal.
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want any
+	}{
+		{"escaped string", `["a<b"]`, "a<b"},
+		{"object field order", `[{"b":1,"a":2}]`, map[string]any{"a": 2, "b": 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs, err := ApplyChange(nil, nil, &ChangeRecord{
+				Table: "t", PK: "1", Field: "tags", CRDTType: TypeSet, NodeID: "js",
+				HLC:   HLC{Timestamp: 100, NodeID: "js"},
+				SetOp: &SetOperation{Op: SetOpAdd, Elements: json.RawMessage(tc.raw)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ok, err := SetFromFieldState(fs).Contains(tc.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !ok {
+				t.Fatalf("element %s not found under its json.Marshal key; entries: %v", tc.raw, SetFromFieldState(fs).Entries)
+			}
+		})
+	}
+}

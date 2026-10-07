@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 )
@@ -105,11 +106,19 @@ func ApplyChange(engine *MergeEngine, local *FieldState, c *ChangeRecord) (*Fiel
 
 // setOpState builds the one-op remote OR-Set state for a set change.
 func setOpState(local *FieldState, c *ChangeRecord) (*FieldState, error) {
-	var elements []json.RawMessage
+	var raw []json.RawMessage
 	if len(c.SetOp.Elements) > 0 {
-		if err := json.Unmarshal(c.SetOp.Elements, &elements); err != nil {
+		if err := json.Unmarshal(c.SetOp.Elements, &raw); err != nil {
 			return nil, fmt.Errorf("crdt: set_op elements: %w", err)
 		}
+	}
+	elements := make([]string, len(raw))
+	for i, el := range raw {
+		key, err := canonicalElementKey(el)
+		if err != nil {
+			return nil, fmt.Errorf("crdt: set_op element %d: %w", i, err)
+		}
+		elements[i] = key
 	}
 
 	remote := NewORSetState()
@@ -117,7 +126,7 @@ func setOpState(local *FieldState, c *ChangeRecord) (*FieldState, error) {
 	case SetOpAdd:
 		tag := Tag{NodeID: c.NodeID, HLC: c.HLC}
 		for _, el := range elements {
-			remote.Entries[string(el)] = []Tag{tag}
+			remote.Entries[el] = []Tag{tag}
 		}
 
 	case SetOpRemove:
@@ -127,7 +136,7 @@ func setOpState(local *FieldState, c *ChangeRecord) (*FieldState, error) {
 			// tag; scoping keeps siblings alive).
 			for _, el := range elements {
 				for _, tag := range c.SetOp.Tags {
-					remote.Removed[removedKey(string(el), tag)] = true
+					remote.Removed[removedKey(el, tag)] = true
 				}
 			}
 		} else {
@@ -137,9 +146,9 @@ func setOpState(local *FieldState, c *ChangeRecord) (*FieldState, error) {
 			localSet := SetFromFieldState(local)
 			if localSet != nil {
 				for _, el := range elements {
-					for _, tag := range localSet.Entries[string(el)] {
+					for _, tag := range localSet.Entries[el] {
 						if c.HLC.After(tag.HLC) {
-							remote.Removed[removedKey(string(el), tag)] = true
+							remote.Removed[removedKey(el, tag)] = true
 						}
 					}
 				}
@@ -150,6 +159,21 @@ func setOpState(local *FieldState, c *ChangeRecord) (*FieldState, error) {
 		return nil, fmt.Errorf("crdt: unknown set op %q", c.SetOp.Op)
 	}
 	return remote.ToFieldState(c.HLC, c.NodeID), nil
+}
+
+// canonicalElementKey re-encodes an element as it arrived on the wire into
+// the key ORSetState.Add would use for the same value (json.Marshal: sorted
+// object fields, <, > and & escaped), so one value never splits across two
+// keys depending on who serialized it. Numbers keep their literal text, so
+// large integers are not rounded through float64.
+func canonicalElementKey(raw json.RawMessage) (string, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return "", err
+	}
+	return marshalElement(v)
 }
 
 // listOpState builds the one-op remote RGA state for a list change.
