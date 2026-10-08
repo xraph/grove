@@ -151,30 +151,19 @@ void main() {
       });
     }
 
-    test(
-      'a change pushed late with an older stamp reaches a device that synced past it',
-      () async {
-        final base = DateTime.now().millisecondsSinceEpoch;
-        final a = replica('dev-a', server.syncUrl, nowMs: () => base);
-        final b = replica('dev-b', server.syncUrl, nowMs: () => base + 1000);
-        a.store.incrementCounter('notes', 'n1', 'views', 3);
-        b.store.incrementCounter('notes', 'n1', 'views', 7);
-        // B syncs first with the later stamp. A then pushes an earlier one,
-        // and B's pull cursor is already past it.
-        await b.engine.sync();
-        await a.engine.sync();
-        await b.engine.sync();
-        expect(a.store.getDocument('notes', 'n1')!['views'], 10);
-        expect(b.store.getDocument('notes', 'n1')!['views'], 10);
-      },
-      skip:
-          'grove v1.7.0 limitation, not changed by fix/crdt-sync-defects: '
-          'a pull returns the rows whose stored HLC is past the cursor, so a '
-          'change pushed with an older stamp than a device has already '
-          'synced past is never delivered to it (the server merges older '
-          'stamps into set, list, text and document rows without moving the '
-          'row HLC, and stores a counter row per node). Run with '
-          '--run-skipped to see B stay at 7.',
-    );
+    test('a change pushed late with an older stamp reaches a device that synced past it', () async {
+      final base = DateTime.now().millisecondsSinceEpoch;
+      final a = replica('dev-a', server.syncUrl, nowMs: () => base);
+      final b = replica('dev-b', server.syncUrl, nowMs: () => base + 1000);
+      a.store.incrementCounter('notes', 'n1', 'views', 3);
+      b.store.incrementCounter('notes', 'n1', 'views', 7);
+      // B syncs first with the later stamp. A then pushes an earlier one,
+      // and B's pull cursor is already past it.
+      await b.engine.sync();
+      await a.engine.sync();
+      await b.engine.sync();
+      expect(a.store.getDocument('notes', 'n1')!['views'], 10);
+      expect(b.store.getDocument('notes', 'n1')!['views'], 10);
+    });
   });
 }

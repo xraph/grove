@@ -110,20 +110,12 @@ jobs:
       # is right on a laptop without Go and wrong here. Select them by suite
       # path (every file under test/conformance/) and fail unless every
       # *_test.dart file there ran at least one test, none failed, and none
-      # skipped for a reason other than the documented late-stamp limit. The
-      # file list comes from the directory, so adding a suite needs no edit
-      # here, while deleting one makes the check fail.
-      #
-      # LATE_STAMP_SKIP must equal, character for character, the skip reason in
-      # test/conformance/convergence_test.dart. That exemption goes away when
-      # the server fix for late-stamped merges lands (xraph/grove#37) and the
-      # test is un-skipped: delete the variable and the "allowed" branch then.
+      # skipped. The file list comes from the directory, so adding a suite
+      # needs no edit here, while deleting one makes the check fail.
       - name: Conformance tests ran
         env:
           # Adding a suite needs no edit; removing one means lowering this on purpose.
           MIN_CONFORMANCE_SUITES: '4'
-          LATE_STAMP_SKIP: >-
-            grove v1.7.0 limitation, not changed by fix/crdt-sync-defects: a pull returns the rows whose stored HLC is past the cursor, so a change pushed with an older stamp than a device has already synced past is never delivered to it (the server merges older stamps into set, list, text and document rows without moving the row HLC, and stores a counter row per node). Run with --run-skipped to see B stay at 7.
         run: |
           shopt -s nullglob
           suites=$(printf '%s\n' test/conformance/*_test.dart | jq -R -s -c 'split("\n") | map(select(. != ""))')
@@ -132,7 +124,7 @@ jobs:
             echo "::error::found $count conformance test files under test/conformance/, expected at least $MIN_CONFORMANCE_SUITES"
             exit 1
           fi
-          results=$(jq -r -s --arg late "$LATE_STAMP_SKIP" --argjson suites "$suites" '
+          results=$(jq -r -s --argjson suites "$suites" '
             . as $events
             | ([ $events[] | select(.type == "suite") | {key: (.suite.id | tostring), value: .suite.path} ] | from_entries) as $paths
             | ([ $events[] | select(.type == "testDone") | {key: (.testID | tostring), value: .} ] | from_entries) as $done
@@ -143,7 +135,6 @@ jobs:
                 | { path: $paths[(.test.suiteID | tostring)],
                     ok: ($d.result == "success" and ($d.skipped | not)),
                     line: (if $d.result != "success" then "failed \(.test.name)"
-                           elif $d.skipped and (.test.metadata.skipReason == $late) then "allowed \(.test.name)"
                            elif $d.skipped then "skipped \(.test.name) [\(.test.metadata.skipReason // "no reason")]"
                            else "ok \(.test.name)" end) } ] as $rows
             | $rows[].line,
@@ -154,8 +145,8 @@ jobs:
             echo "::error::no conformance test ran"
             exit 1
           fi
-          if echo "$results" | grep -v -e '^ok ' -e '^allowed ' >/dev/null; then
-            echo "::error::a conformance test failed, was skipped without the documented reason, or a conformance file ran no test"
+          if echo "$results" | grep -v -e '^ok ' >/dev/null; then
+            echo "::error::a conformance test failed or was skipped, or a conformance file ran no test"
             exit 1
           fi
 
