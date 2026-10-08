@@ -10,6 +10,8 @@ import "context"
 type SyncHook interface {
 	// BeforeInboundChange is called before a remote change is merged locally.
 	// Return a modified change to transform it, nil to skip it, or an error to abort.
+	// The server calls it for every change of a push before merging any of
+	// them, so an error rejects the whole push with nothing applied.
 	BeforeInboundChange(ctx context.Context, change *ChangeRecord) (*ChangeRecord, error)
 
 	// AfterInboundChange is called after a remote change has been merged locally.

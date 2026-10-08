@@ -6,7 +6,7 @@ replace github.com/xraph/grove => ../
 
 require (
 	github.com/xraph/forge v1.12.2
-	github.com/xraph/grove v1.6.4
+	github.com/xraph/grove v1.7.1
 	github.com/xraph/vessel v1.0.4
 )
 

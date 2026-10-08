@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -515,4 +518,135 @@ type errorInboundHook struct {
 
 func (h *errorInboundHook) BeforeInboundChange(_ context.Context, _ *ChangeRecord) (*ChangeRecord, error) {
 	return nil, errors.New("inbound rejected")
+}
+
+// --- Shadow-table fake for pull/push window tests ---
+
+// shadowFake is a mockExecutor backend that honours the shadow-table
+// queries the MetadataStore issues: the per-table changes-since cursor
+// (including its LIMIT) and the field upsert. Tables are keyed by the
+// user-facing table name.
+type shadowFake struct {
+	mu     sync.Mutex
+	tables map[string][]mockRow
+	writes []string // "table/pk/field" per field upsert, in order
+}
+
+func newShadowFake() *shadowFake {
+	return &shadowFake{tables: make(map[string][]mockRow)}
+}
+
+func (f *shadowFake) plugin() *Plugin {
+	p := New(WithNodeID("test-node"))
+	p.SetExecutor(&mockExecutor{queryFn: f.query, execFn: f.exec})
+	return p
+}
+
+func (f *shadowFake) tableOf(query string) string {
+	for name := range f.tables {
+		if strings.Contains(query, ShadowTableName(name)) {
+			return name
+		}
+	}
+	return ""
+}
+
+func (f *shadowFake) query(_ context.Context, query string, args ...any) (Rows, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rows := f.tables[f.tableOf(query)]
+	if !strings.Contains(query, "hlc_ts > $1") {
+		return &mockRows{}, nil // ReadState: start every push from empty state
+	}
+	ts, counter, limit := args[0].(int64), args[1].(uint32), args[2].(int)
+	var out []mockRow
+	for _, r := range rows {
+		if r.hlcTS > ts || (r.hlcTS == ts && r.hlcCount > counter) {
+			out = append(out, r)
+		}
+		if len(out) == limit {
+			break
+		}
+	}
+	return &mockRows{rows: out}, nil
+}
+
+func (f *shadowFake) exec(_ context.Context, query string, args ...any) (ExecResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if strings.Contains(query, "INSERT INTO") && len(args) >= 2 {
+		f.writes = append(f.writes, fmt.Sprintf("%v/%v", args[0], args[1]))
+	}
+	return &mockExecResult{affected: 1}, nil
+}
+
+func lwwRows(n int, startTS int64) []mockRow {
+	state, _ := json.Marshal(&FieldState{Type: TypeLWW, Value: json.RawMessage(`"v"`), NodeID: "a"})
+	rows := make([]mockRow, n)
+	for i := range rows {
+		rows[i] = mockRow{
+			pkHash: fmt.Sprintf("pk-%d", i), fieldName: "title",
+			hlcTS: startTS + int64(i), nodeID: "a", crdtState: state,
+		}
+	}
+	return rows
+}
+
+func TestSyncController_HandlePull_MultiTableBacklogNotSkipped(t *testing.T) {
+	fake := newShadowFake()
+	// "big" has a backlog larger than one page; "small" has one row newer
+	// than all of it. A single max-over-tables watermark would jump past
+	// big's second page.
+	fake.tables["big"] = lwwRows(DefaultChangesLimit+500, 1_000)
+	fake.tables["small"] = lwwRows(1, 1_000_000)
+	ctrl := NewSyncController(fake.plugin())
+
+	seen := map[string]bool{}
+	since := HLC{}
+	for range 5 {
+		resp, err := ctrl.HandlePull(context.Background(), &PullRequest{
+			Tables: []string{"big", "small"}, Since: since, NodeID: "client",
+		})
+		require.NoError(t, err)
+		for _, c := range resp.Changes {
+			seen[c.Table+"/"+c.PK] = true
+		}
+		if len(resp.Changes) == 0 {
+			break
+		}
+		since = resp.LatestHLC
+	}
+
+	assert.Len(t, seen, DefaultChangesLimit+500+1, "every row of both tables must arrive across pulls")
+}
+
+func TestSyncController_HandlePush_HookRejectionMergesNothing(t *testing.T) {
+	fake := newShadowFake()
+	fake.tables["docs"] = nil
+	hook := &pkRejectHook{rejectPK: "2"}
+	ctrl := NewSyncController(fake.plugin(), WithControllerSyncHook(hook))
+
+	_, err := ctrl.HandlePush(context.Background(), &PushRequest{
+		Changes: []ChangeRecord{
+			{Table: "docs", PK: "1", Field: "title", NodeID: "n", CRDTType: TypeLWW, HLC: HLC{Timestamp: 100, NodeID: "n"}, Value: json.RawMessage(`"ok"`)},
+			{Table: "docs", PK: "2", Field: "title", NodeID: "n", CRDTType: TypeLWW, HLC: HLC{Timestamp: 101, NodeID: "n"}, Value: json.RawMessage(`"bad"`)},
+		},
+		NodeID: "n",
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "inbound change hook")
+	assert.Empty(t, fake.writes, "a rejected push must not merge the changes before the rejected one")
+}
+
+type pkRejectHook struct {
+	BaseSyncHook
+	rejectPK string
+}
+
+func (h *pkRejectHook) BeforeInboundChange(_ context.Context, c *ChangeRecord) (*ChangeRecord, error) {
+	if c.PK == h.rejectPK {
+		return nil, errors.New("pk not writable")
+	}
+	return c, nil
 }

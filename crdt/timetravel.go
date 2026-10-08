@@ -63,19 +63,27 @@ type FieldHistoryResponse struct {
 }
 
 // ReadStateAt reads the CRDT state for a record as it existed at a specific HLC timestamp.
-// This queries the shadow table for all field states with hlc_ts <= the target time.
+//
+// It keeps the field rows and record tombstones whose own clock (the
+// authorship stamp stored in crdt_state, see WriteFieldStateAt) is at or
+// before at, comparing timestamp and counter only. It does not cut on the
+// rows' cursor positions: a sync server moves a row's position whenever a
+// push changes it, and a position cut would then drop the row's whole state
+// from every point in time before the move. A shadow row holds the latest
+// state stored for its node, so a row inside the cut contributes everything
+// merged into it, including merges that reached the server after at.
 func (ms *MetadataStore) ReadStateAt(ctx context.Context, table, pk string, at HLC) (*State, error) {
 	shadowTable := ShadowTableName(table)
 
+	// The own clock lives inside crdt_state, so the cut is made here
+	// rather than in SQL. One record has a handful of rows.
 	query := fmt.Sprintf(
 		`SELECT pk_hash, field_name, hlc_ts, hlc_counter, node_id, tombstone, crdt_state
-		FROM %s
-		WHERE pk_hash = $1 AND (hlc_ts < $2 OR (hlc_ts = $2 AND hlc_counter <= $3))
-		ORDER BY hlc_ts DESC, hlc_counter DESC`,
+		FROM %s WHERE pk_hash = $1`,
 		shadowTable,
 	)
 
-	rows, err := ms.executor.QueryContext(ctx, query, pk, at.Timestamp, at.Counter)
+	rows, err := ms.executor.QueryContext(ctx, query, pk)
 	if err != nil {
 		return nil, fmt.Errorf("crdt: read state at %s: %w", at, err)
 	}
@@ -94,27 +102,21 @@ func (ms *MetadataStore) ReadStateAt(ctx context.Context, table, pk string, at H
 		}
 
 		if row.FieldName == "_tombstone" && row.Tombstone {
-			state.Tombstone = true
-			state.TombstoneHLC = HLC{
-				Timestamp: row.HLCTS,
-				Counter:   row.HLCCount,
-				NodeID:    row.NodeID,
+			deletedAt := rowTombstoneHLC(&row)
+			if cursorAfter(deletedAt, at) {
+				continue
+			}
+			if !state.Tombstone || deletedAt.After(state.TombstoneHLC) {
+				state.Tombstone = true
+				state.TombstoneHLC = deletedAt
 			}
 			continue
 		}
 
-		var fs FieldState
-		if row.CRDTState != nil {
-			if err := json.Unmarshal(row.CRDTState, &fs); err != nil {
-				continue
-			}
+		fs, err := rowFieldState(&row)
+		if err != nil || cursorAfter(fs.HLC, at) {
+			continue
 		}
-		fs.HLC = HLC{
-			Timestamp: row.HLCTS,
-			Counter:   row.HLCCount,
-			NodeID:    row.NodeID,
-		}
-		fs.NodeID = row.NodeID
 
 		if existing, ok := state.Fields[row.FieldName]; ok {
 			merged, mergeErr := engine.MergeField(existing, &fs)
@@ -131,6 +133,12 @@ func (ms *MetadataStore) ReadStateAt(ctx context.Context, table, pk string, at H
 }
 
 // ReadFieldHistory reads the change history for a specific field.
+//
+// since, the ordering (newest first) and the limit all use the rows' cursor
+// positions, while each entry reports the row's own clock. The two differ
+// for a row a sync server restamped after a merge (see WriteFieldStateAt),
+// so entries are not always in order of their HLC, and since is compared
+// with positions, not with the HLCs the entries report.
 func (ms *MetadataStore) ReadFieldHistory(ctx context.Context, table, pk, field string, since HLC, limit int) ([]FieldHistoryEntry, error) {
 	shadowTable := ShadowTableName(table)
 
@@ -164,8 +172,9 @@ func (ms *MetadataStore) ReadFieldHistory(ctx context.Context, table, pk, field 
 			return nil, fmt.Errorf("crdt: scan history: %w", err)
 		}
 
+		row := MetadataRow{HLCTS: hlcTS, HLCCount: hlcCount, NodeID: nodeID}
 		entry := FieldHistoryEntry{
-			HLC:    HLC{Timestamp: hlcTS, Counter: hlcCount, NodeID: nodeID},
+			HLC:    rowCursor(&row),
 			NodeID: nodeID,
 		}
 
@@ -174,6 +183,7 @@ func (ms *MetadataStore) ReadFieldHistory(ctx context.Context, table, pk, field 
 			if err := json.Unmarshal(stateJSON, &fs); err == nil {
 				entry.Value = fs.Value
 				entry.Type = fs.Type
+				entry.HLC = semanticHLC(&row, fs.HLC)
 			}
 		}
 

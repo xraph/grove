@@ -194,8 +194,9 @@ func (s *Syncer) syncWithPeer(ctx context.Context, t Transport, peerID string) (
 	}
 
 	// Merge pulled changes into local state.
+	batch := s.plugin.newCursorBatch(s.metadata)
 	for _, change := range pullResp.Changes {
-		if err := s.mergeRemoteChange(ctx, change); err != nil {
+		if err := s.mergeRemoteChange(ctx, batch, change); err != nil {
 			s.logger.Error("crdt: merge remote change failed",
 				log.String("table", change.Table),
 				log.String("pk", change.PK),
@@ -268,7 +269,18 @@ func (s *Syncer) syncWithPeer(ctx context.Context, t Transport, peerID string) (
 	return report, nil
 }
 
-func (s *Syncer) mergeRemoteChange(ctx context.Context, change ChangeRecord) error {
+// mergeRemoteChange merges one change pulled from a peer into the local
+// shadow table, between the inbound sync hooks.
+//
+// The merge restamps rows the way SyncController.HandlePush does (see
+// mergePushed). A hub that pulls from upstream with a Syncer also serves
+// its own clients, and its clients' cursors are usually past the clocks of
+// the rows it pulls: a row written at its own clock would sit behind them
+// and never be pulled. So a merge that changes the stored state moves the
+// row to a fresh position from the plugin's cursor allocator, a merge that
+// changes nothing writes nothing, and the read-merge-write holds the same
+// lock as pushes. batch reads each table's stored maximum once.
+func (s *Syncer) mergeRemoteChange(ctx context.Context, batch *cursorBatch, change ChangeRecord) error {
 	if s.metadata == nil {
 		return fmt.Errorf("no metadata store")
 	}
@@ -286,50 +298,69 @@ func (s *Syncer) mergeRemoteChange(ctx context.Context, change ChangeRecord) err
 		}
 	}
 
+	if err := s.applyRemoteChange(ctx, batch, processedChange); err != nil {
+		return err
+	}
+
+	// Run AfterInboundChange hook, after the write lock is released.
+	if s.plugin.syncHooks != nil {
+		s.plugin.syncHooks.AfterInboundChange(ctx, processedChange) //nolint:errcheck // fire-and-forget post-hook
+	}
+	return nil
+}
+
+// applyRemoteChange does mergeRemoteChange's read-merge-write under the
+// plugin's cursor write lock.
+func (s *Syncer) applyRemoteChange(ctx context.Context, batch *cursorBatch, change *ChangeRecord) error {
+	s.plugin.cursors.writeMu.Lock()
+	defer s.plugin.cursors.writeMu.Unlock()
+
 	// A tombstoned document-type change carrying a value is a PATH delete
-	// inside the nested document, not a record delete — it falls through to
+	// inside the nested document, not a record delete. It falls through to
 	// ApplyChange below.
-	isDocPathDelete := processedChange.CRDTType == TypeDocument && len(processedChange.Value) > 0
-	if processedChange.Tombstone && !isDocPathDelete {
-		if err := s.metadata.WriteTombstone(ctx, processedChange.Table, processedChange.PK, processedChange.HLC, processedChange.NodeID); err != nil {
+	isDocPathDelete := change.CRDTType == TypeDocument && len(change.Value) > 0
+	if change.Tombstone && !isDocPathDelete {
+		deleted, deletedAt, err := s.metadata.readTombstone(ctx, change.Table, change.PK)
+		if err != nil {
 			return err
 		}
-		// Run AfterInboundChange hook.
-		if s.plugin.syncHooks != nil {
-			s.plugin.syncHooks.AfterInboundChange(ctx, processedChange) //nolint:errcheck // fire-and-forget post-hook
+		if deleted && !change.HLC.After(deletedAt) {
+			return nil // Already deleted at this clock or later.
 		}
-		return nil
+		cursor, err := batch.allocate(ctx, change.Table, change.HLC)
+		if err != nil {
+			return err
+		}
+		return s.metadata.WriteTombstoneAt(ctx, change.Table, change.PK, change.HLC, change.NodeID, cursor)
 	}
 
 	// Read existing local state for this field.
-	localState, err := s.metadata.ReadState(ctx, processedChange.Table, processedChange.PK)
+	localState, err := s.metadata.ReadState(ctx, change.Table, change.PK)
 	if err != nil {
 		return err
 	}
 
 	var localFS *FieldState
 	if localState != nil {
-		localFS = localState.Fields[processedChange.Field]
+		localFS = localState.Fields[change.Field]
 	}
 
 	// Canonical op application: honors every type-specific payload
 	// (counter deltas, set/list/text ops, document path writes, full-state
-	// carriers) — not just LWW values.
-	merged, err := ApplyChange(s.plugin.merge, localFS, processedChange)
+	// carriers), not just LWW values.
+	merged, err := ApplyChange(s.plugin.merge, localFS, change)
 	if err != nil {
 		return err
 	}
+	if sameFieldState(localFS, merged) {
+		return nil // Nothing changed: no write, no restamp.
+	}
 
-	if err := s.metadata.WriteFieldState(ctx, processedChange.Table, processedChange.PK, processedChange.Field, merged); err != nil {
+	cursor, err := batch.allocate(ctx, change.Table, merged.HLC)
+	if err != nil {
 		return err
 	}
-
-	// Run AfterInboundChange hook.
-	if s.plugin.syncHooks != nil {
-		s.plugin.syncHooks.AfterInboundChange(ctx, processedChange) //nolint:errcheck // fire-and-forget post-hook
-	}
-
-	return nil
+	return s.metadata.WriteFieldStateAt(ctx, change.Table, change.PK, change.Field, merged, cursor)
 }
 
 // StreamSync connects to all peers that support SSE streaming and processes
@@ -368,7 +399,7 @@ func (s *Syncer) StreamSync(ctx context.Context) error {
 
 		go func(st *StreamingTransport, pid string, since HLC) {
 			err := st.StreamChanges(ctx, since, func(change ChangeRecord) {
-				if err := s.mergeRemoteChange(ctx, change); err != nil {
+				if err := s.mergeRemoteChange(ctx, s.plugin.newCursorBatch(s.metadata), change); err != nil {
 					s.logger.Error("crdt: stream merge error",
 						log.String("peer", pid),
 						log.String("error", err.Error()),
