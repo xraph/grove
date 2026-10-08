@@ -3,8 +3,11 @@ name: CRDT Dart
 # CI for grove_crdt, the Dart port of crdt-js under crdt-dart/.
 #
 # The conformance suite starts a Go server built from this repository's crdt
-# package and syncs against it, so a change to crdt/ runs this workflow too:
-# the Go side can break the Dart client without touching a Dart file.
+# and hook packages and syncs against it, so a change to crdt/ or hook/ runs
+# this workflow too: the Go side can break the Dart client without touching a
+# Dart file. The path filters are the in-repo packages the server compiles
+# (`go list -deps` in crdt-dart/tool/conformance_server, with GOWORK=off), so
+# re-derive them there when the server starts importing another package.
 #
 # The Flutter pin lives in crdt-dart/.fvmrc and matches forge's
 # dart-packages/.fvmrc. forge_client_grove in forge depends on this package,
@@ -16,6 +19,7 @@ on:
     paths:
       - 'crdt-dart/**'
       - 'crdt/**'
+      - 'hook/**'
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/crdt-dart.yml'
@@ -24,6 +28,7 @@ on:
     paths:
       - 'crdt-dart/**'
       - 'crdt/**'
+      - 'hook/**'
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/crdt-dart.yml'
@@ -103,9 +108,11 @@ jobs:
 
       # The conformance tests skip when they cannot start the Go server, which
       # is right on a laptop without Go and wrong here. Select them by suite
-      # path (every file under test/conformance/) and fail unless at least one
-      # ran, none failed, and none skipped for a reason other than the
-      # documented late-stamp limit.
+      # path (every file under test/conformance/) and fail unless every
+      # *_test.dart file there ran at least one test, none failed, and none
+      # skipped for a reason other than the documented late-stamp limit. The
+      # file list comes from the directory, so adding a suite needs no edit
+      # here, while deleting one makes the check fail.
       #
       # LATE_STAMP_SKIP must equal, character for character, the skip reason in
       # test/conformance/convergence_test.dart. That exemption goes away when
@@ -116,18 +123,28 @@ jobs:
           LATE_STAMP_SKIP: >-
             grove v1.7.0 limitation, not changed by fix/crdt-sync-defects: a pull returns the rows whose stored HLC is past the cursor, so a change pushed with an older stamp than a device has already synced past is never delivered to it (the server merges older stamps into set, list, text and document rows without moving the row HLC, and stores a counter row per node). Run with --run-skipped to see B stay at 7.
         run: |
-          results=$(jq -r -s --arg late "$LATE_STAMP_SKIP" '
+          shopt -s nullglob
+          suites=$(printf '%s\n' test/conformance/*_test.dart | jq -R -s -c 'split("\n") | map(select(. != ""))')
+          if [ "$suites" = "[]" ]; then
+            echo "::error::no conformance test files under test/conformance/"
+            exit 1
+          fi
+          results=$(jq -r -s --arg late "$LATE_STAMP_SKIP" --argjson suites "$suites" '
             . as $events
             | ([ $events[] | select(.type == "suite") | {key: (.suite.id | tostring), value: .suite.path} ] | from_entries) as $paths
             | ([ $events[] | select(.type == "testDone") | {key: (.testID | tostring), value: .} ] | from_entries) as $done
-            | $events[]
-            | select(.type == "testStart" and (($paths[(.test.suiteID | tostring)] // "") | contains("test/conformance/")))
-            | ($done[(.test.id | tostring)]) as $d
-            | select($d.hidden | not)
-            | if $d.result != "success" then "failed \(.test.name)"
-              elif $d.skipped and (.test.metadata.skipReason == $late) then "allowed \(.test.name)"
-              elif $d.skipped then "skipped \(.test.name) [\(.test.metadata.skipReason // "no reason")]"
-              else "ok \(.test.name)" end
+            | [ $events[]
+                | select(.type == "testStart" and (($paths[(.test.suiteID | tostring)] // "") | contains("test/conformance/")))
+                | ($done[(.test.id | tostring)]) as $d
+                | select($d.hidden | not)
+                | { path: $paths[(.test.suiteID | tostring)],
+                    ok: ($d.result == "success" and ($d.skipped | not)),
+                    line: (if $d.result != "success" then "failed \(.test.name)"
+                           elif $d.skipped and (.test.metadata.skipReason == $late) then "allowed \(.test.name)"
+                           elif $d.skipped then "skipped \(.test.name) [\(.test.metadata.skipReason // "no reason")]"
+                           else "ok \(.test.name)" end) } ] as $rows
+            | $rows[].line,
+              ($suites[] | . as $s | select(([ $rows[] | select(.ok and .path == $s) ] | length) == 0) | "missing no test ran in \($s)")
           ' "$RUNNER_TEMP/test-results.json")
           echo "$results"
           if ! echo "$results" | grep -q '^ok '; then
@@ -135,13 +152,14 @@ jobs:
             exit 1
           fi
           if echo "$results" | grep -v -e '^ok ' -e '^allowed ' >/dev/null; then
-            echo "::error::a conformance test failed or was skipped without the documented reason"
+            echo "::error::a conformance test failed, was skipped without the documented reason, or a conformance file ran no test"
             exit 1
           fi
 
-      # pub refuses to publish a package marked publish_to: none, which this
-      # one is until its first release. Strip the line on the runner copy so
-      # the dry run checks everything else.
+      # This package is marked publish_to: none until its first release. Strip
+      # the line on the runner copy so the dry run validates it as a publishable
+      # package. The step is defensive: pub 3.13.4 may not need it, because its
+      # dry run passed with the line left in.
       - name: Publish dry run
         run: |
           sed -i '/^publish_to: none$/d' pubspec.yaml
