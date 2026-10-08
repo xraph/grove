@@ -1,0 +1,111 @@
+name: Release Grove Dart
+
+# Publishes grove_crdt (crdt-dart/) to pub.dev when you push a tag named
+# grove_crdt-v<version>, for example:
+#
+#   git tag grove_crdt-v1.0.1 && git push origin grove_crdt-v1.0.1
+#
+# The tag must match the version in crdt-dart/pubspec.yaml, so bump the
+# pubspec and CHANGELOG on main first, then tag that commit.
+#
+# There is no token to store. pub.dev trusts the GitHub OIDC token of this run,
+# which needs automated publishing turned on in the package's admin page on
+# pub.dev: repository xraph/grove, tag pattern grove_crdt-v{{version}}, and
+# environment pub.dev. pub.dev only lets you turn that on for a package that
+# already exists, which is why 1.0.0 was published by hand.
+#
+# A tag for a version that is already on pub.dev (1.0.0, for one) runs the
+# checks and skips the publish, so tagging a hand-published release is safe.
+
+on:
+  push:
+    tags:
+      - 'grove_crdt-v[0-9]+.[0-9]+.[0-9]+*'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify grove_crdt
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+    env:
+      # The conformance tests build crdt-dart/tool/conformance_server with
+      # GOWORK=off and GOPROXY=off, so the module cache must be warm first.
+      GOWORK: 'off'
+    defaults:
+      run:
+        working-directory: crdt-dart
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Tag matches the pubspec version
+        id: version
+        run: |
+          version=$(sed -n 's/^version: *//p' pubspec.yaml)
+          tagged="${GITHUB_REF_NAME#grove_crdt-v}"
+          if [ "$version" != "$tagged" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match pubspec version $version"
+            exit 1
+          fi
+          status=$(curl -s -o /dev/null -w '%{http_code}' "https://pub.dev/api/packages/grove_crdt/versions/$version")
+          case "$status" in
+            200)
+              echo "::notice::grove_crdt $version is already on pub.dev, so this run only checks it"
+              echo "publish=false" >> "$GITHUB_OUTPUT" ;;
+            404)
+              echo "publish=true" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::error::pub.dev answered $status for grove_crdt $version"
+              exit 1 ;;
+          esac
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.0"
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            crdt-dart/tool/conformance_server/go.sum
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version-file: crdt-dart/.fvmrc
+          cache: true
+
+      - name: Download Go modules for the conformance server
+        working-directory: crdt-dart/tool/conformance_server
+        run: go mod download
+
+      - name: Resolve
+        run: dart pub get
+
+      - name: Analyze
+        run: dart analyze --fatal-infos
+
+      - name: Test
+        run: dart test
+
+      - name: Publish dry run
+        run: dart pub publish --dry-run
+
+  publish:
+    name: Publish to pub.dev
+    needs: verify
+    if: needs.verify.outputs.publish == 'true'
+    permissions:
+      id-token: write
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1
+    with:
+      environment: pub.dev
+      working-directory: crdt-dart

@@ -150,14 +150,7 @@ jobs:
             exit 1
           fi
 
-      # This package is marked publish_to: none until its first release. Strip
-      # the line on the runner copy so the dry run validates it as a publishable
-      # package. The step is defensive: pub 3.13.4 may not need it, because its
-      # dry run passed with the line left in.
+      # Validates the package the way pub.dev will, so a change that would make
+      # the next release fail to publish fails here first.
       - name: Publish dry run
-        run: |
-          sed -i '/^publish_to: none$/d' pubspec.yaml
-          # pub warns (and --dry-run exits 65) on checked-in files modified in
-          # git; this rewrite is deliberate and lives only on the runner.
-          git update-index --assume-unchanged pubspec.yaml
-          dart pub publish --dry-run
+        run: dart pub publish --dry-run

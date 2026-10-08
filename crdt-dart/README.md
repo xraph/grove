@@ -4,6 +4,10 @@ A pure Dart client for Grove's CRDT sync protocol, the Dart sibling of
 `crdt-js`. It speaks the same wire format as the Go `crdt` package: pull and
 push over HTTP, the change stream over SSE, and the multiplexed WebSocket.
 
+```bash
+dart pub add grove_crdt
+```
+
 ```dart
 import 'package:grove_crdt/grove_crdt.dart';
 
