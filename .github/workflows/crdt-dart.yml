@@ -1,0 +1,172 @@
+name: CRDT Dart
+
+# CI for grove_crdt, the Dart port of crdt-js under crdt-dart/.
+#
+# The conformance suite starts a Go server built from this repository's crdt
+# and hook packages and syncs against it, so a change to crdt/ or hook/ runs
+# this workflow too: the Go side can break the Dart client without touching a
+# Dart file. The path filters are the in-repo packages the server compiles
+# (`go list -deps` in crdt-dart/tool/conformance_server, with GOWORK=off), so
+# re-derive them there when the server starts importing another package.
+#
+# The Flutter pin lives in crdt-dart/.fvmrc and matches forge's
+# dart-packages/.fvmrc. forge_client_grove in forge depends on this package,
+# so the two must be tested on the same toolchain. Bump both together.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crdt-dart/**'
+      - 'crdt/**'
+      - 'hook/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/crdt-dart.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crdt-dart/**'
+      - 'crdt/**'
+      - 'hook/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/crdt-dart.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  crdt-dart:
+    name: CRDT Dart
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # The conformance server is its own module (crdt-dart/tool/conformance_server)
+      # that replaces github.com/xraph/grove with the checkout. The tests build it
+      # with GOWORK=off and GOPROXY=off, so the module cache must be warm first.
+      GOWORK: 'off'
+    defaults:
+      run:
+        working-directory: crdt-dart
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.0"
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            crdt-dart/tool/conformance_server/go.sum
+
+      - name: Set up Flutter
+        id: flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version-file: crdt-dart/.fvmrc
+          cache: true
+          # The action's own pub cache is keyed on pubspec.lock, and this
+          # package does not commit one, so its key would never change and a
+          # new dependency would never be saved. The step below keys on
+          # pubspec.yaml.
+          pub-cache: false
+
+      - name: Cache pub packages
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.flutter.outputs.PUB-CACHE-PATH }}
+          key: pub-${{ runner.os }}-${{ steps.flutter.outputs.VERSION }}-${{ hashFiles('crdt-dart/pubspec.yaml') }}
+          restore-keys: |
+            pub-${{ runner.os }}-${{ steps.flutter.outputs.VERSION }}-
+
+      # Downloads the conformance server's whole build graph, which includes
+      # the root module's dependencies through the replace directive.
+      - name: Download Go modules for the conformance server
+        working-directory: crdt-dart/tool/conformance_server
+        run: go mod download
+
+      - name: Resolve
+        run: dart pub get
+
+      - name: Format
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze
+        run: dart analyze --fatal-infos
+
+      # The report goes to RUNNER_TEMP so it never lands in the package tree,
+      # where pub would pack it into the archive the dry run builds.
+      - name: Test
+        run: dart test --file-reporter "json:$RUNNER_TEMP/test-results.json"
+
+      # The conformance tests skip when they cannot start the Go server, which
+      # is right on a laptop without Go and wrong here. Select them by suite
+      # path (every file under test/conformance/) and fail unless every
+      # *_test.dart file there ran at least one test, none failed, and none
+      # skipped for a reason other than the documented late-stamp limit. The
+      # file list comes from the directory, so adding a suite needs no edit
+      # here, while deleting one makes the check fail.
+      #
+      # LATE_STAMP_SKIP must equal, character for character, the skip reason in
+      # test/conformance/convergence_test.dart. That exemption goes away when
+      # the server fix for late-stamped merges lands (xraph/grove#37) and the
+      # test is un-skipped: delete the variable and the "allowed" branch then.
+      - name: Conformance tests ran
+        env:
+          # Adding a suite needs no edit; removing one means lowering this on purpose.
+          MIN_CONFORMANCE_SUITES: '4'
+          LATE_STAMP_SKIP: >-
+            grove v1.7.0 limitation, not changed by fix/crdt-sync-defects: a pull returns the rows whose stored HLC is past the cursor, so a change pushed with an older stamp than a device has already synced past is never delivered to it (the server merges older stamps into set, list, text and document rows without moving the row HLC, and stores a counter row per node). Run with --run-skipped to see B stay at 7.
+        run: |
+          shopt -s nullglob
+          suites=$(printf '%s\n' test/conformance/*_test.dart | jq -R -s -c 'split("\n") | map(select(. != ""))')
+          count=$(echo "$suites" | jq 'length')
+          if [ "$count" -lt "$MIN_CONFORMANCE_SUITES" ]; then
+            echo "::error::found $count conformance test files under test/conformance/, expected at least $MIN_CONFORMANCE_SUITES"
+            exit 1
+          fi
+          results=$(jq -r -s --arg late "$LATE_STAMP_SKIP" --argjson suites "$suites" '
+            . as $events
+            | ([ $events[] | select(.type == "suite") | {key: (.suite.id | tostring), value: .suite.path} ] | from_entries) as $paths
+            | ([ $events[] | select(.type == "testDone") | {key: (.testID | tostring), value: .} ] | from_entries) as $done
+            | [ $events[]
+                | select(.type == "testStart" and (($paths[(.test.suiteID | tostring)] // "") | contains("test/conformance/")))
+                | ($done[(.test.id | tostring)]) as $d
+                | select($d.hidden | not)
+                | { path: $paths[(.test.suiteID | tostring)],
+                    ok: ($d.result == "success" and ($d.skipped | not)),
+                    line: (if $d.result != "success" then "failed \(.test.name)"
+                           elif $d.skipped and (.test.metadata.skipReason == $late) then "allowed \(.test.name)"
+                           elif $d.skipped then "skipped \(.test.name) [\(.test.metadata.skipReason // "no reason")]"
+                           else "ok \(.test.name)" end) } ] as $rows
+            | $rows[].line,
+              ($suites[] | . as $s | select(([ $rows[] | select(.ok and .path == $s) ] | length) == 0) | "missing no test ran in \($s)")
+          ' "$RUNNER_TEMP/test-results.json")
+          echo "$results"
+          if ! echo "$results" | grep -q '^ok '; then
+            echo "::error::no conformance test ran"
+            exit 1
+          fi
+          if echo "$results" | grep -v -e '^ok ' -e '^allowed ' >/dev/null; then
+            echo "::error::a conformance test failed, was skipped without the documented reason, or a conformance file ran no test"
+            exit 1
+          fi
+
+      # This package is marked publish_to: none until its first release. Strip
+      # the line on the runner copy so the dry run validates it as a publishable
+      # package. The step is defensive: pub 3.13.4 may not need it, because its
+      # dry run passed with the line left in.
+      - name: Publish dry run
+        run: |
+          sed -i '/^publish_to: none$/d' pubspec.yaml
+          # pub warns (and --dry-run exits 65) on checked-in files modified in
+          # git; this rewrite is deliberate and lives only on the runner.
+          git update-index --assume-unchanged pubspec.yaml
+          dart pub publish --dry-run

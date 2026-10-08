@@ -1,0 +1,1248 @@
+[
+  {
+    "name": "hlc_zero",
+    "type": "HLC",
+    "json": {
+      "ts": "0",
+      "c": 0,
+      "node": ""
+    }
+  },
+  {
+    "name": "hlc_big",
+    "type": "HLC",
+    "json": {
+      "ts": "1712345678901234567",
+      "c": 3,
+      "node": "node-a"
+    }
+  },
+  {
+    "name": "change_lww",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "title",
+      "crdt_type": "lww",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "value": "Hello \u003cb\u003e"
+    }
+  },
+  {
+    "name": "change_lww_null_value",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "title",
+      "crdt_type": "lww",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "value": null
+    }
+  },
+  {
+    "name": "change_tombstone_pushed",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "",
+      "crdt_type": "lww",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "tombstone": true
+    }
+  },
+  {
+    "name": "change_tombstone_pulled",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "_tombstone",
+      "crdt_type": "",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "tombstone": true
+    }
+  },
+  {
+    "name": "change_counter",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "views",
+      "crdt_type": "counter",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "counter_delta": {
+        "inc": 7,
+        "dec": 2
+      }
+    }
+  },
+  {
+    "name": "change_set_add",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "tags",
+      "crdt_type": "set",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "set_op": {
+        "op": "add",
+        "elements": [
+          "a\u003cb",
+          {
+            "k": 1
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "change_set_remove_tags",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "tags",
+      "crdt_type": "set",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "set_op": {
+        "op": "remove",
+        "elements": [
+          "x"
+        ],
+        "tags": [
+          {
+            "node": "node-b",
+            "hlc": {
+              "ts": "5",
+              "c": 0,
+              "node": "node-b"
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "change_list_insert",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "items",
+      "crdt_type": "list",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "list_op": {
+        "op": "insert",
+        "node_id": {
+          "ts": "10",
+          "c": 0,
+          "node": "node-a"
+        },
+        "parent_id": {
+          "ts": "0",
+          "c": 0,
+          "node": ""
+        },
+        "value": {
+          "n": 1
+        }
+      }
+    }
+  },
+  {
+    "name": "change_list_delete",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "items",
+      "crdt_type": "list",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "list_op": {
+        "op": "delete",
+        "node_id": {
+          "ts": "10",
+          "c": 0,
+          "node": "node-a"
+        },
+        "parent_id": {
+          "ts": "0",
+          "c": 0,
+          "node": ""
+        }
+      }
+    }
+  },
+  {
+    "name": "change_text_insert",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "body",
+      "crdt_type": "text",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "text_op": {
+        "op": "insert",
+        "ref": {
+          "origin": {
+            "ts": "0",
+            "c": 0,
+            "node": ""
+          },
+          "offset": 0
+        },
+        "origin": {
+          "ts": "1712345678901234567",
+          "c": 3,
+          "node": "node-a"
+        },
+        "content": "héllo 😀"
+      }
+    }
+  },
+  {
+    "name": "change_text_format",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "body",
+      "crdt_type": "text",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "text_op": {
+        "op": "format",
+        "ref": {
+          "origin": {
+            "ts": "0",
+            "c": 0,
+            "node": ""
+          },
+          "offset": 0
+        },
+        "origin": {
+          "ts": "0",
+          "c": 0,
+          "node": ""
+        },
+        "spans": [
+          {
+            "origin": {
+              "ts": "1712345678901234567",
+              "c": 3,
+              "node": "node-a"
+            },
+            "start": 0,
+            "length": 2
+          }
+        ],
+        "attrs": {
+          "bold": true
+        }
+      }
+    }
+  },
+  {
+    "name": "change_document_path",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "meta",
+      "crdt_type": "document",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "value": {
+        "path": "address.city",
+        "value": "Lagos"
+      }
+    }
+  },
+  {
+    "name": "change_with_state",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "tags",
+      "crdt_type": "set",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "state": {
+        "type": "set",
+        "hlc": {
+          "ts": "2",
+          "c": 0,
+          "node": "a"
+        },
+        "node_id": "a",
+        "value": [
+          {
+            "k": 1
+          }
+        ],
+        "set_state": {
+          "entries": {
+            "\"a\\u003cb\"": [
+              {
+                "node": "a",
+                "hlc": {
+                  "ts": "1",
+                  "c": 0,
+                  "node": "a"
+                }
+              }
+            ],
+            "{\"k\":1}": [
+              {
+                "node": "a",
+                "hlc": {
+                  "ts": "2",
+                  "c": 0,
+                  "node": "a"
+                }
+              }
+            ]
+          },
+          "removed": {
+            "\"a\\u003cb\"|a:HLC{ts:1 c:0 node:a}": true
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "field_lww",
+    "type": "FieldState",
+    "json": {
+      "type": "lww",
+      "hlc": {
+        "ts": "1",
+        "c": 0,
+        "node": "a"
+      },
+      "node_id": "a",
+      "value": "Hello"
+    }
+  },
+  {
+    "name": "field_counter",
+    "type": "FieldState",
+    "json": {
+      "type": "counter",
+      "hlc": {
+        "ts": "3",
+        "c": 0,
+        "node": "b"
+      },
+      "node_id": "b",
+      "counter_state": {
+        "inc": {
+          "a": 5
+        },
+        "dec": {
+          "b": 2
+        }
+      }
+    }
+  },
+  {
+    "name": "field_set",
+    "type": "FieldState",
+    "json": {
+      "type": "set",
+      "hlc": {
+        "ts": "2",
+        "c": 0,
+        "node": "a"
+      },
+      "node_id": "a",
+      "value": [
+        {
+          "k": 1
+        }
+      ],
+      "set_state": {
+        "entries": {
+          "\"a\\u003cb\"": [
+            {
+              "node": "a",
+              "hlc": {
+                "ts": "1",
+                "c": 0,
+                "node": "a"
+              }
+            }
+          ],
+          "{\"k\":1}": [
+            {
+              "node": "a",
+              "hlc": {
+                "ts": "2",
+                "c": 0,
+                "node": "a"
+              }
+            }
+          ]
+        },
+        "removed": {
+          "\"a\\u003cb\"|a:HLC{ts:1 c:0 node:a}": true
+        }
+      }
+    }
+  },
+  {
+    "name": "field_list",
+    "type": "FieldState",
+    "json": {
+      "type": "list",
+      "hlc": {
+        "ts": "2",
+        "c": 0,
+        "node": "a"
+      },
+      "node_id": "a",
+      "value": [
+        "y"
+      ],
+      "list_state": {
+        "nodes": {
+          "HLC{ts:1 c:0 node:a}": {
+            "id": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "node_id": "a",
+            "parent_id": {
+              "ts": "0",
+              "c": 0,
+              "node": ""
+            },
+            "value": "x",
+            "tombstone": true
+          },
+          "HLC{ts:2 c:0 node:a}": {
+            "id": {
+              "ts": "2",
+              "c": 0,
+              "node": "a"
+            },
+            "node_id": "a",
+            "parent_id": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "value": "y"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "field_document",
+    "type": "FieldState",
+    "json": {
+      "type": "document",
+      "hlc": {
+        "ts": "2",
+        "c": 0,
+        "node": "a"
+      },
+      "node_id": "a",
+      "value": {
+        "address": {
+          "city": "Lagos"
+        },
+        "views": 3
+      },
+      "doc_state": {
+        "fields": {
+          "address.city": {
+            "type": "lww",
+            "hlc": {
+              "ts": "1",
+              "c": 0,
+              "node": "a"
+            },
+            "node_id": "a",
+            "value": "Lagos"
+          },
+          "views": {
+            "type": "counter",
+            "hlc": {
+              "ts": "2",
+              "c": 0,
+              "node": "a"
+            },
+            "node_id": "a",
+            "counter_state": {
+              "inc": {
+                "a": 3
+              },
+              "dec": {}
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "field_text",
+    "type": "FieldState",
+    "json": {
+      "type": "text",
+      "hlc": {
+        "ts": "11",
+        "c": 0,
+        "node": "a"
+      },
+      "node_id": "a",
+      "value": "hlo",
+      "text_state": {
+        "frags": {
+          "HLC{ts:10 c:0 node:a}": [
+            {
+              "origin": {
+                "ts": "10",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 0,
+              "content": "h",
+              "length": 1,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "attrs": {
+                "bold": {
+                  "value": true,
+                  "hlc": {
+                    "ts": "11",
+                    "c": 0,
+                    "node": "a"
+                  },
+                  "node_id": "a"
+                }
+              }
+            },
+            {
+              "origin": {
+                "ts": "10",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 1,
+              "content": "él",
+              "length": 2,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              },
+              "tombstone": true
+            },
+            {
+              "origin": {
+                "ts": "10",
+                "c": 0,
+                "node": "a"
+              },
+              "start": 3,
+              "content": "lo",
+              "length": 2,
+              "parent": {
+                "origin": {
+                  "ts": "0",
+                  "c": 0,
+                  "node": ""
+                },
+                "offset": 0
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "state_live",
+    "type": "DocumentState",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "fields": {
+        "title": {
+          "type": "lww",
+          "hlc": {
+            "ts": "1",
+            "c": 0,
+            "node": "a"
+          },
+          "node_id": "a",
+          "value": "Hello"
+        }
+      },
+      "tombstone": false,
+      "tombstone_hlc": {
+        "ts": "0",
+        "c": 0,
+        "node": ""
+      }
+    }
+  },
+  {
+    "name": "state_tombstoned",
+    "type": "DocumentState",
+    "json": {
+      "table": "documents",
+      "pk": "doc-2",
+      "fields": {},
+      "tombstone": true,
+      "tombstone_hlc": {
+        "ts": "9",
+        "c": 0,
+        "node": "b"
+      }
+    }
+  },
+  {
+    "name": "pull_request",
+    "type": "PullRequest",
+    "json": {
+      "tables": [
+        "documents"
+      ],
+      "since": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "filter": {
+        "pk_filter": [
+          "doc-1"
+        ]
+      }
+    }
+  },
+  {
+    "name": "pull_request_zero",
+    "type": "PullRequest",
+    "json": {
+      "tables": [
+        "documents"
+      ],
+      "since": {
+        "ts": "0",
+        "c": 0,
+        "node": ""
+      },
+      "node_id": "node-a"
+    }
+  },
+  {
+    "name": "pull_response_empty",
+    "type": "PullResponse",
+    "json": {
+      "changes": null,
+      "latest_hlc": {
+        "ts": "0",
+        "c": 0,
+        "node": ""
+      }
+    }
+  },
+  {
+    "name": "pull_response",
+    "type": "PullResponse",
+    "json": {
+      "changes": [
+        {
+          "table": "documents",
+          "pk": "doc-1",
+          "field": "title",
+          "crdt_type": "lww",
+          "hlc": {
+            "ts": "1712345678901234567",
+            "c": 3,
+            "node": "node-a"
+          },
+          "node_id": "node-a",
+          "value": "x"
+        }
+      ],
+      "latest_hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      }
+    }
+  },
+  {
+    "name": "push_request",
+    "type": "PushRequest",
+    "json": {
+      "changes": [
+        {
+          "table": "documents",
+          "pk": "doc-1",
+          "field": "title",
+          "crdt_type": "lww",
+          "hlc": {
+            "ts": "1712345678901234567",
+            "c": 3,
+            "node": "node-a"
+          },
+          "node_id": "node-a",
+          "value": "x"
+        }
+      ],
+      "node_id": "node-a"
+    }
+  },
+  {
+    "name": "push_response",
+    "type": "PushResponse",
+    "json": {
+      "merged": 1,
+      "latest_hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      }
+    }
+  },
+  {
+    "name": "presence_state",
+    "type": "PresenceState",
+    "json": {
+      "node_id": "node-a",
+      "topic": "documents:doc-1",
+      "data": {
+        "cursor": 3
+      },
+      "updated_at": "2026-10-04T12:00:00.12Z",
+      "expires_at": "2026-10-04T12:00:30.12Z"
+    }
+  },
+  {
+    "name": "presence_update",
+    "type": "PresenceUpdate",
+    "json": {
+      "node_id": "node-a",
+      "topic": "t",
+      "data": {
+        "cursor": 3
+      }
+    }
+  },
+  {
+    "name": "presence_update_leave",
+    "type": "PresenceUpdate",
+    "json": {
+      "node_id": "node-a",
+      "topic": "t",
+      "data": null
+    }
+  },
+  {
+    "name": "presence_event_join",
+    "type": "PresenceEvent",
+    "json": {
+      "type": "join",
+      "node_id": "node-a",
+      "topic": "t",
+      "data": {
+        "cursor": 3
+      }
+    }
+  },
+  {
+    "name": "presence_event_leave",
+    "type": "PresenceEvent",
+    "json": {
+      "type": "leave",
+      "node_id": "node-a",
+      "topic": "t"
+    }
+  },
+  {
+    "name": "presence_snapshot",
+    "type": "PresenceSnapshot",
+    "json": {
+      "topic": "t",
+      "states": [
+        {
+          "node_id": "node-a",
+          "topic": "documents:doc-1",
+          "data": {
+            "cursor": 3
+          },
+          "updated_at": "2026-10-04T12:00:00.12Z",
+          "expires_at": "2026-10-04T12:00:30.12Z"
+        }
+      ]
+    }
+  },
+  {
+    "name": "ws_pull_request",
+    "type": "WebSocketMessage",
+    "json": {
+      "type": "pull_request",
+      "payload": {
+        "tables": [
+          "documents"
+        ],
+        "since": {
+          "ts": "0",
+          "c": 0,
+          "node": ""
+        },
+        "node_id": "node-a"
+      },
+      "request_id": "r1"
+    }
+  },
+  {
+    "name": "ws_pong",
+    "type": "WebSocketMessage",
+    "json": {
+      "type": "pong",
+      "payload": null
+    }
+  },
+  {
+    "name": "ws_error",
+    "type": "WebSocketMessage",
+    "json": {
+      "type": "error",
+      "payload": {
+        "error": "crdt: inbound change hook: nope"
+      },
+      "request_id": "r2"
+    }
+  },
+  {
+    "name": "ws_subscribe",
+    "type": "WebSocketMessage",
+    "json": {
+      "type": "subscribe",
+      "payload": {
+        "tables": [
+          "documents"
+        ]
+      }
+    }
+  },
+  {
+    "name": "room",
+    "type": "Room",
+    "json": {
+      "id": "documents:doc-1",
+      "type": "document",
+      "metadata": {
+        "table": "documents"
+      },
+      "created_at": "2026-10-04T12:00:00.12Z",
+      "created_by": "node-a"
+    }
+  },
+  {
+    "name": "room_minimal",
+    "type": "Room",
+    "json": {
+      "id": "lobby",
+      "created_at": "2026-10-04T12:00:00.12Z"
+    }
+  },
+  {
+    "name": "room_info",
+    "type": "RoomInfo",
+    "json": {
+      "id": "documents:doc-1",
+      "type": "document",
+      "metadata": {
+        "table": "documents"
+      },
+      "created_at": "2026-10-04T12:00:00.12Z",
+      "created_by": "node-a",
+      "participant_count": 1,
+      "participants": [
+        {
+          "node_id": "node-a",
+          "topic": "documents:doc-1",
+          "data": {
+            "cursor": 3
+          },
+          "updated_at": "2026-10-04T12:00:00.12Z",
+          "expires_at": "2026-10-04T12:00:30.12Z"
+        }
+      ]
+    }
+  },
+  {
+    "name": "change_list_move",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "items",
+      "crdt_type": "list",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "list_op": {
+        "op": "move",
+        "node_id": {
+          "ts": "10",
+          "c": 0,
+          "node": "node-a"
+        },
+        "parent_id": {
+          "ts": "4",
+          "c": 1,
+          "node": "node-b"
+        },
+        "value": [
+          1,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "name": "change_text_delete",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "body",
+      "crdt_type": "text",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "text_op": {
+        "op": "delete",
+        "ref": {
+          "origin": {
+            "ts": "0",
+            "c": 0,
+            "node": ""
+          },
+          "offset": 0
+        },
+        "origin": {
+          "ts": "0",
+          "c": 0,
+          "node": ""
+        },
+        "spans": [
+          {
+            "origin": {
+              "ts": "1712345678901234567",
+              "c": 3,
+              "node": "node-a"
+            },
+            "start": 1,
+            "length": 3
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "change_text_insert_ref",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "body",
+      "crdt_type": "text",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "text_op": {
+        "op": "insert",
+        "ref": {
+          "origin": {
+            "ts": "1712345678901234567",
+            "c": 3,
+            "node": "node-a"
+          },
+          "offset": 2
+        },
+        "origin": {
+          "ts": "20",
+          "c": 1,
+          "node": "node-b"
+        },
+        "content": "x"
+      }
+    }
+  },
+  {
+    "name": "change_text_format_clear",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "body",
+      "crdt_type": "text",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "text_op": {
+        "op": "format",
+        "ref": {
+          "origin": {
+            "ts": "0",
+            "c": 0,
+            "node": ""
+          },
+          "offset": 0
+        },
+        "origin": {
+          "ts": "0",
+          "c": 0,
+          "node": ""
+        },
+        "spans": [
+          {
+            "origin": {
+              "ts": "1712345678901234567",
+              "c": 3,
+              "node": "node-a"
+            },
+            "start": 0,
+            "length": 1
+          }
+        ],
+        "attrs": {
+          "bold": null
+        }
+      }
+    }
+  },
+  {
+    "name": "change_counter_zero",
+    "type": "ChangeRecord",
+    "json": {
+      "table": "documents",
+      "pk": "doc-1",
+      "field": "views",
+      "crdt_type": "counter",
+      "hlc": {
+        "ts": "1712345678901234567",
+        "c": 3,
+        "node": "node-a"
+      },
+      "node_id": "node-a",
+      "counter_delta": {
+        "inc": 0,
+        "dec": 0
+      }
+    }
+  },
+  {
+    "name": "pull_request_field_filter",
+    "type": "PullRequest",
+    "json": {
+      "tables": [
+        "documents"
+      ],
+      "since": {
+        "ts": "0",
+        "c": 0,
+        "node": ""
+      },
+      "node_id": "node-a",
+      "filter": {
+        "pk_filter": [
+          "a",
+          "b"
+        ],
+        "field_filter": [
+          "title"
+        ]
+      }
+    }
+  },
+  {
+    "name": "pull_request_empty_filter",
+    "type": "PullRequest",
+    "json": {
+      "tables": [
+        "documents"
+      ],
+      "since": {
+        "ts": "0",
+        "c": 0,
+        "node": ""
+      },
+      "node_id": "node-a",
+      "filter": {}
+    }
+  },
+  {
+    "name": "presence_state_no_expiry",
+    "type": "PresenceState",
+    "json": {
+      "node_id": "node-a",
+      "topic": "t",
+      "data": null,
+      "updated_at": "2026-10-04T12:00:00.12Z",
+      "expires_at": "0001-01-01T00:00:00Z"
+    }
+  },
+  {
+    "name": "room_max_participants",
+    "type": "Room",
+    "json": {
+      "id": "r",
+      "metadata": null,
+      "max_participants": 8,
+      "created_at": "2026-10-04T12:00:00.12Z"
+    }
+  },
+  {
+    "name": "cursor_position",
+    "type": "CursorPosition",
+    "json": {
+      "x": 1.5,
+      "y": -2.25,
+      "offset": 3,
+      "line": 4,
+      "column": 5,
+      "selection_start": 1,
+      "selection_end": 6,
+      "field": "body"
+    }
+  },
+  {
+    "name": "cursor_position_zero",
+    "type": "CursorPosition",
+    "json": {}
+  },
+  {
+    "name": "participant_data",
+    "type": "ParticipantData",
+    "json": {
+      "name": "Ada",
+      "color": "#f00",
+      "avatar": "https://x/y.png",
+      "cursor": {
+        "line": 2
+      },
+      "is_typing": true,
+      "active_field": "title",
+      "status": "away",
+      "extra": {
+        "n": 2,
+        "role": "editor"
+      }
+    }
+  },
+  {
+    "name": "participant_data_minimal",
+    "type": "ParticipantData",
+    "json": {}
+  },
+  {
+    "name": "participant_data_zero_cursor",
+    "type": "ParticipantData",
+    "json": {
+      "name": "Bo",
+      "cursor": {}
+    }
+  }
+]
