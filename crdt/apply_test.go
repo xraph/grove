@@ -340,7 +340,7 @@ func TestSyncer_InboundSetOp_Persisted(t *testing.T) {
 			Tags:     []Tag{{NodeID: "a", HLC: applyHLC(10, "a")}},
 		},
 	}
-	if err := s.mergeRemoteChange(context.Background(), rm); err != nil {
+	if err := s.mergeRemoteChange(context.Background(), p.newCursorBatch(s.metadata), rm); err != nil {
 		t.Fatalf("mergeRemoteChange: %v", err)
 	}
 
