@@ -120,13 +120,16 @@ jobs:
       # test is un-skipped: delete the variable and the "allowed" branch then.
       - name: Conformance tests ran
         env:
+          # Adding a suite needs no edit; removing one means lowering this on purpose.
+          MIN_CONFORMANCE_SUITES: '4'
           LATE_STAMP_SKIP: >-
             grove v1.7.0 limitation, not changed by fix/crdt-sync-defects: a pull returns the rows whose stored HLC is past the cursor, so a change pushed with an older stamp than a device has already synced past is never delivered to it (the server merges older stamps into set, list, text and document rows without moving the row HLC, and stores a counter row per node). Run with --run-skipped to see B stay at 7.
         run: |
           shopt -s nullglob
           suites=$(printf '%s\n' test/conformance/*_test.dart | jq -R -s -c 'split("\n") | map(select(. != ""))')
-          if [ "$suites" = "[]" ]; then
-            echo "::error::no conformance test files under test/conformance/"
+          count=$(echo "$suites" | jq 'length')
+          if [ "$count" -lt "$MIN_CONFORMANCE_SUITES" ]; then
+            echo "::error::found $count conformance test files under test/conformance/, expected at least $MIN_CONFORMANCE_SUITES"
             exit 1
           fi
           results=$(jq -r -s --arg late "$LATE_STAMP_SKIP" --argjson suites "$suites" '
