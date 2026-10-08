@@ -519,6 +519,67 @@ export function textFormat(
   return op;
 }
 
+// --- Addressing for undo ---
+
+/**
+ * The address range an insert op created: where applyTextOp put its
+ * characters. Undoing the insert tombstones exactly this range, so text
+ * other replicas typed around it is left alone.
+ */
+export function textInsertSpan(op: TextOperation, clock: HLC): TextSpan | null {
+  if (op.op !== "insert" || !op.content) return null;
+  const origin = isZeroHLC(op.origin) ? clock : op.origin!;
+  let start = 0;
+  if (op.ref && !isHeadRef(op.ref) && textOriginKey(op.ref.origin) === textOriginKey(origin)) {
+    start = op.ref.offset + 1;
+  }
+  return { origin, start, length: runes(op.content).length };
+}
+
+/** One document-order run of characters inside some spans. */
+export interface TextSpanSegment {
+  span: TextSpan;
+  content: string;
+  /** Attribute values on the run, null where an attribute is cleared. */
+  attrs: Record<string, unknown>;
+}
+
+/**
+ * The runs of `state` that fall inside `spans`, in document order. With
+ * `visibleOnly`, tombstoned characters are skipped. Undo reads these from
+ * the state before an op to put back what a delete removed or what a
+ * format overwrote.
+ */
+export function textSpanSegments(
+  state: TextState,
+  spans: TextSpan[],
+  visibleOnly: boolean
+): TextSpanSegment[] {
+  const out: TextSpanSegment[] = [];
+  for (const seg of textWalk(state)) {
+    if (visibleOnly && !segVisible(seg)) continue;
+    const key = textOriginKey(seg.frag.origin);
+    const segStart = seg.frag.start + seg.from;
+    const segEnd = seg.frag.start + seg.to;
+    for (const sp of spans) {
+      if (textOriginKey(sp.origin) !== key) continue;
+      const from = Math.max(segStart, sp.start);
+      const to = Math.min(segEnd, sp.start + sp.length);
+      if (from >= to) continue;
+      const attrs: Record<string, unknown> = {};
+      for (const [k, a] of Object.entries(seg.frag.attrs ?? {})) {
+        attrs[k] = a.value ?? null;
+      }
+      out.push({
+        span: { origin: seg.frag.origin, start: from, length: to - from },
+        content: substringRunes(seg.frag.content, from - seg.frag.start, to - seg.frag.start),
+        attrs,
+      });
+    }
+  }
+  return out;
+}
+
 // --- State-based merge (mirrors Go MergeText) ---
 
 function subFragment(f: TextFragment, from: number, to: number): TextFragment {

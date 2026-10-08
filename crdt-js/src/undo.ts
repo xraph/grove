@@ -17,6 +17,18 @@ export interface UndoEntry {
   previousState: FieldState | null;
   /** Timestamp of the operation (Date.now()). */
   timestamp: number;
+  /**
+   * Set when the entry stands for several changes applied in order (an
+   * undo that needed more than one compensating change). Inverting the
+   * entry inverts each of them, last first. Empty when the inversion had
+   * nothing to do.
+   */
+  group?: UndoEntry[];
+  /**
+   * Set on the entry an undone record delete leaves on the redo stack:
+   * redoing it deletes the record again.
+   */
+  undelete?: boolean;
 }
 
 /**
@@ -103,6 +115,32 @@ export class UndoManager {
       this.undoStack.push(entry);
     }
     return entry;
+  }
+
+  /**
+   * Pop the newest undo entry without touching the redo stack. The store
+   * uses this with pushRedo() to swap in the compensating entry it built.
+   */
+  popUndo(): UndoEntry | null {
+    return this.undoStack.pop() ?? null;
+  }
+
+  /** Pop the newest redo entry without touching the undo stack. */
+  popRedo(): UndoEntry | null {
+    return this.redoStack.pop() ?? null;
+  }
+
+  /** Push onto the undo stack without clearing redo history. */
+  pushUndo(entry: UndoEntry): void {
+    this.undoStack.push(entry);
+    if (this.undoStack.length > this.maxHistory) {
+      this.undoStack.splice(0, this.undoStack.length - this.maxHistory);
+    }
+  }
+
+  /** Push onto the redo stack. */
+  pushRedo(entry: UndoEntry): void {
+    this.redoStack.push(entry);
   }
 
   /** Clear all undo and redo history. */

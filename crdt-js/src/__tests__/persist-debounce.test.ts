@@ -55,10 +55,11 @@ describe("persistence debounce", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it("does not re-persist pending changes on a document-only flush (undo)", async () => {
-    // undo() also only touches document state. Mirrors the drain test but
-    // through the explicit flushPersistence() escape hatch instead of the
-    // timer, since flushPersistence gates on the same dirty flag.
+  it("does not re-persist pending changes on a document-only flush (applyChanges)", async () => {
+    // Mirrors the drain test but through the explicit flushPersistence()
+    // escape hatch instead of the timer, since flushPersistence gates on
+    // the same dirty flag. (undo() used to serve here; it now queues a
+    // compensating change, so it is no longer document-only.)
     const storage = new MemoryStorage();
     const store = new CRDTStore("n1", new HybridClock("n1"), storage, {
       persistDebounceMs: 10,
@@ -68,7 +69,10 @@ describe("persistence debounce", () => {
     await store.flushPersistence(); // clears the dirty flag from setField
 
     const spy = vi.spyOn(storage, "savePendingChanges");
-    store.undo();
+    store.applyChanges([{
+      table: "t", pk: "p", field: "f", crdt_type: "lww",
+      hlc: { ts: 1, c: 0, node: "remote" }, node_id: "remote", value: "hi",
+    }]);
     await store.flushPersistence();
     expect(spy).not.toHaveBeenCalled();
   });

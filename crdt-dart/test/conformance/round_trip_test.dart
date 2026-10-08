@@ -131,7 +131,9 @@ void main() {
       final done = Completer<void>();
       final sub = ws.subscribe(const StreamConfig(tables: ['notes']));
       sub.on((e) {
+        // The server sends each poll's batch as one `changes` frame.
         if (e is StreamChange) streamed.add(e.change.pk);
+        if (e is StreamChanges) streamed.addAll(e.changes.map((c) => c.pk));
         if (streamed.containsAll(['n1', 'n2']) && !done.isCompleted) {
           done.complete();
         }

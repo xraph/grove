@@ -218,6 +218,8 @@ type SyncHook interface {
 | `BeforeOutboundChange` | Before pushing a local change to peers | Modified change, `nil` to skip, error to abort |
 | `BeforeOutboundRead` | Before returning changes in a pull response | Filtered/modified slice |
 
+On the server, `BeforeInboundChange` runs for every change in a push before any of them merges. Returning an error rejects the whole push. Nothing is applied, `HandlePush` returns an error that matches `crdt.ErrPushRejected`, and the HTTP handlers answer 422 with the error text. Validation failures are handled the same way. If you serve pushes from your own handler, `crdt.PushErrorStatus(err)` gives you the status. Returning `nil` is different: only that change is skipped, the rest merge, and the response's `merged` count comes out lower.
+
 ### BaseSyncHook
 
 Embed `BaseSyncHook` and override only the methods you need:

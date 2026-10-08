@@ -555,6 +555,17 @@ func (f *shadowFake) query(_ context.Context, query string, args ...any) (Rows, 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	rows := f.tables[f.tableOf(query)]
+	if strings.Contains(query, "hlc_counter = $2") {
+		// Every row at exactly one HLC (timestamp, counter), unlimited.
+		ts, counter := args[0].(int64), args[1].(uint32)
+		var out []mockRow
+		for _, r := range rows {
+			if r.hlcTS == ts && r.hlcCount == counter {
+				out = append(out, r)
+			}
+		}
+		return &mockRows{rows: out}, nil
+	}
 	if !strings.Contains(query, "hlc_ts > $1") {
 		return &mockRows{}, nil // ReadState: start every push from empty state
 	}
@@ -649,4 +660,117 @@ func (h *pkRejectHook) BeforeInboundChange(_ context.Context, c *ChangeRecord) (
 		return nil, errors.New("pk not writable")
 	}
 	return c, nil
+}
+
+func TestSyncController_SubscribePresence_FansOutToEveryConsumer(t *testing.T) {
+	ctrl := NewSyncController(newTestPlugin(), WithPresenceEnabled(true))
+	defer ctrl.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := ctrl.SubscribePresence(ctx)
+	b := ctrl.SubscribePresence(ctx)
+
+	_, err := ctrl.HandlePresenceUpdate(ctx, &PresenceUpdate{
+		NodeID: "n1", Topic: "room", Data: json.RawMessage(`{"x":1}`),
+	})
+	require.NoError(t, err)
+
+	for name, ch := range map[string]<-chan PresenceEvent{"a": a, "b": b} {
+		select {
+		case ev := <-ch:
+			assert.Equal(t, "n1", ev.NodeID, name)
+		case <-time.After(time.Second):
+			t.Fatalf("consumer %s never received the presence event", name)
+		}
+	}
+}
+
+func TestNewHTTPHandler_Push_DeterministicRejectionIs422(t *testing.T) {
+	ok := ChangeRecord{
+		Table: "docs", PK: "1", Field: "title", CRDTType: TypeLWW, NodeID: "remote",
+		HLC: HLC{Timestamp: time.Now().UnixNano(), NodeID: "remote"}, Value: json.RawMessage(`"v"`),
+	}
+	unknownType := ok
+	unknownType.CRDTType = "nope"
+
+	for _, tc := range []struct {
+		name    string
+		opts    []SyncControllerOption
+		changes []ChangeRecord
+		wantErr string
+	}{
+		{"hook rejection", []SyncControllerOption{WithControllerSyncHook(&errorInboundHook{})}, []ChangeRecord{ok}, "crdt: inbound change hook: inbound rejected"},
+		{"validation", []SyncControllerOption{WithValidation(DefaultValidationConfig())}, []ChangeRecord{unknownType}, "crdt: change[0]: crdt: unknown crdt type: nope"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(NewHTTPHandler(newTestPluginWithChanges(nil), tc.opts...))
+			defer server.Close()
+
+			body, _ := json.Marshal(PushRequest{Changes: tc.changes, NodeID: "remote"})
+			resp, err := http.Post(server.URL+"/push", "application/json", bytes.NewReader(body)) //nolint:noctx // test
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.Equal(t, http.StatusUnprocessableEntity, resp.StatusCode)
+			var errBody map[string]string
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&errBody))
+			assert.Equal(t, tc.wantErr, errBody["error"])
+		})
+	}
+}
+
+func TestSyncController_HandlePull_SharedHLCAtPageEdgeNotSkipped(t *testing.T) {
+	// One write stamps every field (and every row of a bulk statement) with
+	// the same HLC, so the page can end in the middle of a run of rows that
+	// share it. The cursor is (timestamp, counter), so resuming after the
+	// last row returned would skip the rest of the run.
+	fake := newShadowFake()
+	rows := lwwRows(DefaultChangesLimit+100, 1_000)
+	for i := DefaultChangesLimit - 50; i < len(rows); i++ {
+		rows[i].hlcTS = 999_999
+	}
+	fake.tables["docs"] = rows
+	ctrl := NewSyncController(fake.plugin())
+
+	seen := map[string]bool{}
+	since := HLC{}
+	for range 5 {
+		resp, err := ctrl.HandlePull(context.Background(), &PullRequest{
+			Tables: []string{"docs"}, Since: since, NodeID: "client",
+		})
+		require.NoError(t, err)
+		for _, c := range resp.Changes {
+			seen[c.PK] = true
+		}
+		if len(resp.Changes) == 0 {
+			break
+		}
+		since = resp.LatestHLC
+	}
+
+	assert.Len(t, seen, DefaultChangesLimit+100, "every row sharing the edge HLC must arrive")
+}
+
+func TestSyncController_HandlePull_PageEdgeKeepsEveryNodesRow(t *testing.T) {
+	// The shadow key is (pk, field, node): two nodes' rows for one field
+	// can share the edge position, one inside the page and one past it.
+	fake := newShadowFake()
+	rows := lwwRows(DefaultChangesLimit+1, 1_000)
+	inside, past := &rows[DefaultChangesLimit-1], &rows[DefaultChangesLimit]
+	past.hlcTS = inside.hlcTS
+	past.pkHash, past.fieldName = inside.pkHash, inside.fieldName
+	past.nodeID = "b"
+	fake.tables["docs"] = rows
+	ctrl := NewSyncController(fake.plugin())
+
+	resp, err := ctrl.HandlePull(context.Background(), &PullRequest{Tables: []string{"docs"}, NodeID: "client"})
+	require.NoError(t, err)
+	nodes := map[string]bool{}
+	for _, c := range resp.Changes {
+		if c.PK == inside.pkHash {
+			nodes[c.NodeID] = true
+		}
+	}
+	assert.Equal(t, map[string]bool{"a": true, "b": true}, nodes, "both nodes' rows at the edge position")
 }

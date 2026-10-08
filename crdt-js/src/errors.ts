@@ -56,9 +56,10 @@ export class CRDTError extends Error {
  * network-level failure, e.g. DNS or a dropped connection), which is
  * typically transient too.
  *
- * This is the single source of truth for HTTP retryability — both
- * `TransportError`'s constructor (below) and `HttpTransport`'s own retry
- * loop (`src/transport.ts`) call this instead of encoding the rule twice.
+ * This is the single source of truth for HTTP retryability. `TransportError`'s
+ * constructor (below) applies it, and `HttpTransport`'s retry loop reads the
+ * resulting `retryable` flag, so a push rejection that arrives as a 500 is
+ * not retried either.
  */
 export function isRetryableStatus(status?: number): boolean {
   return (
@@ -70,8 +71,31 @@ export function isRetryableStatus(status?: number): boolean {
 }
 
 /**
+ * The Go server's error text for a push it refused deterministically:
+ * validation (`crdt: change[i]: ...`, `crdt: push exceeds max changes`,
+ * `crdt: push node_id is required`) or a BeforeInboundChange hook
+ * (`crdt: inbound change hook: ...`).
+ */
+const PUSH_REJECTION_TEXT =
+  /crdt: (inbound change hook:|change\[\d+\]:|push exceeds max changes|push node_id is required)/;
+
+/**
+ * Whether a failed push was refused deterministically by the server.
+ * Nothing from that push was merged, and resending the same changes gets
+ * the same answer, so it must not be retried as is. Current Go servers
+ * answer with 422. Older ones answer 500 and WebSocket error frames carry
+ * no status, so for those the Go error text decides.
+ */
+export function isPushRejection(err: unknown): boolean {
+  if (!(err instanceof CRDTError)) return false;
+  if (err.statusCode === 422) return true;
+  return (err.statusCode === undefined || err.statusCode === 500) &&
+    PUSH_REJECTION_TEXT.test(err.message);
+}
+
+/**
  * Error thrown by transport operations.
- * Extends CRDTError for backward compatibility — existing
+ * Extends CRDTError for backward compatibility. Existing
  * `catch (e) { if (e instanceof CRDTError) }` patterns still work.
  */
 export class TransportError extends CRDTError {
@@ -83,6 +107,7 @@ export class TransportError extends CRDTError {
       isRetryableStatus(statusCode)
     );
     this.name = "TransportError";
+    if (isPushRejection(this)) this.retryable = false;
   }
 }
 

@@ -3,6 +3,7 @@ package crdt
 import (
 	"encoding/json"
 	"sort"
+	"strings"
 )
 
 // ORSetState holds the state for an Observed-Remove Set with add-wins
@@ -120,11 +121,12 @@ func (s *ORSetState) hasActiveTags(elem string, tags []Tag) bool {
 // idempotent.
 func MergeSet(local, remote *ORSetState) *ORSetState {
 	if local == nil {
-		return remote
+		return canonicalORSet(remote)
 	}
 	if remote == nil {
-		return local
+		return canonicalORSet(local)
 	}
+	local, remote = canonicalORSet(local), canonicalORSet(remote)
 
 	merged := NewORSetState()
 
@@ -201,5 +203,72 @@ func SetFromFieldState(fs *FieldState) *ORSetState {
 	if fs.SetState == nil {
 		return NewORSetState()
 	}
-	return fs.SetState
+	return canonicalORSet(fs.SetState)
+}
+
+// canonicalORSet returns s with every element key in the form
+// ORSetState.Add uses (json.Marshal bytes). States written before keys were
+// canonical can hold an element under the raw bytes a client sent, such as
+// "a<b" or an object with unsorted fields; left alone, that element would
+// show up twice next to its canonical twin and a remove could miss it.
+// Removed markers are copied to the new key so a removed element stays
+// removed. Returns s itself when nothing needs re-keying.
+func canonicalORSet(s *ORSetState) *ORSetState {
+	if s == nil {
+		return nil
+	}
+	var rekey map[string]string
+	for k := range s.Entries {
+		if !mayNeedRekey(k) {
+			continue
+		}
+		c, err := canonicalElementKey(json.RawMessage(k))
+		if err != nil || c == k {
+			continue
+		}
+		if rekey == nil {
+			rekey = make(map[string]string)
+		}
+		rekey[k] = c
+	}
+	if rekey == nil {
+		return s
+	}
+
+	out := NewORSetState()
+	for k, tags := range s.Entries {
+		if c, ok := rekey[k]; ok {
+			k = c
+		}
+		out.Entries[k] = append(out.Entries[k], tags...)
+	}
+	for k, tags := range out.Entries {
+		out.Entries[k] = deduplicateTags(tags)
+	}
+	for k, v := range s.Removed {
+		if v {
+			out.Removed[k] = true
+		}
+	}
+	for old, c := range rekey {
+		for _, t := range s.Entries[old] {
+			if s.Removed[removedKey(old, t)] {
+				out.Removed[removedKey(c, t)] = true
+			}
+		}
+	}
+	return out
+}
+
+// mayNeedRekey is a cheap filter for canonicalORSet: json.Marshal output
+// never holds a raw <, > or &, U+2028 or U+2029, and only objects can have
+// their fields out of order.
+func mayNeedRekey(key string) bool {
+	return strings.ContainsFunc(key, func(r rune) bool {
+		switch r {
+		case '<', '>', '&', '{', 0x2028, 0x2029:
+			return true
+		}
+		return false
+	})
 }

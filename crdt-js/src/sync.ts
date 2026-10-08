@@ -8,6 +8,13 @@
 import type { ChangeRecord, HLC, SyncReport } from "./types.js";
 import type { CRDTClient } from "./client.js";
 import type { CRDTStore } from "./store.js";
+import { isPushRejection } from "./errors.js";
+
+/** A pending change the server refused, with the error it answered. */
+export interface PushRejection {
+  change: ChangeRecord;
+  error: Error;
+}
 
 /**
  * Drives one pull -> apply -> push -> clear cycle, on a timer or on demand.
@@ -27,6 +34,7 @@ export class SyncEngine {
   private inFlight: Promise<SyncReport> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private onlineHandler: (() => void) | null = null;
+  private rejectionHandlers = new Set<(rejections: PushRejection[]) => void>();
 
   constructor(
     private client: CRDTClient,
@@ -36,6 +44,18 @@ export class SyncEngine {
   /** Timestamp of the last successful sync, ms since epoch. */
   get lastSyncTime(): number | null {
     return this._lastSyncTime;
+  }
+
+  /**
+   * Notified when the server refuses pending changes (a validation failure
+   * or a hook rejection). Those changes are dropped from the pending queue,
+   * because resending them would only be refused again and would hold up
+   * every change queued behind them. They stay applied locally, so surface
+   * them to the user. Returns an unsubscribe function.
+   */
+  onPushRejected(handler: (rejections: PushRejection[]) => void): () => void {
+    this.rejectionHandlers.add(handler);
+    return () => { this.rejectionHandlers.delete(handler); };
   }
 
   /** Server HLC watermark from the last successful pull. */
@@ -92,16 +112,68 @@ export class SyncEngine {
       // beforePush hook itself.
       const toPush = plugins.dispatchBeforePush(snapshot);
       if (toPush && toPush.length > 0) {
-        const resp = await this.client.push(toPush);
-        report.pushed = toPush.length;
-        report.merged = resp.merged;
-        this.store.clearPendingChanges(snapshot);
-        plugins.dispatchAfterPush({ pushed: toPush.length, changes: toPush });
+        try {
+          const resp = await this.client.push(toPush);
+          report.pushed = toPush.length;
+          report.merged = resp.merged;
+          this.store.clearPendingChanges(snapshot);
+          plugins.dispatchAfterPush({ pushed: toPush.length, changes: toPush });
+        } catch (err) {
+          if (!isPushRejection(err)) throw err;
+          // The server merged nothing from the batch. Find out which
+          // changes it refuses by pushing them one at a time.
+          await this.isolateRejected(toPush, snapshot, report);
+        }
       }
     }
 
     this._lastSyncTime = Date.now();
     return report;
+  }
+
+  /**
+   * Push a refused batch one change at a time. Accepted changes are kept,
+   * changes refused on their own are dropped and reported. A transient
+   * failure stops the walk and leaves the rest pending for the next sync.
+   */
+  private async isolateRejected(
+    toPush: ChangeRecord[],
+    snapshot: ChangeRecord[],
+    report: SyncReport
+  ): Promise<void> {
+    const accepted: ChangeRecord[] = [];
+    const rejections: PushRejection[] = [];
+    let failure: unknown = null;
+
+    for (const change of toPush) {
+      try {
+        const resp = await this.client.push([change]);
+        accepted.push(change);
+        report.merged += resp.merged;
+      } catch (err) {
+        if (!isPushRejection(err)) {
+          failure = err;
+          break;
+        }
+        rejections.push({ change, error: err as Error });
+      }
+    }
+
+    report.pushed = accepted.length;
+    report.rejected = rejections.length;
+    // A clean walk settles the whole snapshot, matching the success path
+    // (see the beforePush note on this class). After a transient failure
+    // only what was settled leaves the queue.
+    this.store.clearPendingChanges(
+      failure === null ? snapshot : [...accepted, ...rejections.map((r) => r.change)]
+    );
+    if (accepted.length > 0) {
+      this.store.pluginManager.dispatchAfterPush({ pushed: accepted.length, changes: accepted });
+    }
+    if (rejections.length > 0) {
+      for (const handler of this.rejectionHandlers) handler(rejections);
+    }
+    if (failure !== null) throw failure;
   }
 
   /**

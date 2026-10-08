@@ -62,6 +62,11 @@ describe("offline queue", () => {
     expect(doc?.c).toBeUndefined();
     expect(doc?.a).toBe(1);
     expect(doc?.b).toBe(2);
+    // Undo writes a compensating change, so it needs room in the queue too,
+    // and a refused undo keeps its entry.
+    expect(() => store.undo()).toThrow(CRDTError);
+    expect(store.canUndo).toBe(true);
+    store.clearPendingChanges(); // as a push would
     // Nor in undo history: only "a" and "b" were ever recorded, so exactly
     // two undos succeed and a third finds nothing.
     expect(store.undo()).toBe(true); // undoes "b"

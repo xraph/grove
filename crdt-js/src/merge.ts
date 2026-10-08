@@ -105,6 +105,117 @@ export function counterValue(state: PNCounterState): number {
 // --- OR-Set ---
 
 /**
+ * The key an OR-Set element is stored under: the bytes Go's json.Marshal
+ * produces for the same value, so a remove matches an element whichever
+ * side added it. Object fields are sorted, and <, >, &, U+2028 and U+2029
+ * are escaped, which JSON.stringify does not do.
+ */
+export function setElementKey(elem: unknown): string {
+  return goMarshal(elem);
+}
+
+function goMarshal(v: unknown): string {
+  if (v === null || v === undefined || typeof v === "function" || typeof v === "symbol") {
+    return "null";
+  }
+  if (typeof (v as { toJSON?: unknown }).toJSON === "function") {
+    return goMarshal((v as { toJSON: () => unknown }).toJSON());
+  }
+  if (Array.isArray(v)) {
+    return "[" + v.map(goMarshal).join(",") + "]";
+  }
+  if (typeof v === "object") {
+    const obj = v as Record<string, unknown>;
+    const keys = Object.keys(obj)
+      .filter((k) => obj[k] !== undefined && typeof obj[k] !== "function")
+      .sort(compareUTF8);
+    return "{" + keys.map((k) => goEscape(JSON.stringify(k)) + ":" + goMarshal(obj[k])).join(",") + "}";
+  }
+  return goEscape(JSON.stringify(v));
+}
+
+function goEscape(json: string): string {
+  return json.replace(/[<>&\u2028\u2029]/g, (ch) =>
+    "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"));
+}
+
+/**
+ * Compare strings by their UTF-8 bytes, the order Go's sort.Strings uses.
+ * Plain JS comparison orders UTF-16 code units, which puts characters
+ * above U+FFFF before U+E000 to U+FFFF.
+ */
+export function compareUTF8(a: string, b: string): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const x = a.charCodeAt(i);
+    const y = b.charCodeAt(i);
+    if (x !== y) return utf8Rank(x) - utf8Rank(y);
+  }
+  return a.length - b.length;
+}
+
+// Shift surrogates above U+E000 to U+FFFF so code units compare in code
+// point order, which is UTF-8 byte order.
+function utf8Rank(unit: number): number {
+  if (unit >= 0xd800 && unit <= 0xdfff) return unit + 0x2000;
+  if (unit >= 0xe000) return unit - 0x800;
+  return unit;
+}
+
+const canonicalCache = new WeakMap<ORSetState, ORSetState>();
+
+/**
+ * The state with every element key in setElementKey form. States written
+ * before keys were canonical can hold an element under its JSON.stringify
+ * key (such as "a<b", or an object with unsorted fields); left alone, it
+ * would show up twice next to its canonical twin and a remove could miss
+ * it. Removed markers are copied to the new key so a removed element stays
+ * removed. Returns the same object when nothing needs re-keying. Mirrors
+ * Go canonicalORSet.
+ */
+export function canonicalSetState(state: ORSetState): ORSetState {
+  const hit = canonicalCache.get(state);
+  if (hit) return hit;
+
+  let rekey: Map<string, string> | null = null;
+  for (const key of Object.keys(state.entries)) {
+    if (!MAY_NEED_REKEY.test(key)) continue;
+    let canon: string;
+    try {
+      canon = setElementKey(JSON.parse(key));
+    } catch {
+      continue;
+    }
+    if (canon !== key) (rekey ??= new Map()).set(key, canon);
+  }
+  if (!rekey) {
+    canonicalCache.set(state, state);
+    return state;
+  }
+
+  const entries: Record<string, ORSetTag[]> = {};
+  for (const [key, tags] of Object.entries(state.entries)) {
+    const k = rekey.get(key) ?? key;
+    entries[k] = [...(entries[k] ?? []), ...tags];
+  }
+  for (const k of Object.keys(entries)) entries[k] = deduplicateTags(entries[k]);
+  const removed: Record<string, boolean> = { ...state.removed };
+  for (const [old, canon] of rekey) {
+    for (const t of state.entries[old]) {
+      if (state.removed[removedKey(old, t)]) removed[removedKey(canon, t)] = true;
+    }
+  }
+  const out = { entries, removed };
+  canonicalCache.set(state, out);
+  canonicalCache.set(out, out);
+  return out;
+}
+
+// setElementKey output never holds a raw <, > or &, U+2028 or U+2029, and
+// only objects can have their fields out of order.
+const MAY_NEED_REKEY = new RegExp("[<>&{" + String.fromCharCode(0x2028, 0x2029) + "]");
+
+/**
  * Compute the deterministic tag key matching Go's tagKey() from set.go.
  * Format: "nodeID:HLC{ts:<ts> c:<c> node:<node>}"
  */
@@ -143,8 +254,10 @@ export function mergeSet(
   local: ORSetState | null,
   remote: ORSetState | null
 ): ORSetState {
-  if (local == null) return remote!;
-  if (remote == null) return local;
+  if (local == null) return canonicalSetState(remote!);
+  if (remote == null) return canonicalSetState(local);
+  local = canonicalSetState(local);
+  remote = canonicalSetState(remote);
 
   const merged = newORSetState();
 
@@ -178,8 +291,9 @@ export function mergeSet(
  * Port of ORSetState.Elements() from set.go.
  */
 export function setElements(state: ORSetState): unknown[] {
+  state = canonicalSetState(state);
   const result: unknown[] = [];
-  const keys = Object.keys(state.entries).sort();
+  const keys = Object.keys(state.entries).sort(compareUTF8);
 
   for (const key of keys) {
     const tags = state.entries[key];
@@ -481,6 +595,21 @@ export function mergeFullFieldState(
 }
 
 /**
+ * The HLC/node pair of whichever of local state or the incoming change is
+ * newer, used to stamp a field after applying an op. Mirrors Go pickNewer:
+ * a redelivered older op must not regress the field clock.
+ */
+function pickNewer(
+  local: FieldState | null,
+  change: ChangeRecord
+): { hlc: HLC; node_id: string } {
+  if (local && hlcAfter(local.hlc, change.hlc)) {
+    return { hlc: local.hlc, node_id: local.node_id };
+  }
+  return { hlc: change.hlc, node_id: change.node_id };
+}
+
+/**
  * Merge a ChangeRecord into existing FieldState.
  * Dispatches to the correct merge function based on CRDTType.
  * Mirrors Go crdt.ApplyChange.
@@ -526,14 +655,13 @@ export function mergeFieldState(
       }
       return {
         type: "counter",
-        hlc: change.hlc,
-        node_id: change.node_id,
+        ...pickNewer(local, change),
         counter_state: localCounter,
       };
     }
 
     case "set": {
-      const localSet = local?.set_state ?? newORSetState();
+      const localSet = canonicalSetState(local?.set_state ?? newORSetState());
       let entries = localSet.entries;
       let removed = localSet.removed;
 
@@ -542,7 +670,7 @@ export function mergeFieldState(
         if (op.op === "add") {
           const newTag: ORSetTag = { node: change.node_id, hlc: change.hlc };
           for (const elem of op.elements) {
-            const key = JSON.stringify(elem);
+            const key = setElementKey(elem);
             entries = withEntry(entries, key, withAppended(entries[key], newTag));
           }
         } else if (op.op === "remove") {
@@ -551,14 +679,14 @@ export function mergeFieldState(
             // Exact observed-remove: the op names the tags it saw, scoped
             // to the elements it removes.
             for (const elem of op.elements) {
-              const key = JSON.stringify(elem);
+              const key = setElementKey(elem);
               for (const t of op.tags) keys.push(removedKey(key, t));
             }
           } else {
             // Legacy remove: only tags older than the remove's HLC —
             // concurrent-or-newer adds survive (add-wins). Matches Go.
             for (const elem of op.elements) {
-              const key = JSON.stringify(elem);
+              const key = setElementKey(elem);
               for (const t of entries[key] ?? []) {
                 if (hlcAfter(change.hlc, t.hlc)) keys.push(removedKey(key, t));
               }
@@ -570,8 +698,7 @@ export function mergeFieldState(
 
       return {
         type: "set",
-        hlc: change.hlc,
-        node_id: change.node_id,
+        ...pickNewer(local, change),
         set_state: entries === localSet.entries && removed === localSet.removed
           ? localSet
           : { entries, removed },
@@ -624,8 +751,7 @@ export function mergeFieldState(
 
       return {
         type: "list",
-        hlc: change.hlc,
-        node_id: change.node_id,
+        ...pickNewer(local, change),
         list_state: nodes === localList.nodes ? localList : { nodes },
       };
     }
@@ -644,8 +770,7 @@ export function mergeFieldState(
             const prefix = path + ".";
             return {
               type: "document",
-              hlc: change.hlc,
-              node_id: change.node_id,
+              ...pickNewer(local, change),
               doc_state: {
                 fields: withoutKeys(
                   localDoc.fields,
@@ -664,16 +789,14 @@ export function mergeFieldState(
           };
           return {
             type: "document",
-            hlc: change.hlc,
-            node_id: change.node_id,
+            ...pickNewer(local, change),
             doc_state: mergeDocumentState(localDoc, remoteDoc),
           };
         }
       }
       return {
         type: "document",
-        hlc: change.hlc,
-        node_id: change.node_id,
+        ...pickNewer(local, change),
         doc_state: localDoc,
       };
     }
@@ -683,13 +806,9 @@ export function mergeFieldState(
       const nextText = change.text_op
         ? applyTextOpTo(localText, change.text_op, change.node_id, change.hlc)
         : localText;
-      // Stamp with whichever of local/change is newer (Go pickNewer
-      // parity) — a redelivered older op must not regress the field clock.
-      const keepLocal = local && hlcAfter(local.hlc, change.hlc);
       return {
         type: "text",
-        hlc: keepLocal ? local.hlc : change.hlc,
-        node_id: keepLocal ? local.node_id : change.node_id,
+        ...pickNewer(local, change),
         text_state: nextText,
       };
     }

@@ -21,6 +21,7 @@ import type {
   TextState,
   TextOperation,
   TextRef,
+  TextSpan,
   TextDeltaSegment,
 } from "./types.js";
 import { HybridClock, hlcString, hlcIsZero } from "./hlc.js";
@@ -33,10 +34,14 @@ import {
   listNodeIds,
   documentResolve,
   tagKey,
+  setElementKey,
+  canonicalSetState,
 } from "./merge.js";
 import {
   newTextState,
   cloneTextState,
+  textInsertSpan,
+  textSpanSegments,
   textInsert,
   textDeleteOp,
   textFormat,
@@ -48,6 +53,7 @@ import {
 import { withEntry, withoutKeys } from "./immutable.js";
 import { MemoryStorage } from "./storage.js";
 import { UndoManager } from "./undo.js";
+import type { UndoEntry } from "./undo.js";
 import { PluginManager } from "./plugin.js";
 import type { StorePlugin, WriteEvent, MergeEvent } from "./plugin.js";
 import { CRDTError, CRDTErrorCode } from "./errors.js";
@@ -100,6 +106,15 @@ function normalizeHLCKeys(doc: DocumentState): void {
       }
     }
   }
+}
+
+/**
+ * A record delete, as opposed to a document path delete (a tombstoned
+ * document change that carries a path). Mirrors applyChangeInternal.
+ */
+function isRecordDelete(change: ChangeRecord): boolean {
+  return change.tombstone === true &&
+    !(change.crdt_type === "document" && change.value !== undefined);
 }
 
 export class CRDTStore {
@@ -464,9 +479,10 @@ export class CRDTStore {
     const hlc = this.clock.now();
     // Name the observed tags so the remove is exact everywhere (true
     // observed-remove semantics; receivers don't guess by HLC).
-    const setState = this.getDoc(table, pk)?.fields[field]?.set_state;
+    const stored = this.getDoc(table, pk)?.fields[field]?.set_state;
+    const setState = stored ? canonicalSetState(stored) : undefined;
     const tags = elements.flatMap(
-      (elem) => setState?.entries[JSON.stringify(elem)] ?? []
+      (elem) => setState?.entries[setElementKey(elem)] ?? []
     );
     const change: ChangeRecord = {
       table,
@@ -804,6 +820,16 @@ export class CRDTStore {
    * Delete a document (tombstone). Returns the ChangeRecord for push.
    */
   deleteDocument(table: string, pk: string): ChangeRecord {
+    const { change, previousState } = this.writeTombstone(table, pk);
+    this.undoManager.record(change, previousState);
+    return change;
+  }
+
+  /** Tombstone a record and queue it, without recording undo history. */
+  private writeTombstone(
+    table: string,
+    pk: string
+  ): { change: ChangeRecord; previousState: FieldState | null } {
     this.assertPendingCapacity();
     const hlc = this.clock.now();
     const change: ChangeRecord = {
@@ -830,12 +856,11 @@ export class CRDTStore {
       tombstone_hlc: hlc,
     });
 
-    this.undoManager.record(change, previousState);
     this.enqueuePending(change);
     this.persistDocument(table, pk);
     this.persistPending();
     this.notifyListeners(table, pk);
-    return change;
+    return { change, previousState };
   }
 
   // --- Undo / Redo ---
@@ -851,66 +876,258 @@ export class CRDTStore {
   }
 
   /**
-   * Undo the last local mutation by restoring the previous field state.
-   * Returns true if an undo was performed, false if the stack was empty.
+   * Undo the last local mutation. The undo is written as new changes with
+   * fresh clocks and queued for push, so it reaches the server and every
+   * other replica. Returns true if an undo was performed, false if the
+   * stack was empty or the entry can no longer be undone (a record delete
+   * the server has already seen).
    */
   undo(): boolean {
-    const entry = this.undoManager.undo();
+    return this.step(() => this.undoManager.popUndo(), (e) => this.undoManager.pushUndo(e),
+      (e) => this.undoManager.pushRedo(e));
+  }
+
+  /**
+   * Redo the last undone mutation. Like undo, it writes new changes with
+   * fresh clocks, so the redo reaches the server too. Returns true if a
+   * redo was performed, false if the stack was empty.
+   */
+  redo(): boolean {
+    return this.step(() => this.undoManager.popRedo(), (e) => this.undoManager.pushRedo(e),
+      (e) => this.undoManager.pushUndo(e));
+  }
+
+  /**
+   * Pop an entry, apply its inverse, and push the inverse onto the other
+   * stack. When the inverse cannot be written (the pending queue is full)
+   * the entry goes back where it came from.
+   */
+  private step(
+    pop: () => UndoEntry | null,
+    putBack: (entry: UndoEntry) => void,
+    pushOther: (entry: UndoEntry) => void
+  ): boolean {
+    const entry = pop();
     if (!entry) return false;
-
-    const { change, previousState } = entry;
-
-    const doc = this.docOrEmpty(change.table, change.pk);
-    if (change.tombstone) {
-      // previousState === null means the document was NOT tombstoned before.
-      this.setDocument(change.table, change.pk, {
-        ...doc,
-        tombstone: previousState !== null,
-        tombstone_hlc: previousState?.hlc,
-      });
-    } else if (previousState === null) {
-      // Field didn't exist before; remove it.
-      this.setDocument(change.table, change.pk, {
-        ...doc,
-        fields: withoutKeys(doc.fields, (k) => k === change.field),
-      });
-    } else {
-      this.setDocument(
-        change.table,
-        change.pk,
-        this.withField(doc, change.field, previousState)
-      );
+    let inverse: UndoEntry | null;
+    try {
+      inverse = this.invertEntry(entry);
+    } catch (err) {
+      putBack(entry);
+      throw err;
     }
-
-    this.persistDocument(change.table, change.pk);
-    this.notifyListeners(change.table, change.pk);
+    if (!inverse) return false;
+    pushOther(inverse);
     return true;
   }
 
   /**
-   * Redo the last undone mutation by re-applying the change.
-   * Returns true if a redo was performed, false if the stack was empty.
+   * Apply the inverse of an undo entry as new local changes, queued for
+   * push like any other write, and return the entry that inverts them in
+   * turn. Returns null when the entry cannot be inverted: a record delete
+   * the server has already seen stays deleted, because tombstones are
+   * sticky on the server.
    */
-  redo(): boolean {
-    const entry = this.undoManager.redo();
-    if (!entry) return false;
-
-    const { change } = entry;
-
-    if (change.tombstone) {
-      const doc = this.docOrEmpty(change.table, change.pk);
-      this.setDocument(change.table, change.pk, {
-        ...doc,
-        tombstone: true,
-        tombstone_hlc: change.hlc,
-      });
-    } else {
-      this.applyChangeInternal(change);
+  private invertEntry(entry: UndoEntry): UndoEntry | null {
+    const { table, pk } = entry.change;
+    if (!entry.group && isRecordDelete(entry.change)) {
+      return entry.undelete ? this.redeleteRecord(entry) : this.undeleteRecord(entry);
     }
 
+    const changes = this.inverseChanges(entry);
+    this.assertPendingCapacity(changes.length);
+    const applied: UndoEntry[] = changes.map((change) => {
+      const previousState = this.captureFieldState(change.table, change.pk, change.field);
+      this.applyChangeInternal(change);
+      this.enqueuePending(change);
+      return { change, previousState, timestamp: Date.now() };
+    });
+    if (applied.length > 0) {
+      this.persistDocument(table, pk);
+      this.persistPending();
+      this.notifyListeners(table, pk);
+    }
+    if (applied.length === 1) return applied[0];
+    return {
+      change: applied[applied.length - 1]?.change ?? entry.change,
+      previousState: null,
+      timestamp: Date.now(),
+      group: applied,
+    };
+  }
+
+  /**
+   * The changes that take a field from the state after `entry.change`
+   * back to `entry.previousState`, each with a fresh clock. They are ops
+   * against what the change itself did, not a reset to the old state, so
+   * edits other replicas made in the meantime survive the undo.
+   */
+  private inverseChanges(entry: UndoEntry): ChangeRecord[] {
+    if (entry.group) {
+      return [...entry.group].reverse().flatMap((e) => this.inverseChanges(e));
+    }
+    const { change, previousState: prev } = entry;
+    const at = (hlc: HLC, rest: Partial<ChangeRecord> & Pick<ChangeRecord, "crdt_type">): ChangeRecord => ({
+      table: change.table,
+      pk: change.pk,
+      field: change.field,
+      hlc,
+      node_id: this.nodeID,
+      ...rest,
+    });
+    const next = (rest: Partial<ChangeRecord> & Pick<ChangeRecord, "crdt_type">): ChangeRecord =>
+      at(this.clock.now(), rest);
+
+    switch (change.crdt_type) {
+      case "lww":
+        // There is no field delete on the wire, so undoing a field's first
+        // write leaves it null.
+        return [next({ crdt_type: "lww", value: prev?.value ?? null })];
+
+      case "counter": {
+        const dInc = (change.counter_delta?.inc ?? 0) - (prev?.counter_state?.inc[change.node_id] ?? 0);
+        const dDec = (change.counter_delta?.dec ?? 0) - (prev?.counter_state?.dec[change.node_id] ?? 0);
+        if (dInc === 0 && dDec === 0) return [];
+        // Totals only grow, so take the change back by adding its delta to
+        // the other side.
+        const cur = this.counterTotals(change.table, change.pk, change.field);
+        return [next({ crdt_type: "counter", counter_delta: { inc: cur.inc + dDec, dec: cur.dec + dInc } })];
+      }
+
+      case "set": {
+        const op = change.set_op;
+        if (!op) return [];
+        if (op.op === "add") {
+          // Remove only the tag this add created: an element that was in the
+          // set before the add keeps its older tags.
+          return [next({
+            crdt_type: "set",
+            set_op: { op: "remove", elements: op.elements, tags: [{ node: change.node_id, hlc: change.hlc }] },
+          })];
+        }
+        const before = new Set((prev?.set_state ? setElements(prev.set_state) : []).map(setElementKey));
+        const back = op.elements.filter((e) => before.has(setElementKey(e)));
+        return back.length > 0 ? [next({ crdt_type: "set", set_op: { op: "add", elements: back } })] : [];
+      }
+
+      case "list": {
+        const op = change.list_op;
+        if (!op) return [];
+        if (op.op === "insert") {
+          const id = op.node_id && !hlcIsZero(op.node_id) ? op.node_id : change.hlc;
+          return [next({ crdt_type: "list", list_op: { op: "delete", node_id: id } })];
+        }
+        if (op.op === "delete" && op.node_id) {
+          const node = prev?.list_state?.nodes[hlcString(op.node_id)];
+          if (!node || node.tombstone) return [];
+          // A list delete can't be revived, so put the value back as a new
+          // node right after the deleted one, where it used to sit.
+          const hlc = this.clock.now();
+          return [at(hlc, {
+            crdt_type: "list",
+            list_op: { op: "insert", node_id: hlc, parent_id: op.node_id, value: node.value },
+          })];
+        }
+        return [];
+      }
+
+      case "text": {
+        const op = change.text_op;
+        if (!op) return [];
+        if (op.op === "insert") {
+          const span = textInsertSpan(op, change.hlc);
+          return span ? [next({ crdt_type: "text", text_op: { op: "delete", spans: [span] } })] : [];
+        }
+        const before = prev?.text_state ?? newTextState();
+        if (op.op === "delete") {
+          // Deleted characters stay tombstoned, so the content goes back in
+          // as new characters chained after the last one deleted.
+          const segs = textSpanSegments(before, op.spans ?? [], true);
+          if (segs.length === 0) return [];
+          const last = segs[segs.length - 1].span;
+          let ref: TextRef = { origin: last.origin, offset: last.start + last.length - 1 };
+          return segs.map((seg) => {
+            const hlc = this.clock.now();
+            const attrs = Object.fromEntries(
+              Object.entries(seg.attrs).filter(([, v]) => v !== null && v !== undefined));
+            const restored = at(hlc, {
+              crdt_type: "text",
+              text_op: {
+                op: "insert", ref, origin: hlc, content: seg.content,
+                ...(Object.keys(attrs).length > 0 ? { attrs } : {}),
+              },
+            });
+            ref = { origin: hlc, offset: Array.from(seg.content).length - 1 };
+            return restored;
+          });
+        }
+        if (op.op === "format") {
+          // Set each formatted run back to the attribute values it had,
+          // null where the attribute was not set.
+          const names = Object.keys(op.attrs ?? {});
+          const runs = new Map<string, { attrs: Record<string, unknown>; spans: TextSpan[] }>();
+          for (const seg of textSpanSegments(before, op.spans ?? [], false)) {
+            const attrs = Object.fromEntries(names.map((k) => [k, seg.attrs[k] ?? null]));
+            const key = JSON.stringify(attrs);
+            const run = runs.get(key) ?? { attrs, spans: [] };
+            run.spans.push(seg.span);
+            runs.set(key, run);
+          }
+          return [...runs.values()].map((run) =>
+            next({ crdt_type: "text", text_op: { op: "format", spans: run.spans, attrs: run.attrs } }));
+        }
+        return [];
+      }
+
+      case "document": {
+        const path = (change.value as { path?: string } | undefined)?.path;
+        if (!path) return [];
+        const before = prev?.doc_state?.fields ?? {};
+        const prefix = path + ".";
+        const leaves = Object.entries(before).filter(([k]) => k === path || k.startsWith(prefix));
+        const setPath = (p: string, v: unknown) => next({ crdt_type: "document", value: { path: p, value: v } });
+        if (change.tombstone) return leaves.map(([k, fs]) => setPath(k, fs.value));
+        if (before[path]) return [setPath(path, before[path].value)];
+        return [
+          next({ crdt_type: "document", tombstone: true, value: { path } }),
+          ...leaves.map(([k, fs]) => setPath(k, fs.value)),
+        ];
+      }
+
+      default:
+        return [];
+    }
+  }
+
+  /**
+   * Undo a record delete. Only possible while the tombstone is still
+   * pending: the server keeps a tombstone for good once it has one.
+   */
+  private undeleteRecord(entry: UndoEntry): UndoEntry | null {
+    const { change, previousState } = entry;
+    const at = this.pending.indexOf(change);
+    if (at < 0) return null;
+    const doc = this.docOrEmpty(change.table, change.pk);
+    // A newer tombstone from elsewhere is in effect: nothing to restore.
+    if (previousState === null && doc.tombstone_hlc && hlcString(doc.tombstone_hlc) !== hlcString(change.hlc)) {
+      return null;
+    }
+    this.pending.splice(at, 1);
+    this.setDocument(change.table, change.pk, {
+      ...doc,
+      tombstone: previousState !== null,
+      tombstone_hlc: previousState?.hlc,
+    });
     this.persistDocument(change.table, change.pk);
+    this.persistPending();
     this.notifyListeners(change.table, change.pk);
-    return true;
+    return { change, previousState, timestamp: Date.now(), undelete: true };
+  }
+
+  /** Redo a record delete that undo took back. */
+  private redeleteRecord(entry: UndoEntry): UndoEntry {
+    const { change, previousState } = this.writeTombstone(entry.change.table, entry.change.pk);
+    return { change, previousState, timestamp: Date.now() };
   }
 
   // --- Sync ---
@@ -1014,11 +1231,11 @@ export class CRDTStore {
    * push call, applyChangeInternal() and undoManager.record() have
    * already run against live store state.
    */
-  private assertPendingCapacity(): void {
+  private assertPendingCapacity(count = 1): void {
     if (
       this.throwOnOverflow &&
       this.maxPendingChanges > 0 &&
-      this.pending.length >= this.maxPendingChanges
+      this.pending.length + count > this.maxPendingChanges
     ) {
       throw new CRDTError(
         `crdt: pending queue full (${this.maxPendingChanges} changes)`,

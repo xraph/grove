@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -32,7 +33,9 @@ type SyncController struct {
 	presenceTTL        time.Duration
 	presenceBufferSize int
 	presence           *PresenceManager
-	presenceCh         chan PresenceEvent // buffered channel for broadcasting to SSE streams
+	presenceMu         sync.Mutex
+	presenceSubs       map[chan PresenceEvent]struct{} // one buffered channel per stream
+	presenceLegacy     chan PresenceEvent              // shared channel behind PresenceChannel
 
 	// Time-travel configuration (nil when disabled).
 	timeTravel *TimeTravelConfig
@@ -77,18 +80,10 @@ func NewSyncController(plugin *Plugin, opts ...SyncControllerOption) *SyncContro
 		if bufSize <= 0 {
 			bufSize = 256
 		}
-		c.presenceCh = make(chan PresenceEvent, bufSize)
-		c.presence = NewPresenceManager(c.presenceTTL, func(event PresenceEvent) {
-			// Non-blocking send to the broadcast channel.
-			select {
-			case c.presenceCh <- event:
-			default:
-				c.logger.Warn("crdt: presence event dropped (channel full)",
-					log.String("topic", event.Topic),
-					log.String("node_id", event.NodeID),
-				)
-			}
-		}, c.logger)
+		c.presenceBufferSize = bufSize
+		c.presenceSubs = make(map[chan PresenceEvent]struct{})
+		c.presenceLegacy = make(chan PresenceEvent, bufSize)
+		c.presence = NewPresenceManager(c.presenceTTL, c.broadcastPresence, c.logger)
 	}
 
 	// Initialize room manager if enabled (requires presence).
@@ -347,6 +342,29 @@ func applySyncFilter(changes []ChangeRecord, filter *SyncFilter) []ChangeRecord 
 	return result
 }
 
+// ErrPushRejected marks a push the server refused deterministically: it
+// failed validation or a BeforeInboundChange hook rejected one of its
+// changes. Nothing from the push was merged, and sending the same changes
+// again gets the same answer, so clients should not retry it. Test for it
+// with errors.Is; the HTTP handlers answer it with 422.
+var ErrPushRejected = errors.New("crdt: push rejected")
+
+// pushRejectedError keeps the original error text and makes errors.Is match
+// ErrPushRejected as well as the underlying cause.
+type pushRejectedError struct{ err error }
+
+func (r *pushRejectedError) Error() string   { return r.err.Error() }
+func (r *pushRejectedError) Unwrap() []error { return []error{r.err, ErrPushRejected} }
+
+// PushErrorStatus is the HTTP status for an error from HandlePush: 422 for
+// a deterministic rejection, 500 for anything else.
+func PushErrorStatus(err error) int {
+	if errors.Is(err, ErrPushRejected) {
+		return http.StatusUnprocessableEntity
+	}
+	return http.StatusInternalServerError
+}
+
 // HandlePush processes a push request, merging remote changes locally.
 // This is the core logic used by both Forge and HTTP handlers.
 //
@@ -365,7 +383,7 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 			if c.metrics != nil {
 				c.metrics.ValidationErrors.Add(1)
 			}
-			return nil, err
+			return nil, &pushRejectedError{err}
 		}
 	}
 
@@ -385,7 +403,7 @@ func (c *SyncController) HandlePush(ctx context.Context, req *PushRequest) (*Pus
 
 		processedChange, err := c.hooks.BeforeInboundChange(ctx, &change)
 		if err != nil {
-			return nil, fmt.Errorf("crdt: inbound change hook: %w", err)
+			return nil, &pushRejectedError{fmt.Errorf("crdt: inbound change hook: %w", err)}
 		}
 		if processedChange != nil {
 			processed = append(processed, processedChange)
@@ -798,10 +816,60 @@ func (c *SyncController) Logger() log.Logger {
 	return c.logger
 }
 
-// PresenceChannel returns the channel for receiving presence events to
-// broadcast over SSE streams. Returns nil if presence is disabled.
+// SubscribePresence returns a channel that receives every presence event
+// until ctx is done. Each call gets its own channel, so every stream sees
+// every event. Returns nil if presence is disabled. The channel is never
+// closed; stop reading it once ctx is done.
+func (c *SyncController) SubscribePresence(ctx context.Context) <-chan PresenceEvent {
+	if c.presence == nil {
+		return nil
+	}
+	ch := c.addPresenceSub()
+	go func() {
+		<-ctx.Done()
+		c.presenceMu.Lock()
+		delete(c.presenceSubs, ch)
+		c.presenceMu.Unlock()
+	}()
+	return ch
+}
+
+// PresenceChannel returns one channel shared by every caller, so concurrent
+// readers split the events between them. Returns nil if presence is disabled.
+//
+// Deprecated: use SubscribePresence, which gives each stream every event.
 func (c *SyncController) PresenceChannel() <-chan PresenceEvent {
-	return c.presenceCh
+	return c.presenceLegacy
+}
+
+func (c *SyncController) addPresenceSub() chan PresenceEvent {
+	ch := make(chan PresenceEvent, c.presenceBufferSize)
+	c.presenceMu.Lock()
+	c.presenceSubs[ch] = struct{}{}
+	c.presenceMu.Unlock()
+	return ch
+}
+
+// broadcastPresence hands event to every subscriber without blocking; a
+// subscriber whose buffer is full misses the event. The legacy shared
+// channel drops silently once full, since it may have no reader at all.
+func (c *SyncController) broadcastPresence(event PresenceEvent) {
+	select {
+	case c.presenceLegacy <- event:
+	default:
+	}
+	c.presenceMu.Lock()
+	defer c.presenceMu.Unlock()
+	for ch := range c.presenceSubs {
+		select {
+		case ch <- event:
+		default:
+			c.logger.Warn("crdt: presence event dropped (channel full)",
+				log.String("topic", event.Topic),
+				log.String("node_id", event.NodeID),
+			)
+		}
+	}
 }
 
 // Close cleans up the controller's resources (presence manager, etc.).
@@ -868,7 +936,7 @@ func (c *SyncController) httpHandlePush(w http.ResponseWriter, r *http.Request) 
 
 	resp, err := c.HandlePush(r.Context(), &req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, PushErrorStatus(err), err.Error())
 		return
 	}
 

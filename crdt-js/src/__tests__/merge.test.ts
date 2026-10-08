@@ -811,3 +811,108 @@ describe("Document CRDT merge", () => {
     expect(resolved.address).toEqual({ street: "123 Main St", city: "Springfield" });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Field clock under redelivery (Go ApplyChange keeps the newer HLC)
+// ---------------------------------------------------------------------------
+
+describe("mergeFieldState field clock", () => {
+  const older: HLC = { ts: 100, c: 0, node: "a" };
+  const newer: HLC = { ts: 200, c: 0, node: "b" };
+
+  const changeAt = (
+    crdt_type: ChangeRecord["crdt_type"],
+    hlc: HLC,
+    extra: Partial<ChangeRecord>,
+  ): ChangeRecord => ({
+    table: "t", pk: "1", field: "f", crdt_type, hlc, node_id: hlc.node, ...extra,
+  });
+
+  const cases: Array<[string, (hlc: HLC) => ChangeRecord]> = [
+    ["counter", (hlc) => changeAt("counter", hlc, { counter_delta: { inc: 1, dec: 0 } })],
+    ["set", (hlc) => changeAt("set", hlc, { set_op: { op: "add", elements: [hlc.node] } })],
+    ["list", (hlc) => changeAt("list", hlc, {
+      list_op: { op: "insert", node_id: hlc, parent_id: { ts: 0, c: 0, node: "" }, value: hlc.node },
+    })],
+    ["document", (hlc) => changeAt("document", hlc, { value: { path: `p.${hlc.node}`, value: 1 } })],
+  ];
+
+  it.each(cases)("%s: a redelivered older change does not regress the field HLC", (_type, make) => {
+    const afterNewer = mergeFieldState(null, make(newer));
+    const afterOlder = mergeFieldState(afterNewer, make(older));
+    expect(afterOlder.hlc).toEqual(newer);
+    expect(afterOlder.node_id).toBe("b");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Set element keys follow Go json.Marshal bytes
+// ---------------------------------------------------------------------------
+
+describe("set element keys (Go parity)", () => {
+  const goHLC: HLC = { ts: 100, c: 0, node: "go" };
+  const jsHLC: HLC = { ts: 200, c: 0, node: "js" };
+
+  it("removes an element a Go writer added under its json.Marshal key", () => {
+    // Go ORSetState.Add keys "a<b" as json.Marshal does: "a\u003cb".
+    const goState: ORSetState = { entries: { '"a\\u003cb"': [{ node: "go", hlc: goHLC }] }, removed: {} };
+    const local = { type: "set" as const, hlc: goHLC, node_id: "go", set_state: goState };
+    const removed = mergeFieldState(local, {
+      table: "t", pk: "1", field: "tags", crdt_type: "set", hlc: jsHLC, node_id: "js",
+      set_op: { op: "remove", elements: ["a<b"] },
+    });
+    expect(setElements(removed.set_state!)).toEqual([]);
+  });
+
+  it("keys objects by sorted field names, so key order does not split an element", () => {
+    let state = mergeFieldState(null, {
+      table: "t", pk: "1", field: "tags", crdt_type: "set", hlc: goHLC, node_id: "go",
+      set_op: { op: "add", elements: [{ b: 1, a: 2 }] },
+    });
+    state = mergeFieldState(state, {
+      table: "t", pk: "1", field: "tags", crdt_type: "set", hlc: jsHLC, node_id: "js",
+      set_op: { op: "add", elements: [{ a: 2, b: 1 }] },
+    });
+    expect(Object.keys(state.set_state!.entries)).toEqual(['{"a":2,"b":1}']);
+  });
+
+  it("orders elements by UTF-8 bytes like Go sort.Strings", () => {
+    const tag = [{ node: "go", hlc: goHLC }];
+    // U+FF01 encodes as EF BC 81, U+1F600 as F0 9F 98 80: Go puts U+FF01 first.
+    // In UTF-16 the emoji's high surrogate (D83D) sorts before FF01.
+    const state: ORSetState = { entries: { '"\u{1F600}"': tag, '"！"': tag }, removed: {} };
+    expect(setElements(state)).toEqual(["！", "\u{1F600}"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Set states written before element keys were canonical
+// ---------------------------------------------------------------------------
+
+describe("set states with legacy element keys", () => {
+  const t1: ORSetTag = { node: "js", hlc: { ts: 100, c: 0, node: "js" } };
+  // "a<b" keyed by JSON.stringify, as crdt-js stored it before.
+  const legacy = (removed: boolean): ORSetState => ({
+    entries: { '"a<b"': [t1] },
+    removed: removed ? { ['"a<b"|' + tagKey(t1)]: true } : {},
+  });
+
+  it("does not show an element twice next to its canonical twin", () => {
+    const fresh: ORSetState = { entries: { '"a\\u003cb"': [{ node: "go", hlc: { ts: 150, c: 0, node: "go" } }] }, removed: {} };
+    expect(setElements(mergeSet(legacy(false), fresh))).toEqual(["a<b"]);
+  });
+
+  it("keeps a removed element removed when it reappears under the canonical key", () => {
+    const readd: ORSetState = { entries: { '"a\\u003cb"': [t1] }, removed: {} };
+    expect(setElements(mergeSet(legacy(true), readd))).toEqual([]);
+  });
+
+  it("lets a remove match an element stored under its legacy key", () => {
+    const local = { type: "set" as const, hlc: t1.hlc, node_id: "js", set_state: legacy(false) };
+    const out = mergeFieldState(local, {
+      table: "t", pk: "1", field: "tags", crdt_type: "set", hlc: { ts: 200, c: 0, node: "js" }, node_id: "js",
+      set_op: { op: "remove", elements: ["a<b"], tags: [t1] },
+    });
+    expect(setElements(out.set_state!)).toEqual([]);
+  });
+});

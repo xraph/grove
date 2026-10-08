@@ -478,3 +478,104 @@ func TestWebSocketTransport_Options(t *testing.T) {
 	assert.Equal(t, 15*time.Second, transport.pingInterval)
 	assert.Equal(t, []string{"t1", "t2"}, transport.tables)
 }
+
+// readWS waits for the next frame the handler wrote, skipping types in skip.
+func readWS(t *testing.T, conn *mockWSConn, skip ...WSMessageType) WebSocketMessage {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case raw := <-conn.writeCh:
+			var msg WebSocketMessage
+			require.NoError(t, json.Unmarshal(raw, &msg))
+			skipped := false
+			for _, s := range skip {
+				skipped = skipped || msg.Type == s
+			}
+			if !skipped {
+				return msg
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for a websocket frame")
+		}
+	}
+}
+
+func TestWebSocketHandler_Subscribe_HonoursSinceAndBatches(t *testing.T) {
+	fake := newShadowFake()
+	fake.tables["docs"] = lwwRows(5, 100) // hlc_ts 100..104
+	ctrl := NewSyncController(fake.plugin(), WithStreamPollInterval(10*time.Millisecond))
+	conn := newMockWSConn()
+	handler := NewWebSocketHandler(ctrl, conn, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	payload, _ := json.Marshal(map[string]any{
+		"tables": []string{"docs"},
+		"since":  HLC{Timestamp: 102, NodeID: "a"},
+	})
+	handler.handleMessage(ctx, WebSocketMessage{Type: WSSubscribe, Payload: payload})
+
+	msg := readWS(t, conn)
+	require.Equal(t, WSChanges, msg.Type, "a poll batch should travel as one changes frame")
+	var changes []ChangeRecord
+	require.NoError(t, json.Unmarshal(msg.Payload, &changes))
+	require.Len(t, changes, 2, "only rows after the client's cursor")
+	assert.Equal(t, int64(103), changes[0].HLC.Timestamp)
+	assert.Equal(t, int64(104), changes[1].HLC.Timestamp)
+}
+
+func TestWebSocketHandler_PresenceGet_AnswersSnapshot(t *testing.T) {
+	ctrl := NewSyncController(newTestPlugin(), WithPresenceEnabled(true))
+	defer ctrl.Close()
+	conn := newMockWSConn()
+	handler := NewWebSocketHandler(ctrl, conn, nil)
+	ctx := context.Background()
+
+	_, err := ctrl.HandlePresenceUpdate(ctx, &PresenceUpdate{
+		NodeID: "n1", Topic: "room", Data: json.RawMessage(`{"x":1}`),
+	})
+	require.NoError(t, err)
+
+	payload, _ := json.Marshal(map[string]string{"topic": "room"})
+	handler.handleMessage(ctx, WebSocketMessage{Type: WSPresenceGet, Payload: payload, RequestID: "req-p"})
+
+	msg := readWS(t, conn)
+	require.Equal(t, WSPresenceSnap, msg.Type)
+	assert.Equal(t, "req-p", msg.RequestID)
+	var snap PresenceSnapshot
+	require.NoError(t, json.Unmarshal(msg.Payload, &snap))
+	assert.Equal(t, "room", snap.Topic)
+	require.Len(t, snap.States, 1)
+	assert.Equal(t, "n1", snap.States[0].NodeID)
+}
+
+func TestWebSocketHandler_Unsubscribe_StopsStreamWithoutError(t *testing.T) {
+	fake := newShadowFake()
+	fake.tables["docs"] = lwwRows(1, 100)
+	ctrl := NewSyncController(fake.plugin(), WithStreamPollInterval(10*time.Millisecond))
+	conn := newMockWSConn()
+	handler := NewWebSocketHandler(ctrl, conn, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sub, _ := json.Marshal(map[string]any{"tables": []string{"docs"}})
+	handler.handleMessage(ctx, WebSocketMessage{Type: WSSubscribe, Payload: sub})
+	first := readWS(t, conn)
+	require.NotEqual(t, WSError, first.Type)
+
+	handler.handleMessage(ctx, WebSocketMessage{Type: WSUnsubscribe, RequestID: "req-u"})
+	// New rows after unsubscribing must not be streamed, and the
+	// unsubscribe itself is not an error.
+	fake.mu.Lock()
+	fake.tables["docs"] = append(fake.tables["docs"], lwwRows(1, 500)...)
+	fake.mu.Unlock()
+
+	select {
+	case raw := <-conn.writeCh:
+		var msg WebSocketMessage
+		require.NoError(t, json.Unmarshal(raw, &msg))
+		t.Fatalf("unexpected frame after unsubscribe: %s %s", msg.Type, msg.Payload)
+	case <-time.After(150 * time.Millisecond):
+	}
+}

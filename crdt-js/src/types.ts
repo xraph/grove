@@ -277,6 +277,8 @@ export interface SyncReport {
   pushed: number;
   merged: number;
   conflicts: number;
+  /** Changes the server refused and the engine dropped (see SyncEngine.onPushRejected). */
+  rejected?: number;
 }
 
 // --- Presence Types ---

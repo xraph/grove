@@ -26,7 +26,10 @@ describe("BatchWriter parity", () => {
     store.batch("t", "p").setField("a", 1).commit();
     expect(store.canUndo).toBe(true);
     store.undo();
-    expect(store.getDocument<{ a?: number }>("t", "p")?.a).toBeUndefined();
+    // Undo writes a compensating change, and there is no field delete on
+    // the wire, so a field's first write undoes to null.
+    expect(store.getDocument<{ a?: number | null }>("t", "p")?.a).toBeNull();
+    expect(store.pendingCount).toBe(2);
   });
 
   it("a batch notifies subscribers exactly once", () => {

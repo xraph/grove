@@ -149,6 +149,7 @@ export {
   SyncError,
   PluginError,
   isRetryableStatus,
+  isPushRejection,
 } from "./errors.js";
 
 // Client
@@ -168,6 +169,7 @@ export type { StateSnapshot } from "./store.js";
 
 // Sync orchestration
 export { SyncEngine } from "./sync.js";
+export type { PushRejection } from "./sync.js";
 
 // Undo/Redo
 export type { UndoEntry } from "./undo.js";
