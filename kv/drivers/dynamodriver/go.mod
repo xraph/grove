@@ -10,7 +10,7 @@ replace (
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.2
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.56.0
-	github.com/xraph/grove/kv v1.6.2
+	github.com/xraph/grove/kv v1.7.2
 )
 
 require (

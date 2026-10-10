@@ -9,7 +9,7 @@ replace (
 
 require (
 	github.com/bradfitz/gomemcache v0.0.0-20230905024940-24af94b03874
-	github.com/xraph/grove/kv v1.6.2
+	github.com/xraph/grove/kv v1.7.2
 )
 
 require (

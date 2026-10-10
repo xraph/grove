@@ -9,7 +9,7 @@ replace (
 
 require (
 	github.com/dgraph-io/badger/v4 v4.7.0
-	github.com/xraph/grove/kv v1.6.2
+	github.com/xraph/grove/kv v1.7.2
 )
 
 require (

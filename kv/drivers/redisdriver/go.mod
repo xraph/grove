@@ -11,7 +11,7 @@ require (
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/redis v0.44.0
-	github.com/xraph/grove/kv v1.6.2
+	github.com/xraph/grove/kv v1.7.2
 )
 
 require (
