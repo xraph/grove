@@ -61,8 +61,15 @@ func TestApplyOptions_TLSConfig(t *testing.T) {
 	assert.Same(t, cfg, opts.TLSConfig)
 }
 
+// identLogger gives a logger a distinct address so assert.Same can check
+// that WithLogger stores the exact value it was given. The go-utils noop
+// logger is a zero-size value, and any two copies of it compare equal.
+type identLogger struct{ log.Logger }
+
+func newIdentLogger() *identLogger { return &identLogger{Logger: log.NewNoopLogger()} }
+
 func TestApplyOptions_Logger(t *testing.T) {
-	logger := log.NewNoopLogger()
+	logger := newIdentLogger()
 	opts := driver.ApplyOptions([]driver.Option{
 		driver.WithLogger(logger),
 	})
@@ -70,7 +77,7 @@ func TestApplyOptions_Logger(t *testing.T) {
 }
 
 func TestApplyOptions_Combined(t *testing.T) {
-	logger := log.NewNoopLogger()
+	logger := newIdentLogger()
 	cfg := &tls.Config{MinVersion: tls.VersionTLS13}
 
 	opts := driver.ApplyOptions([]driver.Option{

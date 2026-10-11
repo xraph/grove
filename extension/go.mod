@@ -5,7 +5,7 @@ go 1.26.0
 replace github.com/xraph/grove => ../
 
 require (
-	github.com/xraph/forge v1.12.5
+	github.com/xraph/forge v1.12.7
 	github.com/xraph/grove v1.7.2
 	github.com/xraph/vessel v1.0.4
 )
