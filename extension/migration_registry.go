@@ -14,6 +14,9 @@ import (
 	"github.com/xraph/grove/migrate"
 )
 
+// Ensure MigrationRegistry satisfies forge.CentralMigrator at compile time.
+var _ forge.CentralMigrator = (*MigrationRegistry)(nil)
+
 // MigrationRegistry collects migration groups contributed by every extension and
 // runs them as a single ordered pass per database. Putting every group into one
 // orchestrator lets grove's topological sort resolve cross-extension DependsOn

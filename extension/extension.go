@@ -110,6 +110,11 @@ func (e *Extension) isMultiDB() bool {
 // registryFromContainer returns the shared MigrationRegistry, creating and
 // providing it on first use. Forge registers extensions sequentially, so the
 // check-then-provide is race-free.
+//
+// The registry is also provided as forge.CentralMigrator. Vessel keys
+// services by their exact type, and Forge's migrate commands resolve the
+// migrator through that interface, so the concrete registration alone is
+// invisible to them.
 func (e *Extension) registryFromContainer(c vessel.Vessel) *MigrationRegistry {
 	if c == nil {
 		return nil
@@ -120,7 +125,13 @@ func (e *Extension) registryFromContainer(c vessel.Vessel) *MigrationRegistry {
 			return nil
 		}
 	}
-	return vessel.MustInject[*MigrationRegistry](c)
+	reg := vessel.MustInject[*MigrationRegistry](c)
+	if !vessel.HasType[forge.CentralMigrator](c) {
+		if err := vessel.ProvideValue[forge.CentralMigrator](c, reg); err != nil {
+			return nil
+		}
+	}
+	return reg
 }
 
 // Register implements [forge.Extension].
