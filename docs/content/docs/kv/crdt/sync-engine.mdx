@@ -1,6 +1,6 @@
 ---
 title: Sync Engine
-description: Cross-store CRDT synchronization with the Grove KV Syncer: bidirectional merge, background sync loops, and key pattern filtering.
+description: "Cross-store CRDT synchronization with the Grove KV Syncer: bidirectional merge, background sync loops, and key pattern filtering."
 ---
 
 The `kvcrdt.Syncer` provides bidirectional CRDT state synchronization between two KV stores. It scans for keys matching a configurable pattern, loads the serialized CRDT state from both stores, merges them using per-field LWW semantics, and writes the merged result back to both stores.
