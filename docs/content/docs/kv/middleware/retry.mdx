@@ -99,7 +99,7 @@ The retry middleware retries operations that return errors from the driver layer
 
 The following errors are **not retried**:
 
-- `kv.ErrKeyNotFound` -- the key does not exist (not a transient condition)
+- `kv.ErrNotFound`: the key does not exist (not a transient condition)
 - `kv.ErrKeyEmpty` -- invalid input
 - Context cancellation or deadline exceeded
 

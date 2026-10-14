@@ -129,6 +129,7 @@ import (
     "fmt"
 
     "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/kvtest"
     kvcrdt "github.com/xraph/grove/kv/crdt"
 )
 
@@ -136,8 +137,8 @@ func main() {
     ctx := context.Background()
 
     // Create two KV stores (simulating two nodes).
-    storeA := kv.NewMemoryStore()
-    storeB := kv.NewMemoryStore()
+    storeA, _ := kv.Open(kvtest.NewMockDriver()) // in-memory driver from kv/kvtest
+    storeB, _ := kv.Open(kvtest.NewMockDriver()) // in-memory driver from kv/kvtest
 
     // Node A increments the counter.
     counterA := kvcrdt.NewCounter(storeA, "crdt:page:views", kvcrdt.WithNodeID("node-a"))
@@ -159,7 +160,7 @@ func main() {
 
 ## Presence & Real-Time Awareness
 
-KV CRDT is designed for backend store-to-store replication and does not include a presence system. For live user awareness features — such as cursor tracking, typing indicators, or online user lists — use the main CRDT module (`grove/crdt`) with its TypeScript client and React hooks. The main CRDT module provides an in-memory `PresenceManager` with TTL-based cleanup, SSE event broadcast, and `usePresence`/`useDocumentPresence` React hooks.
+KV CRDT is designed for backend store-to-store replication and does not include a presence system. For live user awareness features (cursor tracking, typing indicators or online user lists) use the main CRDT module (`grove/crdt`) with its TypeScript client and React hooks. The main CRDT module provides an in-memory `PresenceManager` with TTL-based cleanup, SSE event broadcast, and `usePresence`/`useDocumentPresence` React hooks.
 
 See [Presence & Awareness](/docs/crdt/presence) for the full guide.
 

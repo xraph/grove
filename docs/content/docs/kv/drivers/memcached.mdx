@@ -51,7 +51,7 @@ store, err := kv.Open(memcacheddriver.New(), "mc1:11211,mc2:11211,mc3:11211")
 ctx := context.Background()
 
 // Set with TTL
-err := store.Set(ctx, "session:abc", sessionData, 30*time.Minute)
+err := store.Set(ctx, "session:abc", sessionData, kv.WithTTL(30*time.Minute))
 
 // Get
 var session Session
@@ -61,10 +61,10 @@ err = store.Get(ctx, "session:abc", &session)
 err = store.Delete(ctx, "session:abc")
 
 // Set only if key does not exist
-err = store.Set(ctx, "lock:resource", value, 10*time.Second, kv.NX())
+err = store.Set(ctx, "lock:resource", value, kv.WithTTL(10*time.Second), kv.WithNX())
 
 // Set only if key already exists
-err = store.Set(ctx, "session:abc", updatedData, 30*time.Minute, kv.XX())
+err = store.Set(ctx, "session:abc", updatedData, kv.WithTTL(30*time.Minute), kv.WithXX())
 ```
 
 ## CompareAndSwap Operation

@@ -1,6 +1,6 @@
 ---
 title: "CRDT: Collaborative Presence"
-description: Build real-time collaborative features — active users, typing indicators, and cursor tracking — using Grove CRDT presence.
+description: Build real-time collaborative features (active users, typing indicators and cursor tracking) using Grove CRDT presence.
 ---
 
 This guide walks through building collaborative presence features using the Grove CRDT presence system. You'll add active user avatars, typing indicators, and cursor tracking to a React application backed by a Go server.
@@ -16,7 +16,7 @@ This guide walks through building collaborative presence features using the Grov
 Add `WithPresenceEnabled(true)` to your `SyncController` configuration:
 
 ```go
-app.Use(groveext.New(
+app.RegisterExtension(groveext.New(
     groveext.WithDriver(pgdb),
     groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents"}}),
     groveext.WithSyncController(
@@ -384,7 +384,7 @@ Presence updates are sent frequently via HTTP POST and broadcast to all connecte
 
 ### Reconnection
 
-When the SSE connection drops and reconnects, the client's presence entry may have expired on the server. The `CRDTProvider` handles this automatically — the heartbeat timer re-announces presence after reconnection.
+When the SSE connection drops and reconnects, the client's presence entry may have expired on the server. The `CRDTProvider` handles this automatically: the heartbeat timer re-announces presence after reconnection.
 
 ### Server-Side TTL Tuning
 

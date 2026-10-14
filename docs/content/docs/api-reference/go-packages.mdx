@@ -11,7 +11,7 @@ description: Reference for all Grove Go packages.
 | `schema` | `github.com/xraph/grove/schema` | Schema reflection: Table, Field, Relation, Registry |
 | `driver` | `github.com/xraph/grove/driver` | Driver and Dialect interfaces |
 | `scan` | `github.com/xraph/grove/scan` | Result scanning with cached field maps |
-| `hook` | `github.com/xraph/grove/hook` | Privacy hooks: PreQuery, PostQuery, PreMutation, PostMutation, StreamRowHook |
+| `hook` | `github.com/xraph/grove/hook` | Query hooks: PreQuery, PostQuery, PreMutation, PostMutation, StreamRowHook |
 | `stream` | `github.com/xraph/grove/stream` | Streaming iterator: Stream[T], pipeline transforms, ChangeStream[T] |
 | `migrate` | `github.com/xraph/grove/migrate` | Migration system: Group, Migration, Orchestrator |
 | `pgdriver` | `github.com/xraph/grove/drivers/pgdriver` | PostgreSQL driver (pgx-based) |
@@ -21,11 +21,12 @@ description: Reference for all Grove Go packages.
 | `tursodriver` | `github.com/xraph/grove/drivers/tursodriver` | Turso/libSQL driver |
 | `clickhousedriver` | `github.com/xraph/grove/drivers/clickhousedriver` | ClickHouse driver |
 | `esdriver` | `github.com/xraph/grove/drivers/esdriver` | Elasticsearch driver |
-| `plugin` | `github.com/xraph/grove/plugin` | Plugin interfaces and registry |
+| `plugin` | `github.com/xraph/grove/plugin` | Plugin interfaces and registry (not used by `grove.Open` yet) |
+| `crdt` | `github.com/xraph/grove/crdt` | CRDT plugin, sync controller, syncer, presence and rooms |
 | `grovetest` | `github.com/xraph/grove/grovetest` | Testing utilities: mock driver, fixtures, assertions |
 | `extension` | `github.com/xraph/grove/extension` | Forge extension entry point |
-| `audit` | `github.com/xraph/grove/audit` | Chronicle audit plugin |
-| `observability` | `github.com/xraph/grove/observability` | Prometheus metrics plugin |
+| `audit` | `github.com/xraph/grove/audit` | Post-mutation audit hook over a `Writer` |
+| `observability` | `github.com/xraph/grove/observability` | Query timing hook over a `Collector` |
 | `internal/tagparser` | `github.com/xraph/grove/internal/tagparser` | High-performance struct tag parser |
 | `internal/pool` | `github.com/xraph/grove/internal/pool` | sync.Pool-based byte buffer pool |
 | `internal/safe` | `github.com/xraph/grove/internal/safe` | Safe identifier quoting |
@@ -71,7 +72,7 @@ func (db *DB) RegisterModel(models ...any)
 func (db *DB) Driver() GroveDriver
 
 // Hooks returns the hook engine for registering lifecycle hooks.
-//   db.Hooks().AddHook(&TenantIsolation{}, hook.Scope{Tables: []string{"users"}})
+//   db.Hooks().AddHook(myTenantHook, hook.Scope{Tables: []string{"users"}})
 func (db *DB) Hooks() *hook.Engine
 
 // Query builders return any; use pgdriver.Unwrap(db) for typed builders.
@@ -96,8 +97,7 @@ Embed in your model structs to declare them as Grove models. Tag with `grove:"ta
 ```go
 func WithPoolSize(n int) Option
 func WithQueryTimeout(d time.Duration) Option
-func WithLogger(l *slog.Logger) Option
-func WithPlugin(p plugin.Plugin) Option
+func WithLogger(l log.Logger) Option // github.com/xraph/go-utils/log
 ```
 
 ## Driver Interfaces
@@ -300,3 +300,5 @@ var (
     ErrCyclicDependency   = errors.New("grove: cyclic dependency in migration groups")
 )
 ```
+
+`ErrMigrationLocked` and `ErrCyclicDependency` are declared, but the `migrate` package reports its own errors: a held lock wraps `migrate.ErrLockHeld`, and a cycle is a plain error naming the group. The root package also declares `ErrDriverClosed`, `ErrTxDone`, `ErrInvalidDSN`, `ErrHookPanic`, `ErrDuplicateVersion`, `ErrInvalidTag`, `ErrNoPrimaryKey` and `ErrInvalidRelation`.

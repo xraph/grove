@@ -118,8 +118,8 @@ transport := crdt.HTTPTransportWithClient("https://cloud.example.com/sync", http
 
 The `Syncer` orchestrates the two-phase sync protocol:
 
-1. **Pull phase** — Request changes from the remote node since the last sync point, merge them into local state using the merge engine
-2. **Push phase** — Read local changes since the last sync point, filter out echoed changes, push to the remote node
+1. Pull phase: request changes from the remote node since the last sync point, merge them into local state using the merge engine
+2. Push phase: read local changes since the last sync point, filter out echoed changes, push to the remote node
 
 ### Single Sync
 
@@ -285,8 +285,8 @@ http.ListenAndServe(":8080", mux)
 ```
 
 This registers:
-- `POST /sync/pull` — Pull changes
-- `POST /sync/push` — Push changes
+- `POST /sync/pull`: pull changes
+- `POST /sync/push`: push changes
 
 For SSE streaming with the standalone handler, see [SSE Streaming](/docs/crdt/streaming).
 
@@ -295,7 +295,7 @@ For SSE streaming with the standalone handler, see [SSE Streaming](/docs/crdt/st
 When using the Grove Forge extension, routes are registered automatically:
 
 ```go
-app.Use(groveext.New(
+app.RegisterExtension(groveext.New(
     groveext.WithDriver(pgdb),
     groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents"}}),
     groveext.WithSyncer(syncer),

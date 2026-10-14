@@ -44,23 +44,28 @@ func main() {
     ctx := context.Background()
 
     pgdb := pgdriver.New()
-    pgdb.Open(ctx, "postgres://user:pass@localhost:5432/mydb")
+    if err := pgdb.Open(ctx, "postgres://user:pass@localhost:5432/mydb?sslmode=disable"); err != nil {
+        log.Fatal(err)
+    }
 
     plugin := crdt.New(crdt.WithNodeID("server-1"))
+    plugin.SetExecutor(crdtExecutor{drv: pgdb}) // adapter from CRDT Getting Started
+    if err := plugin.EnsureShadowTable(ctx, "documents"); err != nil {
+        log.Fatal(err)
+    }
 
     app := forge.New()
-    app.Use(groveext.New(
+    app.RegisterExtension(groveext.New(
         groveext.WithDriver(pgdb),
         groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents"}}),
         groveext.WithSyncController(
             crdt.WithStreamPollInterval(500 * time.Millisecond),
             crdt.WithStreamKeepAlive(15 * time.Second),
         ),
-        groveext.WithMigrations(crdt.Migrations),
         groveext.WithBasePath("/api/sync"),
     ))
 
-    app.Start(ctx) // Sync at /api/sync/pull, /api/sync/push, /api/sync/stream
+    log.Fatal(app.Run()) // sync at /api/sync/pull, /api/sync/push, /api/sync/stream
 }
 ```
 

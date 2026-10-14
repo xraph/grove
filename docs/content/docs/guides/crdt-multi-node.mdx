@@ -1,6 +1,6 @@
 ---
 title: "CRDT: Multi-Node Sync"
-description: Set up multi-node CRDT sync with Grove — hub-and-spoke, peer-to-peer, and full Forge integration examples.
+description: Set up multi-node CRDT sync with Grove: hub-and-spoke, peer-to-peer, and full Forge integration examples.
 ---
 
 This guide demonstrates setting up multi-node CRDT sync with Grove. We cover hub-and-spoke (cloud + edge nodes), peer-to-peer, and full Forge integration.
@@ -58,10 +58,17 @@ func main() {
         crdt.WithNodeID("cloud-us-east"),
         crdt.WithTables("orders", "inventory"),
     )
+    plugin.SetExecutor(crdtExecutor{drv: pgdb}) // adapter from CRDT Getting Started
+    if err := plugin.EnsureShadowTable(ctx, "orders"); err != nil {
+        log.Fatal(err)
+    }
+    if err := plugin.EnsureShadowTable(ctx, "inventory"); err != nil {
+        log.Fatal(err)
+    }
 
-    // Cloud doesn't need a syncer — it only serves sync endpoints.
+    // Cloud doesn't need a syncer; it only serves sync endpoints.
     app := forge.New()
-    app.Use(groveext.New(
+    app.RegisterExtension(groveext.New(
         groveext.WithDriver(pgdb),
         groveext.WithCRDT(plugin, hook.Scope{
             Tables: []string{"orders", "inventory"},
@@ -70,13 +77,10 @@ func main() {
             crdt.WithStreamPollInterval(1 * time.Second),
             crdt.WithStreamKeepAlive(15 * time.Second),
         ),
-        groveext.WithMigrations(crdt.Migrations),
     ))
 
     // Registers: POST /sync/pull, POST /sync/push, GET /sync/stream
-    if err := app.Start(ctx); err != nil {
-        log.Fatal(err)
-    }
+    log.Fatal(app.Run())
 }
 ```
 
@@ -117,8 +121,15 @@ func main() {
         Tables: []string{"orders", "inventory"},
     })
 
-    plugin.EnsureShadowTable(ctx, "orders")
-    plugin.EnsureShadowTable(ctx, "inventory")
+    // driver.Exec writes $1 placeholders through to SQLite; rewrite them
+    // in the adapter if your SQLite build needs ?NNN.
+    plugin.SetExecutor(crdtExecutor{drv: driver})
+    if err := plugin.EnsureShadowTable(ctx, "orders"); err != nil {
+        log.Fatal(err)
+    }
+    if err := plugin.EnsureShadowTable(ctx, "inventory"); err != nil {
+        log.Fatal(err)
+    }
 
     // Connect to cloud with streaming.
     transport := crdt.NewStreamingTransport(
@@ -179,10 +190,11 @@ In P2P mode, every node syncs directly with every other node. Each node serves s
 ```go
 // Node A serves sync endpoints and connects to B and C.
 plugin := crdt.New(crdt.WithNodeID("node-a"))
+plugin.SetExecutor(crdtExecutor{drv: pgdb}) // adapter from CRDT Getting Started
 
 // Serve endpoints via Forge.
 app := forge.New()
-app.Use(groveext.New(
+app.RegisterExtension(groveext.New(
     groveext.WithDriver(pgdb),
     groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents"}}),
     groveext.WithSyncController(),
@@ -208,9 +220,10 @@ app.Start(ctx)
 ```go
 // Node B serves endpoints and connects to A and C.
 plugin := crdt.New(crdt.WithNodeID("node-b"))
+plugin.SetExecutor(crdtExecutor{drv: pgdb}) // adapter from CRDT Getting Started
 
 app := forge.New()
-app.Use(groveext.New(
+app.RegisterExtension(groveext.New(
     groveext.WithDriver(pgdb),
     groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents"}}),
     groveext.WithSyncController(),
@@ -324,9 +337,13 @@ func main() {
     ctx := context.Background()
 
     pgdb := pgdriver.New()
-    pgdb.Open(ctx, "postgres://user:pass@localhost:5432/node1")
+    pgdb.Open(ctx, "postgres://user:pass@localhost:5432/node1?sslmode=disable")
 
     plugin := crdt.New(crdt.WithNodeID("node-1"))
+    plugin.SetExecutor(crdtExecutor{drv: pgdb}) // adapter from CRDT Getting Started
+    if err := plugin.EnsureShadowTable(ctx, "documents"); err != nil {
+        log.Fatal(err)
+    }
 
     syncer := crdt.NewSyncer(plugin,
         crdt.WithTransport(crdt.NewStreamingTransport("http://localhost:8082/sync")),
@@ -334,20 +351,19 @@ func main() {
         crdt.WithSyncInterval(10 * time.Second),
     )
 
-    app := forge.New()
-    app.Use(groveext.New(
+    app := forge.New(forge.WithHTTPAddress(":8081"))
+    app.RegisterExtension(groveext.New(
         groveext.WithDriver(pgdb),
         groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents"}}),
         groveext.WithSyncer(syncer),
         groveext.WithSyncController(),
-        groveext.WithMigrations(crdt.Migrations),
     ))
 
-    app.POST("/documents", createDocHandler)
-    app.PUT("/documents/:id", updateDocHandler)
-    app.GET("/documents", listDocsHandler)
+    app.Router().POST("/documents", createDocHandler)
+    app.Router().PUT("/documents/:id", updateDocHandler)
+    app.Router().GET("/documents", listDocsHandler)
 
-    app.Start(ctx) // Listens on :8081
+    log.Fatal(app.Run())
 }
 ```
 
@@ -358,9 +374,13 @@ func main() {
     ctx := context.Background()
 
     pgdb := pgdriver.New()
-    pgdb.Open(ctx, "postgres://user:pass@localhost:5432/node2")
+    pgdb.Open(ctx, "postgres://user:pass@localhost:5432/node2?sslmode=disable")
 
     plugin := crdt.New(crdt.WithNodeID("node-2"))
+    plugin.SetExecutor(crdtExecutor{drv: pgdb}) // adapter from CRDT Getting Started
+    if err := plugin.EnsureShadowTable(ctx, "documents"); err != nil {
+        log.Fatal(err)
+    }
 
     syncer := crdt.NewSyncer(plugin,
         crdt.WithTransport(crdt.NewStreamingTransport("http://localhost:8081/sync")),
@@ -368,20 +388,19 @@ func main() {
         crdt.WithSyncInterval(10 * time.Second),
     )
 
-    app := forge.New()
-    app.Use(groveext.New(
+    app := forge.New(forge.WithHTTPAddress(":8082"))
+    app.RegisterExtension(groveext.New(
         groveext.WithDriver(pgdb),
         groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents"}}),
         groveext.WithSyncer(syncer),
         groveext.WithSyncController(),
-        groveext.WithMigrations(crdt.Migrations),
     ))
 
-    app.POST("/documents", createDocHandler)
-    app.PUT("/documents/:id", updateDocHandler)
-    app.GET("/documents", listDocsHandler)
+    app.Router().POST("/documents", createDocHandler)
+    app.Router().PUT("/documents/:id", updateDocHandler)
+    app.Router().GET("/documents", listDocsHandler)
 
-    app.Start(ctx) // Listens on :8082
+    log.Fatal(app.Run())
 }
 ```
 

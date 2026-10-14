@@ -29,7 +29,7 @@ Middleware is registered as options when opening a KV store:
 
 ```go
 import (
-    "log/slog"
+    "github.com/xraph/go-utils/log"
     "time"
 
     "github.com/xraph/grove/kv"
@@ -41,7 +41,7 @@ drv := boltdriver.New()
 drv.Open(ctx, "data.db")
 
 store, err := kv.Open(drv,
-    kv.WithHook(middleware.NewLogging(slog.Default())),
+    kv.WithHook(middleware.NewLogging(log.NewProductionLogger())),
     kv.WithHook(middleware.NewNamespace("tenant:acme")),
     kv.WithHook(middleware.NewCache(1000, 5*time.Minute)),
 )
@@ -75,7 +75,7 @@ store, err := kv.Open(drv,
     // 1. Circuit breaker first -- reject immediately if backend is down
     kv.WithHook(middleware.NewCircuitBreaker(5, 30*time.Second)),
     // 2. Logging -- capture all operations including short-circuited ones
-    kv.WithHook(middleware.NewLogging(slog.Default())),
+    kv.WithHook(middleware.NewLogging(log.NewProductionLogger())),
     // 3. Namespace -- prefix keys before any caching or backend access
     kv.WithHook(middleware.NewNamespace("tenant:acme")),
     // 4. L1 cache -- serve from memory if possible

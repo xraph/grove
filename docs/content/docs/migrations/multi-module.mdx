@@ -42,36 +42,43 @@ The migrator performs a topological sort to determine execution order:
 2. `forge.billing` and `forge.notifications` can run in any order
 3. `forge.analytics` runs after both `core` and `forge.billing`
 
-## Automatic Discovery
+## Composing Groups in Forge
 
-When using Forge, migration groups are discovered automatically from registered extensions:
+Each extension that implements `forge.MigratableExtension` (the Grove extension does) exposes its groups. Forge's CLI runner collects them, so `migrate up` and `AutoMigrate()` run every extension's migrations. A plain `app.Run()` doesn't apply any:
 
 ```go
-app := forge.New()
-app.Use(billingExt.New())        // Registers forge.billing migrations
-app.Use(notificationsExt.New())  // Registers forge.notifications migrations
-
-// All migrations compose automatically at startup
-app.Start(ctx)
+cli.NewAppRunner(func(ctx cli.CommandContext) (forge.App, error) {
+    return forge.New(
+        forge.WithAppName("myapp"),
+        forge.WithExtensions(
+            groveext.New(
+                groveext.WithDSN("postgres", dsn),
+                groveext.WithMigrations(core.Migrations, billing.Migrations, notifications.Migrations),
+            ),
+        ),
+    ), nil
+}).AutoMigrate().Run()
 ```
+
+To run several extensions' groups in one ordered pass, set `central_migrations: true` (or `groveext.WithCentralMigrations()`) and enable central migrations in the Forge `AppConfig`.
 
 ## Cycle Detection
 
-The migrator detects circular dependencies at startup:
+The orchestrator detects circular dependencies when it plans a run:
 
 ```go
-// This would panic with ErrCyclicDependency
+// Migrate returns "migrate: cyclic dependency detected involving group ..."
 var A = migrate.NewGroup("a", migrate.DependsOn("b"))
 var B = migrate.NewGroup("b", migrate.DependsOn("a"))
 ```
 
 ## Advisory Locking
 
-To prevent concurrent migration runs (e.g., in a multi-replica deployment), the migrator acquires a database-level advisory lock:
+To prevent concurrent migration runs (in a multi-replica deployment, say), the orchestrator takes a lock before it runs:
 
-- **PostgreSQL**: `pg_advisory_lock()`
-- **MySQL**: `GET_LOCK()`
-- **SQLite**: File-based lock
+- PostgreSQL: `pg_try_advisory_lock(1)`
+- MySQL: `GET_LOCK()`
+- SQLite and the others: a row in `grove_migration_locks`
 
-If the lock cannot be acquired, the migrator returns `ErrMigrationLocked`.
+If another process holds the lock, the error wraps `migrate.ErrLockHeld` (`migrate.IsLockError(err)` reports it). The Forge extension's `lock_timeout` controls how long it waits.
 

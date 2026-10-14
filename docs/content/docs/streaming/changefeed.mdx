@@ -3,11 +3,17 @@ title: Change Data Capture
 description: Real-time change streams for reacting to database inserts, updates, and deletes.
 ---
 
+import { Callout } from "fumadocs-ui/components/callout";
+
 ## Overview
 
-The `stream` package provides a generic Change Data Capture (CDC) abstraction through `ChangeStream[T]` and `ChangeEvent[T]`. This enables your application to react to real-time database changes -- inserts, updates, deletes -- without polling.
+The `stream` package provides a generic Change Data Capture (CDC) abstraction through `ChangeStream[T]` and `ChangeEvent[T]`. It lets your application react to inserts, updates and deletes without polling.
 
-CDC support is driver-dependent. The `driver.StreamCapable` interface reports whether a driver supports it:
+<Callout type="warn">
+No built-in driver implements `ChangeSource[T]` yet. The `stream` package gives you the types and the iteration wrapper; you supply the source. On PostgreSQL, `pgdriver`'s LISTEN/NOTIFY listener (below) is the building block.
+</Callout>
+
+The `driver.StreamCapable` interface is how a driver reports CDC support. Only `pgdriver` implements `SupportsCDC` today:
 
 ```go
 type StreamCapable interface {
@@ -18,10 +24,10 @@ type StreamCapable interface {
 
 | Driver | CDC Mechanism | `SupportsCDC()` |
 |--------|---------------|------------------|
-| `pgdriver` | PostgreSQL LISTEN/NOTIFY | `true` |
-| `mongodriver` | MongoDB Change Streams | `true` |
-| `mysqldriver` | -- | `false` |
-| `sqlitedriver` | -- | `false` |
+| `pgdriver` | LISTEN/NOTIFY listener (no `ChangeSource` yet) | `true` |
+| `mongodriver` | none built in | no method |
+| `mysqldriver` | none | no method |
+| `sqlitedriver` | none | no method |
 
 ## Change Operations
 
@@ -76,7 +82,7 @@ The `Before` and `After` fields depend on the operation type and driver capabili
 
 ## The `ChangeSource[T]` Interface
 
-Drivers implement the `ChangeSource[T]` interface to provide CDC events:
+A CDC source implements `ChangeSource[T]`:
 
 ```go
 type ChangeSource[T any] interface {
@@ -161,7 +167,7 @@ token := cs.ResumeToken()
 saveCheckpoint(token)
 
 // Later, resume from the saved token
-source := driver.WatchCollection("users", WithResumeToken(savedToken))
+source := newUserSource(savedToken) // your ChangeSource[User], resuming from the token
 cs := stream.NewChangeStream(source)
 ```
 
@@ -309,9 +315,7 @@ The listener acquires a dedicated connection from the pool when started. This co
 
 ## MongoDB: Native Change Streams
 
-MongoDB has native change stream support through its `watch()` API. The mongodriver implements the `ChangeSource[T]` interface by wrapping MongoDB's change stream cursor, providing full before/after document support and resume tokens.
-
-MongoDB change streams support the `ChangeReplace` operation in addition to insert, update, and delete.
+MongoDB has native change streams through its `watch()` API, but `mongodriver` doesn't wrap them in a `ChangeSource[T]` yet. To use them today, open a change stream with the official driver (through `mongodriver.Unwrap(db)`) and adapt its cursor to `ChangeSource[T]` yourself. `ChangeReplace` exists for MongoDB's replace events.
 
 ## API Summary
 

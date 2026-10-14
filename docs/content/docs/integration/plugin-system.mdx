@@ -1,122 +1,86 @@
 ---
 title: Plugin System
-description: Extend Grove with plugins for audit logging, metrics, and custom behavior.
+description: The grove/plugin interfaces, and how audit logging, metrics and CRDT sync actually plug in through hooks.
 ---
 
-Grove's plugin system lets you extend the ORM with custom behavior at lifecycle boundaries. Plugins are simpler than hooks — they respond to high-level events rather than intercepting individual queries.
+import { Callout } from 'fumadocs-ui/components/callout';
 
-## Base Interface
+<Callout type="warn">
+`github.com/xraph/grove/plugin` defines plugin interfaces and a registry, but nothing in Grove uses them yet: `grove.Open` has no plugin option, and no code calls the registry. Everything that extends Grove today (audit logging, metrics, tenant isolation, CRDT sync) does it as a hook added with `db.Hooks().AddHook`. See [Hooks](/docs/hooks/overview).
+</Callout>
 
-Every plugin must implement the `Plugin` interface:
+## The plugin Package
 
 ```go
 import "github.com/xraph/grove/plugin"
 
 type Plugin interface {
     Name() string
+    Init(ctx context.Context, db any) error
+}
+
+// Optional extensions of Plugin.
+type WithHooks interface {
+    Plugin
+    RegisterHooks(hookEngine any) error
+}
+
+type WithMigrations interface {
+    Plugin
+    MigrationGroup() any
 }
 ```
 
-## Lifecycle Hooks
+`plugin.NewRegistry()` returns a `*Registry` with `Register`, `Get`, `Plugins` and `InitAll(ctx, db)`. If you want a plugin pattern in your own code, you can use the registry yourself and call `InitAll` after opening the database.
 
-Plugins opt into events by implementing additional interfaces:
+## Extending Grove with Hooks
 
-### Model Events
+A hook is any type that implements one or more of the hook interfaces (`hook.PreQueryHook`, `hook.PostQueryHook`, `hook.PreMutationHook`, `hook.PostMutationHook`, `hook.StreamRowHook`). Add it with a scope:
 
 ```go
-type AfterRegisterModel interface {
-    OnModelRegistered(ctx context.Context, table *schema.Table)
-}
+db.Hooks().AddHook(myHook, hook.Scope{
+    Tables:   []string{"orders"},
+    Priority: 10,
+})
 ```
 
-### Connection Events
+With the Forge extension, pass hooks as options instead: `groveext.WithHook(h, scope)` or `groveext.WithHookFor(dbName, h, scope)`.
 
-```go
-type AfterConnect interface {
-    OnConnected(ctx context.Context, db *grove.DB)
-}
+## Built-in Hooks
 
-type BeforeClose interface {
-    OnClosing(ctx context.Context, db *grove.DB) error
-}
-```
+### Audit Logging (`grove/audit`)
 
-### Migration Events
-
-```go
-type AfterMigrate interface {
-    OnMigrated(ctx context.Context, migrations []migrate.AppliedMigration)
-}
-```
-
-## Registering Plugins
-
-```go
-// Step 1: Create and connect the driver
-pgdb := pgdriver.New()
-pgdb.Open(ctx, "postgres://localhost:5432/mydb", driver.WithPoolSize(20))
-
-// Step 2: Open grove.DB with plugins
-db, _ := grove.Open(pgdb,
-    grove.WithPlugin(&MyAuditPlugin{}),
-    grove.WithPlugin(&MyMetricsPlugin{}),
-)
-```
-
-## Type-Assertion Discovery
-
-The plugin registry uses type assertions to discover which events each plugin handles. Implement only the interfaces you need:
-
-```go
-type MyPlugin struct{}
-
-func (p *MyPlugin) Name() string { return "my-plugin" }
-
-// Only implement OnConnected — other events are ignored
-func (p *MyPlugin) OnConnected(ctx context.Context, db *grove.DB) {
-    log.Printf("connected to database")
-}
-```
-
-## Built-in Plugins
-
-### Chronicle Audit Plugin
-
-Emits database events to [Chronicle](https://github.com/xraph/chronicle) for audit trails:
+A post-mutation hook that records every INSERT, UPDATE and DELETE through a `Writer`:
 
 ```go
 import "github.com/xraph/grove/audit"
 
-auditPlugin := audit.New(chronicleClient)
-db, _ := grove.Open(pgdb,
-    grove.WithPlugin(auditPlugin),
-)
+// Write entries through your own Writer (a Chronicle adapter, a table, a queue).
+db.Hooks().AddHook(audit.NewHook(myWriter))
+
+// Or log them.
+db.Hooks().AddHook(audit.NewLogHook(logger))
 ```
 
-Events emitted:
-- `grove.query.select` / `grove.query.insert` / `grove.query.update` / `grove.query.delete`
-- `grove.migration.applied` / `grove.migration.rolled_back`
-- `grove.connection.opened` / `grove.connection.closed`
+`audit.Writer` is one method, `WriteEntry(ctx, *audit.AuditEntry) error`. Grove doesn't ship a Chronicle writer, so adapting it is up to you.
 
-### Prometheus Metrics Plugin
+### Query Metrics (`grove/observability`)
 
-Exports query performance metrics:
+A hook that times queries and mutations and reports them to a `Collector`:
 
 ```go
 import "github.com/xraph/grove/observability"
 
-metricsPlugin := observability.New()
-db, _ := grove.Open(pgdb,
-    grove.WithPlugin(metricsPlugin),
-)
+collector := observability.NewInMemoryCollector()
+db.Hooks().AddHook(observability.NewHook(collector))
 ```
 
-Metrics:
-- `grove_queries_total` — Total queries by operation and table
-- `grove_query_duration_seconds` — Query latency histogram
-- `grove_connections_active` — Active connection count
-- `grove_migrations_total` — Migration execution count
+`observability.Collector` is one method, `RecordQuery(table, operation string, duration time.Duration, err error)`. Implement it to forward to Prometheus, OpenTelemetry or anything else. Grove doesn't register any Prometheus metrics itself.
 
-## KV Store Plugin Compatibility
+### CRDT Sync (`grove/crdt`)
 
-The KV module (`grove/kv`) uses the same `grove/plugin` package for plugin registration. The `grove/hook` package is shared between the ORM and KV store, so middleware written as hooks works seamlessly across both. See the [KV Middleware Overview](/docs/kv/middleware/overview) for KV-specific middleware patterns.
+`crdt.New(...)` returns a `*crdt.Plugin`. Despite the name it's added as a hook, not through the plugin registry. See [CRDT Getting Started](/docs/crdt/getting-started).
+
+## KV Store
+
+The KV module (`grove/kv`) shares the `grove/hook` package with the ORM, so a hook that only looks at `hook.QueryContext` can run on both. KV-specific behavior lives in KV middleware and plugins. See the [KV Middleware Overview](/docs/kv/middleware/overview).

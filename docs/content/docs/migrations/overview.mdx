@@ -9,11 +9,11 @@ Grove migrations are Go code, not SQL files. Any Go module can register migratio
 
 ## Key Concepts
 
-- **Migrations are Go functions** — not SQL files, enabling logic, conditionals, and data transformations
-- **Groups** — Migrations belong to named groups (e.g., `"core"`, `"forge.billing"`)
-- **Dependencies** — Groups declare dependencies on other groups for ordering
-- **Topological Sort** — The migrator resolves execution order automatically
-- **Locking** — Advisory locks prevent concurrent migration runs
+- Migrations are Go functions, not SQL files, so they can hold logic, conditionals and data transformations.
+- Groups: migrations belong to named groups (for example `"core"` or `"forge.billing"`).
+- Dependencies: a group declares the groups it depends on with `migrate.DependsOn`.
+- Ordering: the orchestrator sorts groups by dependency, then migrations by version.
+- Locking: a lock stops two processes from migrating at once (an advisory lock on PostgreSQL and MySQL, a row in `grove_migration_locks` on SQLite and the others).
 
 ## Defining Migrations
 
@@ -27,15 +27,15 @@ func init() {
         Name:    "create_users",
         Version: "20240101000000",
         Up: func(ctx context.Context, exec migrate.Executor) error {
-            _, err := exec.NewCreateTable((*User)(nil)).
-                IfNotExists().
-                Exec(ctx)
+            _, err := exec.Exec(ctx, `CREATE TABLE IF NOT EXISTS users (
+                id    BIGSERIAL PRIMARY KEY,
+                name  TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE
+            )`)
             return err
         },
         Down: func(ctx context.Context, exec migrate.Executor) error {
-            _, err := exec.NewDropTable((*User)(nil)).
-                IfExists().
-                Exec(ctx)
+            _, err := exec.Exec(ctx, `DROP TABLE IF EXISTS users`)
             return err
         },
     })
@@ -44,12 +44,13 @@ func init() {
 
 ## Running Migrations
 
+The executor inside a migration is a `migrate.Executor`, which has `Exec` and `Query` for raw SQL (plus the tracking and lock methods the orchestrator uses). It has no query builder, so migrations are written in SQL, or in BSON commands for MongoDB.
+
 ```go
 import "github.com/xraph/grove/drivers/pgdriver/pgmigrate"
 
 // Create a driver-specific executor
-pgdb := pgdriver.Unwrap(db)
-executor := pgmigrate.NewExecutor(pgdb)
+executor := pgmigrate.New(pgdriver.Unwrap(db))
 
 // Create the orchestrator with the executor
 orchestrator := migrate.NewOrchestrator(executor,
@@ -70,19 +71,20 @@ statuses, err := orchestrator.Status(ctx)
 
 ## Migration Table
 
-Grove tracks migration state in `grove_migrations`:
+Grove tracks migration state in `grove_migrations` (the PostgreSQL form, from `migrate.MigrationTableSchema()`):
 
 ```sql
-CREATE TABLE grove_migrations (
-    id         SERIAL PRIMARY KEY,
-    group_name VARCHAR(255) NOT NULL,
-    name       VARCHAR(255) NOT NULL,
-    version    VARCHAR(255) NOT NULL,
-    batch      INTEGER NOT NULL,
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(group_name, version)
+CREATE TABLE IF NOT EXISTS grove_migrations (
+    id          BIGSERIAL PRIMARY KEY,
+    version     VARCHAR(14) NOT NULL,
+    name        VARCHAR(255) NOT NULL,
+    "group"     VARCHAR(255) NOT NULL,
+    migrated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(version, "group")
 );
 ```
+
+Each driver's executor creates the tracking table (and, where it uses one, the `grove_migration_locks` table) in its own dialect.
 
 ## Executor Registry
 
@@ -135,6 +137,6 @@ fmt.Println("Registered executors:", names) // e.g. [pg mysql sqlite]
 ```
 
 <Callout type="info">
-When using the Grove Forge extension, executor registration is handled automatically — you only need the blank import for your driver's migrate package.
+With the Grove Forge extension you still need the blank import for your driver's migrate package. The extension then finds the executor through the registry.
 </Callout>
 

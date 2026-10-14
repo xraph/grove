@@ -1,6 +1,6 @@
 ---
 title: "CRDT: Offline-First App"
-description: Build an offline-first Go application with Grove CRDTs — local operations, queue-and-sync, error handling, and tombstone cleanup.
+description: Build an offline-first Go application with Grove CRDTs: local operations, queue-and-sync, error handling, and tombstone cleanup.
 ---
 
 This guide walks through building an offline-first application with Grove CRDTs. The app makes local changes while offline and syncs them when connectivity returns.
@@ -75,7 +75,9 @@ func main() {
         Tables: []string{"tasks"},
     })
 
-    // Ensure shadow table exists.
+    // Give the plugin a database executor (the crdtExecutor adapter from
+    // CRDT Getting Started), then make sure the shadow table exists.
+    plugin.SetExecutor(crdtExecutor{drv: driver})
     if err := plugin.EnsureShadowTable(ctx, "tasks"); err != nil {
         log.Fatal(err)
     }

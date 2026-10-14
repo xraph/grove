@@ -3,7 +3,7 @@ title: Configuration
 description: Configure Grove via YAML files, environment variables, or programmatic options.
 ---
 
-The Grove Forge extension supports multiple configuration sources with automatic merging. YAML configuration takes precedence, with programmatic options filling in gaps.
+The Grove Forge extension supports multiple configuration sources with automatic merging. YAML takes precedence, and programmatic options fill in the gaps. Environment variables work through Forge's config loader, which expands `${VAR}` and `${VAR:-default}` in YAML values.
 
 ## YAML Configuration
 
@@ -14,16 +14,16 @@ Add a `grove` key under `extensions` in your Forge config file:
 extensions:
   grove:
     driver: postgres
-    dsn: "postgres://user:pass@localhost:5432/mydb"
+    dsn: "postgres://user:pass@localhost:5432/mydb?sslmode=disable"
     disable_migrate: false
+    lock_timeout: 30s
     disable_routes: false
     base_path: "/sync"
 ```
 
-The extension also supports a top-level `grove` key for backward compatibility:
+The extension also reads a top-level `grove` key:
 
 ```yaml
-# Legacy format
 grove:
   driver: postgres
   dsn: "postgres://user:pass@localhost:5432/mydb"
@@ -37,20 +37,27 @@ The namespaced `extensions.grove` key is checked first, then the top-level `grov
 |-------|----------|------|---------|-------------|
 | Driver | `driver` | `string` | `""` | Database driver name |
 | DSN | `dsn` | `string` | `""` | Connection string |
-| DisableRoutes | `disable_routes` | `bool` | `false` | Skip CRDT sync route registration |
-| DisableMigrate | `disable_migrate` | `bool` | `false` | Skip automatic migrations |
-| BasePath | `base_path` | `string` | `"/sync"` | URL prefix for CRDT sync routes |
+| Databases | `databases` | list | none | Named databases (`name`, `driver`, `dsn`) for multi-DB mode |
+| Default | `default` | `string` | first database | Default database in multi-DB mode |
+| DisableMigrate | `disable_migrate` | `bool` | `false` | Makes `Migrate` and `Rollback` return an error |
+| LockTimeout | `lock_timeout` | `duration` | `0` (migrate default) | How long migrations wait for the lock. Negative waits for the context deadline |
+| CentralMigrations | `central_migrations` | `bool` | `false` | Send the migration groups to Forge's shared migration registry |
+| DisableRoutes | `disable_routes` | `bool` | `false` | Skip the CRDT sync routes |
+| BasePath | `base_path` | `string` | `"/sync"` | URL prefix for the CRDT sync routes |
 
 ## Supported Driver Names
 
 | Name | Driver Module | Database |
 |------|--------------|----------|
-| `postgres` | `github.com/xraph/grove/drivers/pgdriver` | PostgreSQL, CockroachDB, Neon, Supabase |
+| `postgres`, `pg` | `github.com/xraph/grove/drivers/pgdriver` | PostgreSQL and wire-compatible databases |
 | `sqlite` | `github.com/xraph/grove/drivers/sqlitedriver` | SQLite |
 | `mysql` | `github.com/xraph/grove/drivers/mysqldriver` | MySQL, MariaDB |
-| `mongodb` | `github.com/xraph/grove/drivers/mongodriver` | MongoDB |
-| `turso` | `github.com/xraph/grove/drivers/tursodriver` | Turso (LibSQL) |
+| `mongodb`, `mongo` | `github.com/xraph/grove/drivers/mongodriver` | MongoDB |
+| `turso` | `github.com/xraph/grove/drivers/tursodriver` | Turso (libSQL) |
 | `clickhouse` | `github.com/xraph/grove/drivers/clickhousedriver` | ClickHouse |
+| `elasticsearch` | `github.com/xraph/grove/drivers/esdriver` | Elasticsearch |
+
+A name only resolves after you import the driver package (a blank import is enough).
 
 ## Programmatic Options
 
@@ -63,6 +70,7 @@ groveext.New(
     groveext.WithDisableMigrate(),          // Disable auto-migration
     groveext.WithDisableRoutes(),           // Disable CRDT route registration
     groveext.WithBasePath("/api/sync"),     // Custom sync route prefix
+    groveext.WithLockTimeout(time.Minute),  // Migration lock wait
     groveext.WithRequireConfig(true),       // Require YAML config
 )
 ```
@@ -71,10 +79,10 @@ groveext.New(
 
 When both YAML and programmatic options are provided:
 
-1. **Driver/DSN**: YAML takes precedence. If YAML has no driver, programmatic values are used.
-2. **Boolean flags**: Programmatic `true` values are additive — if either source sets a flag to `true`, it stays `true`.
-3. **BasePath**: YAML takes precedence. Programmatic fills in if YAML is empty.
-4. **WithDriver()**: A pre-configured driver instance always takes precedence over YAML `driver`+`dsn`.
+1. Driver and DSN: YAML takes precedence. If YAML has no driver, programmatic values are used.
+2. Boolean flags: programmatic `true` values are additive. If either source sets a flag to `true`, it stays `true`.
+3. BasePath: YAML takes precedence, and programmatic fills in if YAML is empty.
+4. `WithDriver()`: an opened driver always takes precedence over YAML `driver` and `dsn`.
 
 ### Example: YAML + Programmatic
 
@@ -83,17 +91,17 @@ When both YAML and programmatic options are provided:
 extensions:
   grove:
     driver: postgres
-    dsn: "postgres://prod:secret@db.example.com/myapp"
+    dsn: "postgres://prod:secret@db.example.com/myapp?sslmode=require"
 ```
 
 ```go
 // Programmatic options
-app.Use(groveext.New(
-    groveext.WithDSN("sqlite", "file::memory:"),  // Ignored — YAML takes precedence
-    groveext.WithDisableMigrate(),                  // Applied — YAML didn't set this
-    groveext.WithMigrations(appMigrations),          // Applied — not a config field
-    groveext.WithHook(&auditHook),                   // Applied — not a config field
-))
+ext := groveext.New(
+    groveext.WithDSN("sqlite", "file::memory:"),  // ignored: YAML takes precedence
+    groveext.WithDisableMigrate(),                // applied: YAML didn't set it
+    groveext.WithMigrations(appMigrations),       // applied: not a config field
+    groveext.WithHook(&auditHook),                // applied: not a config field
+)
 
 // Result: postgres driver from YAML + disable_migrate from programmatic
 ```
@@ -103,9 +111,9 @@ app.Use(groveext.New(
 Use `WithRequireConfig(true)` to fail fast when no YAML config is found:
 
 ```go
-app.Use(groveext.New(
-    groveext.WithRequireConfig(true), // Error if no YAML config
-))
+ext := groveext.New(
+    groveext.WithRequireConfig(true), // error if no YAML config
+)
 ```
 
 This is useful in production to ensure the application doesn't fall back to defaults.
@@ -114,9 +122,9 @@ This is useful in production to ensure the application doesn't fall back to defa
 
 The extension resolves configuration in this order:
 
-1. **YAML config**: `extensions.grove` key → `grove` key
-2. **Programmatic options**: Values set via `ExtOption` functions
-3. **Defaults**: Empty config (no driver, no DSN)
+1. YAML config: the `extensions.grove` key, then the `grove` key
+2. Programmatic options: values set with `ExtOption` functions
+3. Defaults: an empty config (no driver, no DSN)
 
 If no config is found and no programmatic driver is set, the extension returns a clear error:
 

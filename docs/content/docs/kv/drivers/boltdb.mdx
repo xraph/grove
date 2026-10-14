@@ -59,7 +59,7 @@ BoltDB does not natively support key expiration. The driver emulates TTL by stor
 
 ```go
 // Set with a TTL
-err := store.Set(ctx, "session:abc", data, 30*time.Minute)
+err := store.Set(ctx, "session:abc", data, kv.WithTTL(30*time.Minute))
 
 // Check remaining TTL
 remaining, err := store.TTL(ctx, "session:abc")

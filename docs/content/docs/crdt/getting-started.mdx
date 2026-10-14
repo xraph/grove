@@ -3,12 +3,17 @@ title: Getting Started
 description: Set up CRDT-enabled models, create the plugin, ensure shadow tables, and perform your first sync.
 ---
 
+import { Callout } from "fumadocs-ui/components/callout";
+
 This guide walks through the complete setup for Grove CRDTs: defining models, creating the plugin, setting up shadow tables, and performing your first sync between nodes.
 
 ## Installation
 
+The `crdt` package is part of the root module:
+
 ```bash
-go get github.com/xraph/grove/crdt
+go get github.com/xraph/grove@latest
+go get github.com/xraph/grove/drivers/pgdriver@latest
 ```
 
 ## Define a CRDT-Enabled Model
@@ -25,39 +30,58 @@ type Document struct {
     ID        string   `grove:"id,pk"`
     Title     string   `grove:"title,crdt:lww"`       // Last-Writer-Wins
     ViewCount int64    `grove:"view_count,crdt:counter"` // PN-Counter
-    Tags      []string `grove:"tags,type:jsonb,crdt:set"` // OR-Set
+    Tags      []string `grove:"tags,type:jsonb,crdt:set"`   // OR-Set
     Author    string   `grove:"author"`                // Normal field (no CRDT)
 }
 ```
 
 Each CRDT type has different merge behavior:
 
-- **`crdt:lww`** — The write with the highest HLC timestamp wins. Best for scalar values like strings, booleans, or JSON objects.
-- **`crdt:counter`** — Tracks per-node increments and decrements separately. Best for counters that multiple nodes can update concurrently.
-- **`crdt:set`** — Add-wins observed-remove set. Best for collections like tags or member lists.
+- `crdt:lww`: the write with the highest HLC timestamp wins. Best for scalar values like strings, booleans or JSON objects.
+- `crdt:counter`: tracks per-node increments and decrements separately. Best for counters that several nodes update at once.
+- `crdt:set`: an add-wins observed-remove set. Best for collections like tags or member lists.
 
 ## Create the CRDT Plugin
 
-The plugin intercepts Grove mutations and tracks changes in shadow tables.
+The plugin intercepts Grove mutations and tracks changes in shadow tables. It reads and writes those tables through a `crdt.Executor`, which you have to give it with `SetExecutor`. Grove doesn't ship one, but a Grove driver is close enough that the adapter is a few lines:
 
 ```go
 import (
+    "context"
+
     "github.com/xraph/grove/crdt"
+    "github.com/xraph/grove/driver"
     "github.com/xraph/grove/hook"
 )
 
+// crdtExecutor adapts a Grove driver to crdt.Executor.
+type crdtExecutor struct{ drv driver.Driver }
+
+func (e crdtExecutor) ExecContext(ctx context.Context, query string, args ...any) (crdt.ExecResult, error) {
+    return e.drv.Exec(ctx, query, args...)
+}
+
+func (e crdtExecutor) QueryContext(ctx context.Context, query string, args ...any) (crdt.Rows, error) {
+    return e.drv.Query(ctx, query, args...)
+}
+
 // Create the plugin with a unique node identifier.
 plugin := crdt.New(
-    crdt.WithNodeID("node-1"),           // Required: unique per node
-    crdt.WithTables("documents"),         // Optional: restrict to specific tables
-    crdt.WithTombstoneTTL(7 * 24 * time.Hour), // Optional: tombstone expiry (default: 7d)
+    crdt.WithNodeID("node-1"),                 // required: unique per node
+    crdt.WithTables("documents"),              // optional: restrict to specific tables
+    crdt.WithTombstoneTTL(7 * 24 * time.Hour), // optional: tombstone expiry (default 7 days)
 )
+plugin.SetExecutor(crdtExecutor{drv: pgdb})   // pgdb is the opened *pgdriver.PgDB
 
-// Register with the Grove DB hook engine.
+// Add it to the Grove DB hook engine.
 db.Hooks().AddHook(plugin, hook.Scope{
     Tables: []string{"documents"},
 })
 ```
+
+<Callout type="warn">
+Without `SetExecutor`, nothing fails loudly: mutations simply record no CRDT state, and `Inspect` and the sync controller have no store to read from. The metadata store writes PostgreSQL-style `$1` placeholders, so the adapter above works as-is on PostgreSQL. For SQLite, rewrite `$n` to `?n` in the adapter.
+</Callout>
 
 The `NodeID` must be unique across all nodes in the sync cluster. Use descriptive names like `"cloud-us-east"`, `"edge-store-42"`, or `"browser-abc123"`.
 
@@ -67,26 +91,41 @@ CRDT metadata is stored in shadow tables named `_<table>_crdt`. These sit alongs
 
 ### Option A: Ensure at Runtime
 
+After `SetExecutor`, create the shadow table and its sync index:
+
 ```go
-// Create shadow table for the "documents" table.
-err := plugin.EnsureShadowTable(ctx, "documents")
-if err != nil {
+if err := plugin.EnsureShadowTable(ctx, "documents"); err != nil {
     log.Fatal(err)
 }
 ```
 
-### Option B: Use Migrations
+### Option B: In Your Own Migration
 
-Register CRDT migrations with your Grove migration group:
+There's no ready-made CRDT migration group. Put the DDL in a migration of your own with `crdt.ShadowTableDDL` and `crdt.ShadowTableSyncIndex`:
 
 ```go
-import "github.com/xraph/grove/crdt"
+var Migrations = migrate.NewGroup("crdt")
 
-// In your migration setup
-db.RegisterMigrations(crdt.Migrations)
+func init() {
+    Migrations.MustRegister(&migrate.Migration{
+        Name:    "create_documents_crdt",
+        Version: "20260101000000",
+        Up: func(ctx context.Context, exec migrate.Executor) error {
+            if _, err := exec.Exec(ctx, crdt.ShadowTableDDL("documents")); err != nil {
+                return err
+            }
+            _, err := exec.Exec(ctx, crdt.ShadowTableSyncIndex("documents"))
+            return err
+        },
+        Down: func(ctx context.Context, exec migrate.Executor) error {
+            _, err := exec.Exec(ctx, crdt.DropShadowTableDDL("documents"))
+            return err
+        },
+    })
+}
 ```
 
-The migration creates the shadow table with columns for field name, HLC timestamp, counter, node ID, and CRDT state (JSON), along with a composite sync index for efficient change queries.
+The shadow table has columns for the record key hash, field name, HLC timestamp and counter, node ID, a tombstone flag and the CRDT state (JSON), and the index covers the HLC columns for change queries.
 
 ## Perform Your First Sync
 
@@ -148,13 +187,13 @@ syncer := crdt.NewSyncer(plugin,
     crdt.WithSyncInterval(30 * time.Second), // Fallback poll
 )
 
-go syncer.Run(ctx)        // Periodic pull/push
+go syncer.Run(ctx)        // periodic pull and push
 go syncer.StreamSync(ctx) // SSE real-time changes
 ```
 
 ## Forge Integration
 
-When running inside a Forge app, use the Grove extension for automatic route registration, SSE streaming, and lifecycle management:
+Inside a Forge app, the Grove extension mounts the sync routes, starts the syncer and manages the lifecycle. It doesn't set the plugin's executor or create shadow tables, so do both before you register it:
 
 ```go
 import (
@@ -166,27 +205,37 @@ import (
 )
 
 pgdb := pgdriver.New()
-pgdb.Open(ctx, "postgres://user:pass@localhost:5432/mydb")
+if err := pgdb.Open(ctx, "postgres://user:pass@localhost:5432/mydb?sslmode=disable"); err != nil {
+    log.Fatal(err)
+}
 
 plugin := crdt.New(crdt.WithNodeID("node-1"))
+plugin.SetExecutor(crdtExecutor{drv: pgdb})
+if err := plugin.EnsureShadowTable(ctx, "documents"); err != nil {
+    log.Fatal(err)
+}
+
 syncer := crdt.NewSyncer(plugin,
     crdt.WithTransport(crdt.HTTPTransport("https://peer.example.com/sync")),
     crdt.WithSyncTables("documents"),
 )
 
-app := forge.New()
-app.Use(groveext.New(
+app := forge.New(forge.WithAppName("docs"))
+err := app.RegisterExtension(groveext.New(
     groveext.WithDriver(pgdb),
     groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents"}}),
     groveext.WithSyncer(syncer),
     groveext.WithSyncController(
         crdt.WithStreamPollInterval(2 * time.Second),
         crdt.WithStreamKeepAlive(30 * time.Second),
-        crdt.WithPresenceEnabled(true),              // Enable presence tracking
-        crdt.WithPresenceTTL(30 * time.Second),       // Entry expiry (default: 30s)
+        crdt.WithPresenceEnabled(true),         // enable presence tracking
+        crdt.WithPresenceTTL(30 * time.Second), // entry expiry (default 30s)
     ),
 ))
-app.Start(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+log.Fatal(app.Run())
 ```
 
 This automatically registers sync and presence endpoints:
@@ -196,6 +245,7 @@ This automatically registers sync and presence endpoints:
 | POST | `/sync/pull` | Remote nodes pull changes |
 | POST | `/sync/push` | Remote nodes push changes |
 | GET | `/sync/stream` | SSE stream of real-time changes and presence events |
+| GET | `/sync/ws` | WebSocket sync |
 | POST | `/sync/presence` | Update or leave a presence topic |
 | GET | `/sync/presence` | Get current presence snapshot for a topic |
 

@@ -92,7 +92,7 @@ DynamoDB TTL is handled natively. When you set a key with a TTL, the driver stor
 
 ```go
 // Set with a 1-hour TTL
-err := store.Set(ctx, "session:abc", data, 1*time.Hour)
+err := store.Set(ctx, "session:abc", data, kv.WithTTL(1*time.Hour))
 
 // Check remaining TTL
 remaining, err := store.TTL(ctx, "session:abc")

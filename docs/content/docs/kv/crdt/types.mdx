@@ -1,6 +1,6 @@
 ---
 title: CRDT Types
-description: Available CRDT data types in Grove KV — Counter, Register, Set, Map, List, and Document — with API reference, merge semantics, and usage examples.
+description: Available CRDT data types in Grove KV: Counter, Register, Set, Map, List and Document, with API reference, merge semantics, and usage examples.
 ---
 
 The `kvcrdt` package provides six CRDT types that persist their state in a KV store. Each type wraps a core `grove/crdt` state struct and uses the adapter pattern described in the [overview](/docs/kv/crdt/overview). All types share a common set of options and follow the same read-modify-write cycle.
@@ -12,10 +12,11 @@ All CRDT types are created with a KV store reference, a key, and optional config
 ```go
 import (
     "github.com/xraph/grove/kv"
+    "github.com/xraph/grove/kv/kvtest"
     kvcrdt "github.com/xraph/grove/kv/crdt"
 )
 
-store := kv.NewMemoryStore()
+store, _ := kv.Open(kvtest.NewMockDriver()) // in-memory driver from kv/kvtest
 
 counter  := kvcrdt.NewCounter(store, "page:views", kvcrdt.WithNodeID("node-1"))
 register := kvcrdt.NewRegister[string](store, "user:name", kvcrdt.WithNodeID("node-1"))

@@ -26,8 +26,8 @@ Grove defines sentinel errors for all failure cases. Use `errors.Is()` to check 
 | Error | Description |
 |-------|-------------|
 | `ErrMigrationFailed` | A migration function returned an error |
-| `ErrMigrationLocked` | Another process holds the migration lock |
-| `ErrCyclicDependency` | Migration group dependencies form a cycle |
+| `ErrMigrationLocked` | Declared for a held migration lock; the orchestrator actually returns an error wrapping `migrate.ErrLockHeld` |
+| `ErrCyclicDependency` | Declared for dependency cycles; the orchestrator returns a plain `migrate: cyclic dependency` error instead |
 | `ErrDuplicateVersion` | Two migrations share the same version string |
 
 ## Hook Errors

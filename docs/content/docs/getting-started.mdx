@@ -5,20 +5,24 @@ description: Install Grove and run your first database query.
 
 ## Installation
 
+You need Go 1.25 or later (the Forge extension needs 1.26).
+
 ```bash
-go get github.com/xraph/grove
+go get github.com/xraph/grove@latest
 ```
 
 For PostgreSQL support (the most common driver):
 
 ```bash
-go get github.com/xraph/grove/drivers/pgdriver
+go get github.com/xraph/grove/drivers/pgdriver@latest
 ```
+
+Each driver is its own module, so you only download the client libraries for the databases you use. The [README quick start](https://github.com/xraph/grove#quick-start) has a runnable SQLite version of this page that needs no database server.
 
 For use as a [Forge extension](/docs/integration/forge-extension):
 
 ```bash
-go get github.com/xraph/grove/extension
+go get github.com/xraph/grove/extension@latest
 ```
 
 ## Step 1: Define a Model
@@ -28,7 +32,11 @@ Grove uses struct tags to map Go types to database columns. Use `grove:"..."` ta
 ```go
 package main
 
-import "github.com/xraph/grove"
+import (
+    "time"
+
+    "github.com/xraph/grove"
+)
 
 type User struct {
     grove.BaseModel `grove:"table:users,alias:u"`
@@ -38,7 +46,7 @@ type User struct {
     Email     string    `grove:"email,notnull,unique"`
     Role      string    `grove:"role,notnull,default:'user'"`
     CreatedAt time.Time `grove:"created_at,nullzero,notnull,default:current_timestamp"`
-    DeletedAt time.Time `grove:"deleted_at,soft_delete,nullzero"`
+    DeletedAt *time.Time `grove:"deleted_at,soft_delete,nullzero"`
 }
 ```
 
@@ -53,7 +61,9 @@ import (
 
 // 1. Create and open the driver
 pgdb := pgdriver.New()
-pgdb.Open(ctx, "postgres://user:pass@localhost/mydb", driver.WithPoolSize(20))
+if err := pgdb.Open(ctx, "postgres://user:pass@localhost:5432/mydb?sslmode=disable", driver.WithPoolSize(20)); err != nil {
+    log.Fatal(err)
+}
 
 // 2. Pass the connected driver to Grove
 db, err := grove.Open(pgdb)
@@ -69,43 +79,48 @@ defer db.Close()
 db.RegisterModel((*User)(nil))
 ```
 
+Registering caches the model's schema up front. Queries resolve unregistered models on first use too.
+
 ## Step 4: Query Data
 
-Access the PostgreSQL-specific query builder via `Unwrap`:
+Access the PostgreSQL-specific query builder with `Unwrap`. Write `?` placeholders and the driver numbers them `$1`, `$2` and so on:
 
 ```go
-pgdb := pgdriver.Unwrap(db)
+q := pgdriver.Unwrap(db)
+
+// CREATE TABLE
+_, err := q.NewCreateTable((*User)(nil)).IfNotExists().Exec(ctx)
 
 // SELECT
 var users []User
-err := pgdb.NewSelect(&users).
-    Where("role = $1", "admin").
+err = q.NewSelect(&users).
+    Where("role = ?", "admin").
     OrderExpr("created_at DESC").
     Limit(10).
     Scan(ctx)
 
 // INSERT
 user := &User{Name: "Alice", Email: "alice@example.com"}
-_, err = pgdb.NewInsert(user).Exec(ctx)
+_, err = q.NewInsert(user).Exec(ctx)
 
 // UPDATE
-_, err = pgdb.NewUpdate(&User{}).
-    Set("role = $1", "admin").
-    Where("email = $2", "alice@example.com").
+_, err = q.NewUpdate((*User)(nil)).
+    Set("role = ?", "admin").
+    Where("email = ?", "alice@example.com").
     Exec(ctx)
 
-// DELETE (soft delete if model has soft_delete tag)
-_, err = pgdb.NewDelete(&User{}).
-    Where("id = $1", userID).
+// DELETE (a soft delete, because the model has a soft_delete field)
+_, err = q.NewDelete((*User)(nil)).
+    Where("id = ?", userID).
     Exec(ctx)
 ```
 
 ## Step 5: Use Existing Bun Models
 
-If you're migrating from bun, your existing models work with zero changes:
+If you're migrating from bun, your existing models load unchanged, because Grove falls back to `bun:"..."` tags when a field has no `grove:"..."` tag:
 
 ```go
-// Existing bun model — works as-is
+// Existing bun model, works as-is
 type LegacyUser struct {
     grove.BaseModel `bun:"table:users,alias:u"`
 
@@ -117,9 +132,9 @@ type LegacyUser struct {
 
 ## Next Steps
 
-- [Architecture](/docs/architecture) — Understand the package structure and query pipeline
-- [Schema & Models](/docs/concepts/models) — Complete field options, relations, and schema registry reference
-- [Dual Tag System](/docs/concepts/dual-tags) — Learn how tag resolution works
-- [PostgreSQL Driver](/docs/drivers/postgres) — Full reference for PG-specific features
-- [Basic CRUD](/docs/guides/basic-crud) — Complete CRUD examples with relations
-- [Forge Extension](/docs/integration/forge-extension) — Use Grove with Forge for DI, config, and lifecycle management
+- [Architecture](/docs/architecture): the package structure and query pipeline
+- [Schema & Models](/docs/concepts/models): field options, relations and the schema registry
+- [Dual Tag System](/docs/concepts/dual-tags): how tag resolution works
+- [PostgreSQL Driver](/docs/drivers/postgres): PG-specific features
+- [Basic CRUD](/docs/guides/basic-crud): CRUD examples with relations
+- [Forge Extension](/docs/integration/forge-extension): Grove inside Forge, with DI, config and lifecycle management

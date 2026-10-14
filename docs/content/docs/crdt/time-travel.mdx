@@ -22,7 +22,7 @@ Time-travel is **opt-in** and disabled by default to avoid storage overhead. Whe
 Enable time-travel on the `SyncController`:
 
 ```go
-app.Use(groveext.New(
+app.RegisterExtension(groveext.New(
     groveext.WithDriver(pgdb),
     groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents"}}),
     groveext.WithSyncController(
@@ -34,63 +34,66 @@ app.Use(groveext.New(
 ### Standalone Server
 
 ```go
-ctrl := crdt.NewSyncController(plugin,
+handler := crdt.NewHTTPHandler(plugin,
     crdt.WithTimeTravelEnabled(true),
 )
-defer ctrl.Close()
-
-handler := crdt.NewHTTPHandler(ctrl)
-http.Handle("/sync/", handler)
+http.Handle("/sync/", http.StripPrefix("/sync", handler))
 ```
 
-When time-travel is enabled, the Forge extension auto-mounts the history endpoints alongside the existing sync routes.
+When time travel is enabled, the Forge extension mounts the history endpoints next to the sync routes.
 
 ## Querying State at a Point in Time
 
-Read the full state of a record as it was at a specific HLC timestamp:
+The history reads live on the plugin's metadata store (set with `SetExecutor`):
 
 ```go
-// Read the state of a document at a specific time.
-state, err := ctrl.ReadStateAt(ctx, "documents", "doc-1", targetHLC)
+ms := plugin.MetadataStore()
+
+// Read the state of a document as of a specific HLC.
+state, err := ms.ReadStateAt(ctx, "documents", "doc-1", targetHLC)
 if err != nil {
     log.Fatal(err)
 }
 
-// state contains the merged CRDT state as of targetHLC.
-// Fields that did not exist at that time are absent.
-fmt.Println("Title at that time:", state.Fields["title"].Value)
+// state holds the merged CRDT state as of targetHLC.
+// Fields that didn't exist at that time are absent.
+if fs := state.Fields["title"]; fs != nil {
+    fmt.Println("Title at that time:", string(fs.Value))
+}
 ```
+
+Through the controller, `ctrl.HandleHistory(ctx, &crdt.HistoryRequest{Table: "documents", PK: "doc-1", AtHLC: targetHLC})` does the same and runs any `TimeTravelInterceptor` plugins.
 
 ### Using wall-clock time
 
-Convert a `time.Time` to an HLC for querying:
+An `HLC` is a physical timestamp in nanoseconds plus a logical counter and a node ID, so you can build one from a `time.Time`:
 
 ```go
 targetTime := time.Date(2025, 6, 15, 14, 30, 0, 0, time.UTC)
-targetHLC := crdt.HLCFromTime(targetTime)
+targetHLC := crdt.HLC{Timestamp: targetTime.UnixNano()}
 
-state, err := ctrl.ReadStateAt(ctx, "documents", "doc-1", targetHLC)
+state, err := ms.ReadStateAt(ctx, "documents", "doc-1", targetHLC)
 ```
 
 ## Querying Field History
 
-View the complete change history of a specific field:
-
 ```go
-// Get all changes to the "title" field of a document.
-history, err := ctrl.ReadFieldHistory(ctx, "documents", "doc-1", "title")
+// Up to 50 versions of the "title" field, newest first. A zero HLC means "from the beginning".
+history, err := ms.ReadFieldHistory(ctx, "documents", "doc-1", "title", crdt.HLC{}, 50)
 if err != nil {
     log.Fatal(err)
 }
 
 for _, entry := range history {
     fmt.Printf("  %s: %s (by node %s)\n",
-        entry.HLC.Time().Format(time.RFC3339),
+        time.Unix(0, entry.HLC.Timestamp).Format(time.RFC3339),
         entry.Value,
         entry.NodeID,
     )
 }
 ```
+
+A limit of 0 or less means 100. `ctrl.HandleFieldHistory` takes a `FieldHistoryRequest` with the same fields.
 
 ### FieldHistoryEntry
 
@@ -98,39 +101,40 @@ for _, entry := range history {
 type FieldHistoryEntry struct {
     HLC    HLC             `json:"hlc"`
     NodeID string          `json:"node_id"`
-    Value  json.RawMessage `json:"value"`
+    Value  json.RawMessage `json:"value,omitempty"`
     Type   CRDTType        `json:"type"`
 }
 ```
 
 ## HTTP API
 
-When time-travel is enabled, the following endpoints are registered:
+When time travel is enabled, these endpoints are registered under the sync base path:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/sync/history` | Get record state at a point in time |
-| GET | `/sync/field-history` | Get change history for a specific field |
+| GET, POST | `/sync/history` | Record state at a point in time |
+| GET, POST | `/sync/field-history` | Change history for one field |
 
 ### Get State at Time
 
-**`GET /sync/history?table=documents&pk=doc-1&hlc=<hlc-string>`**
+**`GET /sync/history?table=documents&pk=doc-1&at_ts=1706000000000000000&at_c=0&at_node=node-1`**
+
+`at_ts` is the HLC timestamp in nanoseconds, `at_c` the counter and `at_node` the node ID. Leave them out for the current state. A POST takes the same thing as a `HistoryRequest` body (`table`, `pk`, `at_hlc`).
 
 ```json
 {
   "table": "documents",
   "pk": "doc-1",
-  "hlc": "1706000000000000000:0:node-1",
+  "at_hlc": { "ts": 1706000000000000000, "c": 0, "node": "node-1" },
   "state": {
+    "table": "documents",
+    "pk": "doc-1",
     "fields": {
       "title": {
         "type": "lww",
-        "value": "Draft Title",
-        "hlc": "1705999000000000000:0:node-1"
-      },
-      "tags": {
-        "type": "set",
-        "value": { "entries": { "\"go\"": [...] }, "removed": {} }
+        "hlc": { "ts": 1705999000000000000, "c": 0, "node": "node-1" },
+        "node_id": "node-1",
+        "value": "Draft Title"
       }
     }
   }
@@ -139,37 +143,31 @@ When time-travel is enabled, the following endpoints are registered:
 
 ### Get Field History
 
-**`GET /sync/field-history?table=documents&pk=doc-1&field=title`**
+**`GET /sync/field-history?table=documents&pk=doc-1&field=title&limit=50`**
 
 ```json
 {
   "table": "documents",
   "pk": "doc-1",
   "field": "title",
-  "history": [
+  "entries": [
     {
-      "hlc": "1706000000000000000:0:node-1",
+      "hlc": { "ts": 1706000000000000000, "c": 0, "node": "node-1" },
       "node_id": "node-1",
       "value": "Final Title",
       "type": "lww"
     },
     {
-      "hlc": "1705999000000000000:0:node-2",
+      "hlc": { "ts": 1705999000000000000, "c": 0, "node": "node-2" },
       "node_id": "node-2",
       "value": "Draft v2",
-      "type": "lww"
-    },
-    {
-      "hlc": "1705998000000000000:0:node-1",
-      "node_id": "node-1",
-      "value": "Draft",
       "type": "lww"
     }
   ]
 }
 ```
 
-History entries are returned in reverse chronological order (newest first).
+Entries come back newest first.
 
 ## Use Cases
 
@@ -178,10 +176,10 @@ History entries are returned in reverse chronological order (newest first).
 Track who changed what and when for compliance:
 
 ```go
-history, _ := ctrl.ReadFieldHistory(ctx, "contracts", "contract-1", "status")
+history, _ := ms.ReadFieldHistory(ctx, "contracts", "contract-1", "status", crdt.HLC{}, 100)
 for _, entry := range history {
     log.Printf("Status changed to %s by %s at %s",
-        entry.Value, entry.NodeID, entry.HLC.Time())
+        entry.Value, entry.NodeID, time.Unix(0, entry.HLC.Timestamp))
 }
 ```
 
@@ -190,11 +188,16 @@ for _, entry := range history {
 Revert a field to its previous value:
 
 ```go
-history, _ := ctrl.ReadFieldHistory(ctx, "documents", "doc-1", "title")
+history, _ := ms.ReadFieldHistory(ctx, "documents", "doc-1", "title", crdt.HLC{}, 2)
 if len(history) >= 2 {
-    previousValue := history[1].Value // Second entry is the previous value
-    // Apply the previous value as a new write
-    plugin.SetField(ctx, "documents", "doc-1", "title", previousValue)
+    var previous string
+    _ = json.Unmarshal(history[1].Value, &previous) // second entry is the previous value
+
+    // Write it back as a new change through your normal update path.
+    _, err := pgdriver.Unwrap(db).NewUpdate((*Document)(nil)).
+        Set("title = ?", previous).
+        Where("id = ?", "doc-1").
+        Exec(ctx)
 }
 ```
 
@@ -203,7 +206,7 @@ if len(history) >= 2 {
 Inspect the full timeline of changes to understand how a merge resolved:
 
 ```go
-history, _ := ctrl.ReadFieldHistory(ctx, "documents", "doc-1", "title")
+history, _ := ms.ReadFieldHistory(ctx, "documents", "doc-1", "title", crdt.HLC{}, 100)
 for _, entry := range history {
     fmt.Printf("  [%s] node=%s value=%s\n",
         entry.HLC, entry.NodeID, entry.Value)
@@ -217,12 +220,14 @@ for _, entry := range history {
 Compare the state of a record at two different times:
 
 ```go
-stateA, _ := ctrl.ReadStateAt(ctx, "documents", "doc-1", hlcA)
-stateB, _ := ctrl.ReadStateAt(ctx, "documents", "doc-1", hlcB)
+stateA, _ := ms.ReadStateAt(ctx, "documents", "doc-1", hlcA)
+stateB, _ := ms.ReadStateAt(ctx, "documents", "doc-1", hlcB)
 
 for field, fsB := range stateB.Fields {
     fsA := stateA.Fields[field]
-    if fsA == nil || string(fsA.Value) != string(fsB.Value) {
+    if fsA == nil {
+        fmt.Printf("Field %s added: %s\n", field, fsB.Value)
+    } else if string(fsA.Value) != string(fsB.Value) {
         fmt.Printf("Field %s changed: %s -> %s\n", field, fsA.Value, fsB.Value)
     }
 }
@@ -230,16 +235,16 @@ for field, fsB := range stateB.Fields {
 
 ## Plugin Integration
 
-Time-travel events can be intercepted via the [Plugin System](/docs/crdt/plugins) using the `TimeTravelInterceptor` interface:
+History reads through the controller can be intercepted with a [plugin](/docs/crdt/plugins) that implements `TimeTravelInterceptor`:
 
 ```go
 type TimeTravelInterceptor interface {
-    BeforeReadStateAt(ctx context.Context, table, pk string, hlc HLC) error
-    BeforeReadFieldHistory(ctx context.Context, table, pk, field string) error
+    BeforeHistoryRead(ctx context.Context, table, pk string, atHLC HLC) error
+    AfterHistoryRead(ctx context.Context, table, pk string, state *State) (*State, error)
 }
 ```
 
-Use this for access control (restricting who can view history) or logging.
+Use it for access control on history, redaction or logging. Reads made directly on the `MetadataStore` skip it.
 
 ## Performance Considerations
 

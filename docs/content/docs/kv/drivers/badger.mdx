@@ -68,7 +68,7 @@ Badger supports TTL natively at the storage engine level. Expired entries are au
 
 ```go
 // Set with a TTL -- Badger handles expiration automatically
-err := store.Set(ctx, "cache:result", data, 5*time.Minute)
+err := store.Set(ctx, "cache:result", data, kv.WithTTL(5*time.Minute))
 
 // Check remaining TTL
 remaining, err := store.TTL(ctx, "cache:result")

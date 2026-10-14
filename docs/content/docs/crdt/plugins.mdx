@@ -315,7 +315,7 @@ ctrl.AddPlugin(&RoomACL{allowList: acl})
 ### Via Forge Extension
 
 ```go
-app.Use(groveext.New(
+app.RegisterExtension(groveext.New(
     groveext.WithDriver(pgdb),
     groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents"}}),
     groveext.WithSyncController(

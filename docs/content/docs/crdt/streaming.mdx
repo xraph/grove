@@ -96,7 +96,7 @@ The `SyncController` handles the SSE endpoint. It polls shadow tables for new ch
 With the Forge extension, the SSE endpoint is registered automatically at `GET /sync/stream`:
 
 ```go
-app.Use(groveext.New(
+app.RegisterExtension(groveext.New(
     groveext.WithDriver(pgdb),
     groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents"}}),
     groveext.WithSyncController(

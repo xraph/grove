@@ -21,8 +21,8 @@ By default, sessions use the key prefix `"sess"` and a TTL of **30 minutes**. Bo
 
 ```go
 sessions := plugins.NewSessionStore(store,
-    extension.WithSessionPrefix("mysess"),         // keys become "mysess:<id>"
-    extension.WithSessionTTL(2 * time.Hour),       // sessions expire after 2 hours
+    plugins.WithSessionPrefix("mysess"),         // keys become "mysess:<id>"
+    plugins.WithSessionTTL(2 * time.Hour),       // sessions expire after 2 hours
 )
 ```
 

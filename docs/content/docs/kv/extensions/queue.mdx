@@ -21,7 +21,7 @@ With a custom visibility timeout:
 
 ```go
 queue := plugins.NewQueue(store, "emails",
-    extension.WithVisibilityTimeout(2 * time.Minute),
+    plugins.WithVisibilityTimeout(2 * time.Minute),
 )
 ```
 
@@ -142,7 +142,7 @@ Set the visibility timeout to be **longer than the expected processing time** fo
 
 ```go
 queue := plugins.NewQueue(store, "video-transcode",
-    extension.WithVisibilityTimeout(10 * time.Minute),
+    plugins.WithVisibilityTimeout(10 * time.Minute),
 )
 ```
 
@@ -181,7 +181,7 @@ func main() {
     defer store.Close()
 
     queue := plugins.NewQueue(store, "emails",
-        extension.WithVisibilityTimeout(time.Minute),
+        plugins.WithVisibilityTimeout(time.Minute),
     )
 
     // Producer: enqueue some jobs.

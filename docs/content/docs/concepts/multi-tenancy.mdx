@@ -116,8 +116,8 @@ import (
     "github.com/xraph/grove/kv/middleware"
 )
 
-store, _ := kv.Open(drv, dsn,
-    kv.WithHook(middleware.NewNamespaceHook("tenant-123")),
+store, _ := kv.Open(drv, // an opened KV driver
+    kv.WithHook(middleware.NewNamespace("tenant-123")),
 )
 
 // All keys are now prefixed: "tenant-123:user:456"

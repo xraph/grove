@@ -1,6 +1,6 @@
 ---
 title: API Reference
-description: Complete Go API reference for the Grove CRDT package — types, plugin, clock, merge, sync, transport, server, hooks, and options.
+description: Complete Go API reference for the Grove CRDT package: types, plugin, clock, merge, sync, transport, server, hooks, and options.
 ---
 
 Complete reference for the `github.com/xraph/grove/crdt` package.
@@ -338,4 +338,7 @@ Ephemeral awareness system for tracking connected clients. See [Presence & Aware
 |----------|-----------|-------------|
 | `ShadowTableDDL` | `(table string) string` | DDL for shadow table creation |
 | `ShadowTableSyncIndex` | `(table string) string` | DDL for sync index |
-| `Migrations` | `grove.MigrationGroup` | Pre-built migration group |
+| `DropShadowTableDDL` | `(table string) string` | DDL to drop a shadow table |
+| `ShadowTableName` | `(table string) string` | The shadow table's name for a table |
+
+There's no ready-made migration group. Run these in a migration of your own, or call `Plugin.EnsureShadowTable` after `SetExecutor`.

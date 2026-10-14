@@ -125,6 +125,10 @@ type Document struct {
 
 // 2. Create plugin and attach to DB
 plugin := crdt.New(crdt.WithNodeID("node-1"))
+plugin.SetExecutor(exec) // a crdt.Executor; see Getting Started for a driver adapter
+if err := plugin.EnsureShadowTable(ctx, "documents"); err != nil {
+    log.Fatal(err)
+}
 db.Hooks().AddHook(plugin, hook.Scope{Tables: []string{"documents"}})
 
 // 3. Sync with a remote node

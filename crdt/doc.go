@@ -10,9 +10,9 @@
 //
 // Tag struct fields with crdt:"type" to enable CRDT merge semantics:
 //
-//   - crdt:lww   — Last-Writer-Wins Register. Higher HLC timestamp wins.
-//   - crdt:counter — PN-Counter. Per-node increment/decrement, merged by max.
-//   - crdt:set   — OR-Set. Add-wins observed-remove set.
+//   - crdt:lww: Last-Writer-Wins Register. Higher HLC timestamp wins.
+//   - crdt:counter: PN-Counter. Per-node increment/decrement, merged by max.
+//   - crdt:set: OR-Set. Add-wins observed-remove set.
 //
 // Fields without crdt: tags work normally with zero overhead.
 //
@@ -44,18 +44,22 @@
 // WithCRDT to get automatic route registration, SSE streaming, and
 // middleware support:
 //
+//	crdtPlugin.SetExecutor(exec) // the extension does not set one for you
+//	if err := crdtPlugin.EnsureShadowTable(ctx, "documents"); err != nil {
+//	    return err
+//	}
+//
 //	ext := extension.New(
 //	    extension.WithDriver(pgdb),
 //	    extension.WithCRDT(crdtPlugin, hook.Scope{Tables: []string{"documents"}}),
 //	    extension.WithSyncer(syncer),
-//	    extension.WithMigrations(crdt.Migrations),
 //	)
 //	app.RegisterExtension(ext)
 //
 //	// Routes registered automatically:
-//	//   POST /sync/pull    — pull changes from this node
-//	//   POST /sync/push    — push changes to this node
-//	//   GET  /sync/stream  — SSE real-time change stream
+//	//   POST /sync/pull: pull changes from this node
+//	//   POST /sync/push: push changes to this node
+//	//   GET  /sync/stream: SSE real-time change stream
 //
 // # Sync Hooks
 //
@@ -137,25 +141,25 @@
 // # Architecture
 //
 //	grove/crdt/
-//	├── crdt.go          — Core types: CRDTType, State, FieldState, ChangeRecord
-//	├── clock.go         — HLC implementation
-//	├── register.go      — LWW-Register merge
-//	├── counter.go       — PN-Counter merge
-//	├── set.go           — OR-Set merge (add-wins)
-//	├── list.go          — RGA list merge (cached document order)
-//	├── text.go          — Text CRDT (origin-span fragments, formatting)
-//	├── document.go      — Nested path-keyed document merge
-//	├── merge.go         — MergeEngine: field + state merging
-//	├── apply.go         — ApplyChange: canonical op application
-//	├── compact.go       — Horizon-based tombstone compaction (GC)
-//	├── plugin.go        — Plugin (Grove hook integration)
-//	├── hooks.go         — PostMutation/PreQuery hooks for CRDT
-//	├── metadata.go      — Shadow table read/write operations
-//	├── sync.go          — Syncer: push/pull orchestration + StreamSync
-//	├── sync_hooks.go    — SyncHook interface for intercepting sync data
-//	├── transport.go     — Transport interface, HTTPClient, StreamingTransport
-//	├── server.go        — SyncController + HTTPHandler (standalone)
-//	├── options.go       — Functional options
-//	├── inspect.go       — Debug/inspect utilities
-//	└── migrations.go    — Shadow table DDL
+//	├── crdt.go: Core types: CRDTType, State, FieldState, ChangeRecord
+//	├── clock.go: HLC implementation
+//	├── register.go: LWW-Register merge
+//	├── counter.go: PN-Counter merge
+//	├── set.go: OR-Set merge (add-wins)
+//	├── list.go: RGA list merge (cached document order)
+//	├── text.go: Text CRDT (origin-span fragments, formatting)
+//	├── document.go: Nested path-keyed document merge
+//	├── merge.go: MergeEngine: field + state merging
+//	├── apply.go: ApplyChange: canonical op application
+//	├── compact.go: Horizon-based tombstone compaction (GC)
+//	├── plugin.go: Plugin (Grove hook integration)
+//	├── hooks.go: PostMutation/PreQuery hooks for CRDT
+//	├── metadata.go: Shadow table read/write operations
+//	├── sync.go: Syncer: push/pull orchestration + StreamSync
+//	├── sync_hooks.go: SyncHook interface for intercepting sync data
+//	├── transport.go: Transport interface, HTTPClient, StreamingTransport
+//	├── server.go: SyncController + HTTPHandler (standalone)
+//	├── options.go: Functional options
+//	├── inspect.go: Debug/inspect utilities
+//	└── migrations.go: Shadow table DDL
 package crdt

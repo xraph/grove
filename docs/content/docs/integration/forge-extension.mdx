@@ -1,95 +1,95 @@
 ---
 title: Forge Extension
-description: Use Grove as a first-class Forge extension with YAML configuration, DI, migrations, CRDT sync, multi-database support, and lifecycle management.
+description: Use Grove as a Forge extension with YAML configuration, DI, migrations, CRDT sync, multi-database support, and lifecycle management.
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
 
-Grove provides a first-class Forge extension that handles configuration loading, driver creation, dependency injection, and lifecycle management. It follows the canonical Forge extension pattern with `BaseExtension` embedding.
+The `github.com/xraph/grove/extension` module plugs Grove into a [Forge](https://github.com/xraph/forge) app. It opens the database during `Register`, provides `*grove.DB` through Forge's DI container, adds your hooks and migration groups, reports health, and closes the connection on shutdown. It's a separate module and needs Go 1.26, the same as Forge.
 
 ## Installation
 
 ```bash
-go get github.com/xraph/grove/extension
+go get github.com/xraph/grove/extension@latest
+go get github.com/xraph/grove/drivers/pgdriver@latest
 ```
 
 ## Quick Start
 
-### Programmatic Configuration
-
 ```go
 import (
+    "net/http"
+
     "github.com/xraph/forge"
+    "github.com/xraph/grove"
     "github.com/xraph/grove/drivers/pgdriver"
+    _ "github.com/xraph/grove/drivers/pgdriver/pgmigrate"
     groveext "github.com/xraph/grove/extension"
+    "github.com/xraph/grove/hook"
 )
 
-pgdb := pgdriver.New()
-pgdb.Open(ctx, "postgres://user:pass@localhost:5432/mydb")
+app := forge.NewApp(forge.AppConfig{
+    Name:        "accounts",
+    HTTPAddress: ":8080",
+    Extensions: []forge.Extension{
+        groveext.New(
+            groveext.WithDSN("postgres", "postgres://localhost:5432/accounts?sslmode=disable"),
+            groveext.WithMigrations(Migrations),
+            groveext.WithHook(TenantScope{}, hook.Scope{Tables: []string{"orders"}}),
+        ),
+    },
+})
 
-app := forge.New()
-app.Use(groveext.New(
-    groveext.WithDriver(pgdb),
-))
-app.Start(ctx)
+err := app.Router().GET("/users/count", func(ctx forge.Context) error {
+    db, err := forge.Inject[*grove.DB](app.Container())
+    if err != nil {
+        return err
+    }
+
+    n, err := pgdriver.Unwrap(db).NewSelect((*User)(nil)).Count(ctx.Context())
+    if err != nil {
+        return err
+    }
+
+    return ctx.JSON(http.StatusOK, map[string]int64{"users": n})
+})
 ```
+
+The extension doesn't import any driver itself. Import the driver you use (by name, or blank), plus its `<name>migrate` package if you have migrations. Without the driver import, `WithDSN` fails with an unknown-driver error; without the migrate import, migrations fail with no executor.
+
+`WithDriver(drv)` takes a driver you've already opened instead of a DSN.
 
 ### YAML Configuration
 
-The extension reads configuration from your Forge config file:
-
 ```yaml
-# config.yaml
 extensions:
   grove:
     driver: postgres
-    dsn: "postgres://user:pass@localhost:5432/mydb"
+    dsn: "postgres://user:pass@localhost:5432/mydb?sslmode=disable"
 ```
 
 ```go
-app := forge.New()
-app.Use(groveext.New()) // Config loaded from YAML automatically
-app.Start(ctx)
+app := forge.New(
+    forge.WithAppName("accounts"),
+    forge.WithExtensions(groveext.New()), // config loaded from YAML
+)
 ```
 
-When both YAML and programmatic options are provided, YAML takes precedence for `driver`/`dsn` fields, while programmatic options fill in any gaps.
+The extension reads `extensions.grove`, then falls back to a top-level `grove` key. YAML wins for `driver` and `dsn`, and options you pass in code fill whatever YAML leaves empty.
 
 ## Configuration Reference
 
-The `Config` struct supports the following fields, all configurable via YAML or programmatic options:
-
 | Field | YAML Key | Type | Description |
 |-------|----------|------|-------------|
-| Driver | `driver` | `string` | Driver name: `postgres`, `sqlite`, `mysql`, `mongodb`, `turso`, `clickhouse` |
-| DSN | `dsn` | `string` | Data source name / connection string |
-| Databases | `databases` | `[]DatabaseConfig` | Named database connections for multi-DB mode |
-| Default | `default` | `string` | Default database name when using multi-DB |
-| DisableRoutes | `disable_routes` | `bool` | Skip CRDT sync route registration |
-| DisableMigrate | `disable_migrate` | `bool` | Skip automatic migration execution |
-| BasePath | `base_path` | `string` | URL prefix for CRDT sync routes (default: `/sync`) |
-
-Each entry in `Databases` has:
-
-| Field | YAML Key | Type | Description |
-|-------|----------|------|-------------|
-| Name | `name` | `string` | Unique identifier for this database |
-| Driver | `driver` | `string` | Driver name |
+| Driver | `driver` | `string` | Driver name as registered: `postgres` or `pg`, `mysql`, `sqlite`, `turso`, `mongodb` or `mongo`, `clickhouse`, `elasticsearch` |
 | DSN | `dsn` | `string` | Connection string |
-
-YAML configuration can use either key:
-
-```yaml
-# Namespaced (preferred)
-extensions:
-  grove:
-    driver: postgres
-    dsn: "postgres://..."
-
-# Legacy / top-level
-grove:
-  driver: postgres
-  dsn: "postgres://..."
-```
+| Databases | `databases` | `[]DatabaseConfig` | Named databases (`name`, `driver`, `dsn`) for multi-DB mode |
+| Default | `default` | `string` | Default database name in multi-DB mode |
+| DisableMigrate | `disable_migrate` | `bool` | Makes `Migrate` and `Rollback` return an error |
+| LockTimeout | `lock_timeout` | `duration` | How long migrations wait for the lock. `0` uses the migrate default, negative waits for the context deadline |
+| CentralMigrations | `central_migrations` | `bool` | Hand the migration groups to a shared registry that runs every extension's migrations in one ordered pass |
+| DisableRoutes | `disable_routes` | `bool` | Skip the CRDT sync routes |
+| BasePath | `base_path` | `string` | Prefix for the CRDT sync routes (default `/sync`) |
 
 ## Options
 
@@ -97,25 +97,27 @@ grove:
 
 ```go
 groveext.New(
-    // Driver — set a pre-configured driver instance (takes precedence over YAML).
+    // An opened driver (takes precedence over YAML).
     groveext.WithDriver(pgdb),
 
-    // DSN — set driver name + connection string programmatically.
-    groveext.WithDSN("postgres", "postgres://user:pass@localhost/mydb"),
+    // Or a driver name and DSN, resolved through the driver registry.
+    groveext.WithDSN("postgres", "postgres://user:pass@localhost:5432/mydb?sslmode=disable"),
 
-    // Migrations — register migration groups.
+    // Migration groups.
     groveext.WithMigrations(billing.Migrations, notifications.Migrations),
 
-    // Hooks — register lifecycle hooks with optional scope.
+    // Hooks, with an optional scope.
     groveext.WithHook(&tenantHook, hook.Scope{Tables: []string{"orders"}}),
 
     // Behavior flags.
-    groveext.WithDisableMigrate(),   // Skip auto-migration
-    groveext.WithDisableRoutes(),    // Skip CRDT sync route registration
-    groveext.WithBasePath("/api/sync"), // Custom CRDT route prefix
+    groveext.WithDisableMigrate(),
+    groveext.WithDisableRoutes(),
+    groveext.WithBasePath("/api/sync"),
+    groveext.WithLockTimeout(30 * time.Second),
+    groveext.WithCentralMigrations(),
 
-    // Config loading.
-    groveext.WithRequireConfig(true), // Error if no YAML config found
+    // Fail Register when there's no YAML config.
+    groveext.WithRequireConfig(true),
 
     // CRDT integration (see below).
     groveext.WithCRDT(crdtPlugin),
@@ -124,29 +126,28 @@ groveext.New(
 )
 ```
 
+`WithDriverFactory(name, factory)` overrides how the extension builds the driver for one driver name.
+
 ### Multi-DB Options
 
 ```go
 groveext.New(
-    // Add named databases with pre-configured drivers.
+    // Named databases with opened drivers.
     groveext.WithDatabase("primary", pgdb),
     groveext.WithDatabase("analytics", chdb),
 
-    // Or add named databases using driver name + DSN (resolved from registry).
+    // Or named databases from a driver name and DSN.
     groveext.WithDatabaseDSN("cache", "sqlite", "file:cache.db"),
 
-    // Set which database is the default (used by DB() and unnamed DI).
+    // The default database (returned by DB() and unnamed DI).
     groveext.WithDefaultDatabase("primary"),
 
-    // Per-database hooks.
+    // Per-database hooks and migrations.
     groveext.WithHookFor("primary", &tenantHook, hook.Scope{Tables: []string{"orders"}}),
-    groveext.WithHookFor("analytics", &readOnlyHook),
-
-    // Per-database migrations.
     groveext.WithMigrationsFor("primary", core.Migrations, billing.Migrations),
     groveext.WithMigrationsFor("analytics", analytics.Migrations),
 
-    // Global hooks (applied to ALL databases).
+    // Global hooks run on every database.
     groveext.WithHook(&auditHook),
 
     // CRDT on a specific database.
@@ -157,82 +158,46 @@ groveext.New(
 
 ## Lifecycle
 
-### Register Phase
+### Register
 
-1. Calls `BaseExtension.Register()` to store the Forge app, logger, and metrics
-2. Loads configuration: YAML (`extensions.grove` → `grove`) → merge with programmatic → defaults
-3. Routes to **single-DB** or **multi-DB** initialization based on configuration
-4. Opens the database(s) and registers hooks
-5. Provides database instances in the Forge DI container via Vessel
-6. Registers CRDT sync controller if enabled (and routes not disabled)
+1. Calls `BaseExtension.Register()` to store the app, logger and metrics.
+2. Loads configuration: YAML (`extensions.grove`, then `grove`), merged with your options and the defaults.
+3. Picks single-DB or multi-DB mode.
+4. Opens the database(s) and adds the hooks.
+5. Provides the databases through DI.
+6. Mounts the CRDT sync routes if `WithCRDT` is set and routes aren't disabled.
 
-### Start Phase
+### Start
 
-1. Starts the CRDT background syncer if configured
-2. Marks the extension as started
+Starts the CRDT background syncer if you passed `WithSyncer`, then marks the extension started.
 
-### Stop Phase
+### Stop
 
-1. In single-DB mode: closes the Grove DB
-2. In multi-DB mode: closes all databases via the `DBManager`
-3. Marks the extension as stopped
+Closes the database in single-DB mode, or every database through the `DBManager` in multi-DB mode.
 
-### Health Check
+### Health
 
-- In single-DB mode: returns an error if the DB has not been initialized
-- In multi-DB mode: checks all registered databases and returns the first error
+Single-DB mode returns an error until the database is open. Multi-DB mode returns an error if any registered database is nil. Neither pings the database.
 
 ## Accessing the DB
 
-After registration, resolve the DB from any Forge handler:
-
 ```go
-func myHandler(ctx forge.Context) error {
-    db := forge.Inject[*grove.DB](ctx)
-
-    pgdb := pgdriver.Unwrap(db)
-    var users []User
-    err := pgdb.NewSelect(&users).
-        Where("active = $1", true).
-        OrderExpr("created_at DESC").
-        Limit(10).
-        Scan(ctx.Request().Context())
-    if err != nil {
-        return err
-    }
-
-    return ctx.JSON(200, users)
+db, err := forge.Inject[*grove.DB](app.Container())
+if err != nil {
+    return err
 }
+
+var users []User
+err = pgdriver.Unwrap(db).NewSelect(&users).
+    Where("active = ?", true).
+    OrderExpr("created_at DESC").
+    Limit(10).
+    Scan(ctx)
 ```
+
+You can also keep the `*extension.Extension` and call `ext.DB()` once it has registered.
 
 ## Multi-Database Support
-
-The extension supports managing multiple named database connections. This is useful when your application needs different databases for different concerns — for example, a primary Postgres for relational data, a ClickHouse for analytics, or a SQLite for local cache.
-
-### Programmatic Setup
-
-```go
-import (
-    "github.com/xraph/forge"
-    "github.com/xraph/grove/drivers/pgdriver"
-    "github.com/xraph/grove/drivers/clickhousedriver"
-    groveext "github.com/xraph/grove/extension"
-)
-
-pgdb := pgdriver.New()
-pgdb.Open(ctx, "postgres://user:pass@localhost:5432/app")
-
-chdb := clickhousedriver.New()
-chdb.Open(ctx, "clickhouse://localhost:9000/analytics")
-
-app := forge.New()
-app.Use(groveext.New(
-    groveext.WithDatabase("primary", pgdb),
-    groveext.WithDatabase("analytics", chdb),
-    groveext.WithDefaultDatabase("primary"),
-))
-app.Start(ctx)
-```
 
 ### YAML Configuration
 
@@ -242,7 +207,7 @@ extensions:
     databases:
       - name: primary
         driver: postgres
-        dsn: "postgres://user:pass@localhost:5432/app"
+        dsn: "postgres://user:pass@localhost:5432/app?sslmode=disable"
       - name: analytics
         driver: clickhouse
         dsn: "clickhouse://localhost:9000/analytics"
@@ -252,135 +217,50 @@ extensions:
     default: primary
 ```
 
-```go
-app := forge.New()
-app.Use(groveext.New()) // Multi-DB config loaded from YAML
-app.Start(ctx)
-```
-
 ### Accessing Named Databases
-
-Use Vessel's named injection to resolve specific databases:
 
 ```go
 import (
+    "github.com/xraph/forge"
     "github.com/xraph/grove"
-    "github.com/xraph/vessel"
     groveext "github.com/xraph/grove/extension"
+    "github.com/xraph/vessel"
 )
 
-func analyticsHandler(ctx forge.Context) error {
-    // Get the default database (unnamed injection).
-    defaultDB := forge.Inject[*grove.DB](ctx)
+// The default database (unnamed injection).
+defaultDB, err := forge.Inject[*grove.DB](app.Container())
 
-    // Get a specific named database.
-    analyticsDB, err := vessel.InjectNamed[*grove.DB](ctx.App().Container(), "analytics")
-    if err != nil {
-        return err
-    }
+// A specific named database.
+analyticsDB, err := vessel.InjectNamed[*grove.DB](app.Container(), "analytics")
 
-    // Get the DBManager for dynamic access.
-    mgr := forge.Inject[*groveext.DBManager](ctx)
-
-    // Access any database by name.
-    cacheDB, err := mgr.Get("cache")
-    if err != nil {
-        return err
-    }
-
-    _ = defaultDB
-    _ = analyticsDB
-    _ = cacheDB
-    return nil
-}
+// The DBManager, for access by name at runtime.
+mgr, err := forge.Inject[*groveext.DBManager](app.Container())
+cacheDB, err := mgr.Get("cache")
 ```
 
 ### DI Registration
 
-In multi-DB mode, the extension registers three types of services in the DI container:
-
 | Service | Resolution | Description |
 |---------|-----------|-------------|
-| `*grove.DB` | `vessel.Inject[*grove.DB]()` | The default database (backward compatible) |
-| `*grove.DB` (named) | `vessel.InjectNamed[*grove.DB](c, "name")` | A specific named database |
-| `*extension.DBManager` | `vessel.Inject[*extension.DBManager]()` | The manager for dynamic access |
+| `*grove.DB` | `forge.Inject[*grove.DB](c)` | The default database |
+| `*grove.DB` (named) | `vessel.InjectNamed[*grove.DB](c, "name")` | A named database (multi-DB mode) |
+| `*extension.DBManager` | `forge.Inject[*extension.DBManager](c)` | The manager (multi-DB mode) |
 
 ### DBManager API
-
-The `DBManager` is the central type for multi-database management:
 
 ```go
 mgr := ext.Manager() // nil in single-DB mode
 
-// Get a named database.
 db, err := mgr.Get("analytics")
-
-// Get the default database.
 db, err := mgr.Default()
-
-// Get the default database name.
 name := mgr.DefaultName()
-
-// Change the default at runtime.
 err := mgr.SetDefault("analytics")
-
-// Get all databases as a map (returns a copy).
-all := mgr.All()
-
-// Get the count of registered databases.
+all := mgr.All() // a copy
 n := mgr.Len()
-
-// Close all databases.
 err := mgr.Close()
 ```
 
-### Per-Database Hooks
-
-Hooks can be scoped to specific databases or applied globally:
-
-```go
-groveext.New(
-    groveext.WithDatabase("primary", pgdb),
-    groveext.WithDatabase("analytics", chdb),
-
-    // Global hook — applied to ALL databases.
-    groveext.WithHook(&auditHook),
-
-    // Per-database hooks — applied to a specific database only.
-    groveext.WithHookFor("primary", &tenantIsolation, hook.Scope{
-        Tables:   []string{"orders", "invoices"},
-        Priority: 1,
-    }),
-    groveext.WithHookFor("analytics", &readOnlyEnforcer),
-)
-```
-
-### Per-Database Migrations
-
-Migration groups can target specific databases:
-
-```go
-groveext.New(
-    groveext.WithDatabase("primary", pgdb),
-    groveext.WithDatabase("analytics", chdb),
-
-    groveext.WithMigrationsFor("primary", core.Migrations, billing.Migrations),
-    groveext.WithMigrationsFor("analytics", analytics.Migrations),
-)
-```
-
-### Backward Compatibility
-
-The multi-database feature is fully backward compatible:
-
-- **Single-DB mode** (`WithDriver` / `WithDSN`) works exactly as before
-- `ext.DB()` always returns the default database in both modes
-- `ext.Manager()` returns `nil` in single-DB mode, non-nil in multi-DB mode
-- Unnamed DI injection (`vessel.Inject[*grove.DB]()`) resolves the default database in both modes
-
 ### CRDT with Multi-DB
-
-When using CRDT with multiple databases, specify which database should receive CRDT hooks:
 
 ```go
 groveext.New(
@@ -393,86 +273,45 @@ groveext.New(
 )
 ```
 
-If `WithCRDTDatabase` is not specified, CRDT hooks are applied to the default database.
+Without `WithCRDTDatabase`, the CRDT hook goes on the default database.
 
 ## Driver Registry
 
-Grove provides a driver registry that allows creating drivers by name. This powers the YAML configuration path — when no `WithDriver()` is provided, the extension looks up the driver by name and creates it with the DSN.
-
-### Registering a Driver
-
-Each driver module can register its factory:
+Importing a driver package registers it by name, which is what the YAML path and `WithDSN` use:
 
 ```go
-// In your driver package or application init
-import "github.com/xraph/grove"
+import _ "github.com/xraph/grove/drivers/pgdriver"
 
-func init() {
-    grove.RegisterDriver("postgres", func(ctx context.Context, dsn string) (grove.GroveDriver, error) {
-        db := pgdriver.New()
-        if err := db.Open(ctx, dsn); err != nil {
-            return nil, err
-        }
-        return db, nil
-    })
-}
+drv, err := grove.OpenDriver(ctx, "postgres", "postgres://user:pass@localhost:5432/mydb?sslmode=disable")
+db, err := grove.Open(drv)
 ```
 
-### Using the Registry
-
-Once registered, drivers can be created by name:
-
-```go
-drv, err := grove.OpenDriver(ctx, "postgres", "postgres://user:pass@localhost/mydb")
-```
-
-The extension uses this automatically when YAML config provides `driver` and `dsn`, including for each entry in the `databases` list.
-
-## Hooks
-
-Register hooks during extension setup or access them from the DB:
-
-```go
-// During setup
-app.Use(groveext.New(
-    groveext.WithDriver(pgdb),
-    groveext.WithHook(&TenantIsolation{}, hook.Scope{
-        Tables:   []string{"orders", "invoices"},
-        Priority: 1,
-    }),
-    groveext.WithHook(&AuditLogger{}, hook.Scope{
-        Priority: 100,
-    }),
-))
-
-// Or from a handler
-func setupHooks(ctx forge.Context) error {
-    db := forge.Inject[*grove.DB](ctx)
-    db.Hooks().AddHook(&CustomHook{}, hook.Scope{Priority: 50})
-    return nil
-}
-```
+To register your own driver, call `grove.RegisterDriver(name, factory)`, where the factory is a `grove.DriverFactory`.
 
 ## CRDT Integration
-
-The extension supports CRDT-based conflict-free replication with automatic sync route registration:
 
 ```go
 import (
     "github.com/xraph/grove/crdt"
     groveext "github.com/xraph/grove/extension"
+    "github.com/xraph/grove/hook"
 )
 
-plugin := crdt.NewPlugin(crdt.PluginConfig{
-    NodeID: "node-1",
-    Tables: []string{"documents", "comments"},
-})
+plugin := crdt.New(
+    crdt.WithNodeID("node-1"),
+    crdt.WithTables("documents", "comments"),
+)
+plugin.SetExecutor(crdtExecutor{drv: pgdb}) // see the note below
 
-syncer := crdt.NewSyncer(plugin, crdt.SyncerConfig{
-    Peers: []string{"http://node-2:8080", "http://node-3:8080"},
-})
+syncer := crdt.NewSyncer(plugin,
+    crdt.WithPeers(
+        crdt.HTTPTransport("http://node-2:8080/sync"),
+        crdt.HTTPTransport("http://node-3:8080/sync"),
+    ),
+    crdt.WithSyncTables("documents", "comments"),
+)
 
-app.Use(groveext.New(
+ext := groveext.New(
     groveext.WithDriver(pgdb),
     groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents", "comments"}}),
     groveext.WithSyncer(syncer),
@@ -480,37 +319,30 @@ app.Use(groveext.New(
         crdt.WithStreamPollInterval(2 * time.Second),
         crdt.WithStreamKeepAlive(30 * time.Second),
     ),
-))
+)
 ```
 
-This registers three sync endpoints:
+<Callout type="warn">
+The extension doesn't give the CRDT plugin a database executor. Call `plugin.SetExecutor(...)` (and `plugin.EnsureShadowTable` for each table) before the app registers the extension. Without an executor, mutations record no CRDT state and the sync controller has no metadata store to serve from. [CRDT Getting Started](/docs/crdt/getting-started) has a small adapter from a Grove driver to `crdt.Executor`.
+</Callout>
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/sync/pull` | Remote nodes pull changes from this node |
-| POST | `/sync/push` | Remote nodes push changes to this node |
-| GET | `/sync/stream` | SSE stream of real-time changes |
+Under the base path (`/sync` by default) the extension mounts:
 
-Use `WithBasePath()` to change the route prefix, or `WithDisableRoutes()` to skip route registration entirely (useful when running the CRDT plugin without HTTP sync).
+| Method | Path | When |
+|--------|------|------|
+| POST | `/sync/pull` | Always |
+| POST | `/sync/push` | Always |
+| GET | `/sync/stream` | Always (SSE) |
+| GET | `/sync/ws` | Always (WebSocket) |
+| POST, GET | `/sync/presence` | With `crdt.WithPresenceEnabled(true)` |
+| GET, POST | `/sync/history`, GET `/sync/field-history` | With `crdt.WithTimeTravelEnabled(true)` |
+| various | `/sync/rooms/...` | With `crdt.WithRoomManager(true)` |
 
-## Migration Composition
-
-When multiple Forge extensions register migration groups, they compose automatically:
-
-```go
-app.Use(groveext.New(
-    groveext.WithDriver(pgdb),
-    groveext.WithMigrations(core.Migrations),
-))
-app.Use(billingExt.New())        // billing migrations
-app.Use(notificationsExt.New())  // notification migrations
-
-// At startup: core -> billing -> notifications (topological order)
-```
+Use `WithBasePath()` to change the prefix, or `WithDisableRoutes()` to mount nothing.
 
 ## CLI Migration Commands
 
-Grove implements `forge.MigratableExtension`, so when your app is wrapped with `cli.RunApp()` you get migration CLI commands for free:
+The extension implements `forge.MigratableExtension`, but a plain `app.Run()` doesn't apply migrations. Run your app through Forge's CLI runner to get migration commands:
 
 ```go
 package main
@@ -519,113 +351,75 @@ import (
     "github.com/xraph/forge"
     "github.com/xraph/forge/cli"
 
+    _ "github.com/xraph/grove/drivers/pgdriver"
+    _ "github.com/xraph/grove/drivers/pgdriver/pgmigrate" // register the pg executor
     groveext "github.com/xraph/grove/extension"
-    _ "github.com/xraph/grove/drivers/pgdriver/pgmigrate" // register pg executor
 
     "myapp/migrations/core"
 )
 
 func main() {
-    grove := groveext.New(
-        groveext.WithDSN("postgres://localhost:5432/myapp"),
-        groveext.WithMigrations(core.Migrations),
-    )
-
-    app := forge.New(
-        forge.WithAppName("myapp"),
-        forge.WithExtensions(grove),
-    )
-
-    cli.RunApp(app)
+    cli.NewAppRunner(func(ctx cli.CommandContext) (forge.App, error) {
+        return forge.New(
+            forge.WithAppName("myapp"),
+            forge.WithExtensions(groveext.New(
+                groveext.WithDSN("postgres", "postgres://localhost:5432/myapp?sslmode=disable"),
+                groveext.WithMigrations(core.Migrations),
+            )),
+        ), nil
+    }).AutoMigrate().Run()
 }
 ```
+
+`cli.RunApp(setup, cli.WithAutoMigrate())` does the same thing in one call.
 
 ### Available Commands
 
 | Command | Description |
 |---------|-------------|
 | `myapp migrate up` | Run all pending migrations |
-| `myapp migrate down` | Rollback the last migration batch (with confirmation prompt) |
-| `myapp migrate down --force` | Rollback without confirmation |
-| `myapp migrate status` | Show applied/pending migrations per group |
+| `myapp migrate down` | Roll back the last migration batch |
+| `myapp migrate status` | Show applied and pending migrations per group |
 
-### Auto-Migration on Serve
+`AutoMigrate()` applies pending migrations before the server starts.
 
-Enable `WithAutoMigrate()` to run pending migrations automatically before the HTTP server starts:
+### Executor Registration
 
-```go
-cli.RunApp(app, cli.WithAutoMigrate())
-```
-
-Migrations run during `PhaseBeforeRun` (after extensions are initialized, before accepting requests).
-
-### Multi-Database Mode
-
-When using multi-database mode, migration names are prefixed with the database name for clarity:
-
-```bash
-$ myapp migrate status
-  Group: analytics:events
-  ┌────────────────┬──────────────────┬─────────┐
-  │ Version        │ Name             │ Status  │
-  ├────────────────┼──────────────────┼─────────┤
-  │ 20240101000000 │ create_events    │ applied │
-  └────────────────┴──────────────────┴─────────┘
-
-  Group: core
-  ┌────────────────┬──────────────────┬─────────┐
-  │ Version        │ Name             │ Status  │
-  ├────────────────┼──────────────────┼─────────┤
-  │ 20240101000000 │ create_users     │ applied │
-  │ 20240201000000 │ add_email_index  │ pending │
-  └────────────────┴──────────────────┴─────────┘
-```
-
-### Executor Auto-Registration
-
-Make sure to import the migrate package for your driver so the executor factory is registered:
+Import the migrate package for your driver so `migrate.NewExecutorFor` can find the executor:
 
 ```go
-import _ "github.com/xraph/grove/drivers/pgdriver/pgmigrate"     // PostgreSQL
-import _ "github.com/xraph/grove/drivers/mysqldriver/mysqlmigrate" // MySQL
+import _ "github.com/xraph/grove/drivers/pgdriver/pgmigrate"         // PostgreSQL
+import _ "github.com/xraph/grove/drivers/mysqldriver/mysqlmigrate"   // MySQL
 import _ "github.com/xraph/grove/drivers/sqlitedriver/sqlitemigrate" // SQLite
 ```
 
 <Callout type="warn">
-If you see `no executor registered for driver "pg"`, you're missing the driver's migrate package import. Add the blank import for your driver as shown above.
+If you see `no executor registered for driver "pg"`, you're missing the driver's migrate package import.
 </Callout>
 
 ## KV Store Integration
 
-The KV module can also be used with Forge. Register a `*kv.Store` in the DI container alongside or independently of `*grove.DB`:
+The KV module has its own Forge extension, `github.com/xraph/grove/kv/extension`, configured under `extensions.grove_kv`:
 
 ```go
 import (
-    "github.com/xraph/grove/kv"
-    "github.com/xraph/grove/kv/drivers/redisdriver"
-    "github.com/xraph/grove/kv/codec"
+    _ "github.com/xraph/grove/kv/drivers/redisdriver"
+    kvext "github.com/xraph/grove/kv/extension"
 )
 
-// In your Forge extension's Register phase:
-store, _ := kv.Open(redisdriver.New(), "redis://localhost:6379",
-    kv.WithCodec(codec.MsgPack{}),
+app := forge.New(
+    forge.WithAppName("accounts"),
+    forge.WithExtensions(kvext.New(
+        kvext.WithDSN("redis", "redis://localhost:6379/0"),
+    )),
 )
-vessel.Provide(app, store) // Now injectable as *kv.Store
-
-// In a handler:
-func myHandler(ctx forge.Context) error {
-    store := forge.Inject[*kv.Store](ctx)
-    var user User
-    err := store.Get(ctx.Request().Context(), "user:123", &user)
-    // ...
-}
 ```
 
-The KV store reuses the same `grove/hook` system, so hooks registered on the KV store follow the same patterns as ORM hooks.
+It provides `*kv.Store` through DI, with `WithStore` and `WithStoreDSN` for named stores. See the [KV overview](/docs/kv/overview).
 
 ## Standalone Usage
 
-The extension's `Init()` method can be called outside of Forge for standalone use:
+`Init` opens the database and adds hooks without Forge. It needs a driver from `WithDriver`:
 
 ```go
 ext := groveext.New(
@@ -633,7 +427,6 @@ ext := groveext.New(
     groveext.WithHook(&auditHook),
 )
 
-// Initialize without Forge
 if err := ext.Init(nil); err != nil {
     log.Fatal(err)
 }

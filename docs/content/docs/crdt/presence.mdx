@@ -1,20 +1,20 @@
 ---
 title: Presence & Awareness
-description: Ephemeral real-time presence for collaborative features — typing indicators, cursor tracking, active users, and user metadata.
+description: Ephemeral real-time presence for collaborative features: typing indicators, cursor tracking, active users, and user metadata.
 ---
 
-Grove CRDT includes an optional presence system for tracking ephemeral, real-time state — who's online, what they're doing, where their cursor is. Unlike persistent CRDT data (LWW, Counter, Set), presence is **in-memory only**, automatically expires via TTL, and is designed for awareness features in collaborative applications.
+Grove CRDT includes an optional presence system for tracking ephemeral, real-time state: who's online, what they're doing, where their cursor is. Unlike persistent CRDT data (LWW, Counter, Set), presence is **in-memory only**, automatically expires via TTL, and is designed for awareness features in collaborative applications.
 
 ## Overview
 
 Presence solves "who else is here?" questions:
 
-- **Active users** — show avatars of people viewing a document
-- **Cursor tracking** — render other users' cursor positions on a canvas
-- **Typing indicators** — show "Alice is typing..." in a chat
-- **User metadata** — display names, roles, or status alongside edits
+- Active users: show avatars of people viewing a document
+- Cursor tracking: render other users' cursor positions on a canvas
+- Typing indicators: show "Alice is typing..." in a chat
+- User metadata: display names, roles, or status alongside edits
 
-Presence is **topic-scoped**. A topic is any string — typically `"table:pk"` for per-document presence (e.g., `"documents:doc-1"`), or an arbitrary name for rooms/channels (e.g., `"lobby"`).
+Presence is **topic-scoped**. A topic is any string, typically `"table:pk"` for per-document presence (e.g., `"documents:doc-1"`), or an arbitrary name for rooms/channels (e.g., `"lobby"`).
 
 ### Architecture
 
@@ -49,7 +49,7 @@ leavePresence()
 Enable presence on the `SyncController` with two options:
 
 ```go
-app.Use(groveext.New(
+app.RegisterExtension(groveext.New(
     groveext.WithDriver(pgdb),
     groveext.WithCRDT(plugin, hook.Scope{Tables: []string{"documents"}}),
     groveext.WithSyncController(
@@ -84,16 +84,15 @@ When presence is disabled (the default), the routes are not registered and there
 For non-Forge setups, the `NewHTTPHandler` also registers presence routes when enabled:
 
 ```go
-ctrl := crdt.NewSyncController(plugin,
+handler := crdt.NewHTTPHandler(plugin,
     crdt.WithPresenceEnabled(true),
     crdt.WithPresenceTTL(30 * time.Second),
 )
-defer ctrl.Close()
-
-handler := crdt.NewHTTPHandler(ctrl)
 // Registers: POST /pull, POST /push, POST /presence, GET /presence
-http.Handle("/sync/", handler)
+http.Handle("/sync/", http.StripPrefix("/sync", handler))
 ```
+
+`NewHTTPHandler` takes the plugin and controller options and builds its own `SyncController`. It doesn't serve the SSE stream; for that, use the Forge extension or wire `ctrl.StreamChangesSince` and `ctrl.SubscribePresence` into your own handler.
 
 ## HTTP API
 
@@ -188,7 +187,7 @@ GET /sync/stream?tables=documents&node_id=browser-abc
 
 ## TTL & Heartbeats
 
-Presence entries expire after the configured TTL (default 30 seconds). To keep presence alive, clients send periodic heartbeat updates — re-POSTing the same data at a regular interval.
+Presence entries expire after the configured TTL (default 30 seconds). To keep presence alive, clients send periodic heartbeat updates, re-POSTing the same data at a regular interval.
 
 **Server-side:**
 - The `PresenceManager` runs a background cleanup goroutine at `TTL / 2` intervals
@@ -229,7 +228,7 @@ await client.leaveAllPresence();
 
 ### PresenceManager (Local Store)
 
-The `CRDTClient` exposes a `presence` field — a read-only local store of remote peers' presence state, updated automatically via SSE events:
+The `CRDTClient` exposes a `presence` field, a read-only local store of remote peers' presence state, updated automatically via SSE events:
 
 ```typescript
 // Access the local presence manager.
@@ -411,180 +410,4 @@ type PresenceSnapshot struct {
 
 ## Room Management
 
-For more advanced collaborative scenarios, Grove provides a `RoomManager` that extends presence with structured rooms, participant limits, cursor tracking, and lifecycle hooks. Rooms build on top of the presence system to provide scoped collaborative spaces.
-
-For the full room management guide, see [Room Management](/docs/crdt/rooms).
-
-### Overview
-
-A room is a named collaborative space with:
-- **Participant limits** to control how many users can join
-- **Cursor tracking** with typed positions (canvas, text, code)
-- **Typing indicators** per participant
-- **Lifecycle hooks** for join/leave authorization and side effects
-- **Document room helpers** that tie rooms to specific table records
-
-### RoomManager
-
-The `RoomManager` handles room CRUD, join/leave operations, and participant tracking:
-
-```go
-ctrl := crdt.NewSyncController(plugin,
-    crdt.WithPresenceEnabled(true),
-    crdt.WithPresenceTTL(30 * time.Second),
-)
-
-rm := ctrl.RoomManager()
-
-// Create a room with options.
-room, err := rm.CreateRoom(ctx, "design-review", crdt.RoomOptions{
-    MaxParticipants: 10,
-    Metadata:        map[string]any{"project": "grove"},
-})
-
-// Join a room with participant data.
-err = rm.JoinRoom(ctx, "design-review", crdt.ParticipantData{
-    Name:   "Alice",
-    Color:  "#3b82f6",
-    Avatar: "https://example.com/alice.png",
-    Cursor: &crdt.CursorPosition{Type: "canvas", X: 120, Y: 340},
-})
-
-// Leave a room.
-err = rm.LeaveRoom(ctx, "design-review", "node-1")
-```
-
-### Cursor Types
-
-```go
-type CursorPosition struct {
-    Type   string  `json:"type"`   // "canvas", "text", "code"
-    X      float64 `json:"x"`      // Canvas: pixel X
-    Y      float64 `json:"y"`      // Canvas: pixel Y
-    Line   int     `json:"line"`   // Text/Code: line number
-    Column int     `json:"column"` // Text/Code: column number
-    Offset int     `json:"offset"` // Text: character offset
-}
-```
-
-### ParticipantData
-
-```go
-type ParticipantData struct {
-    Name     string          `json:"name"`
-    Color    string          `json:"color"`
-    Avatar   string          `json:"avatar,omitempty"`
-    Cursor   *CursorPosition `json:"cursor,omitempty"`
-    IsTyping bool            `json:"isTyping"`
-    Status   string          `json:"status,omitempty"`
-    Extra    json.RawMessage `json:"extra,omitempty"`
-}
-```
-
-### Document Room Helpers
-
-Convenience functions tie rooms to specific documents:
-
-```go
-// Create a room for a specific document.
-room, err := rm.CreateDocumentRoom(ctx, "documents", "doc-1", crdt.RoomOptions{
-    MaxParticipants: 5,
-})
-
-// Join a document room (constructs room ID as "documents:doc-1").
-err = rm.JoinDocumentRoom(ctx, "documents", "doc-1", crdt.ParticipantData{
-    Name:  "Alice",
-    Color: "#3b82f6",
-})
-```
-
-### Room Lifecycle Hooks
-
-Register hooks to intercept room events:
-
-```go
-ctrl.AddRoomHook(crdt.RoomHook{
-    OnJoin: func(ctx context.Context, roomID string, nodeID string, data crdt.ParticipantData) error {
-        // Authorization check, logging, etc.
-        return nil
-    },
-    OnLeave: func(ctx context.Context, roomID string, nodeID string) {
-        // Cleanup, notifications, etc.
-    },
-})
-```
-
-### HTTP Endpoints
-
-When rooms are enabled, the following endpoints are registered:
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/sync/rooms` | Create a room |
-| GET | `/sync/rooms` | List rooms |
-| GET | `/sync/rooms/:id` | Get room details |
-| DELETE | `/sync/rooms/:id` | Delete a room |
-| POST | `/sync/rooms/:id/join` | Join a room |
-| POST | `/sync/rooms/:id/leave` | Leave a room |
-| PUT | `/sync/rooms/:id/participant` | Update participant data |
-
-### TypeScript Room Client
-
-```typescript
-import { RoomClient } from "@grove-js/crdt";
-
-const rooms = new RoomClient({
-    baseURL: "/api/sync",
-    nodeID: "browser-1",
-});
-
-// Create and join a room.
-await rooms.create("design-review", { maxParticipants: 10 });
-await rooms.join("design-review", { name: "Alice", color: "#3b82f6" });
-
-// Update cursor position.
-await rooms.updateParticipant("design-review", {
-    cursor: { type: "canvas", x: 200, y: 150 },
-});
-
-// Leave a room.
-await rooms.leave("design-review");
-```
-
-### React Room Hooks
-
-```tsx
-import { useRoom, useDocumentRoom } from "@grove-js/crdt/react";
-
-function DesignCanvas({ roomId }: { roomId: string }) {
-    const { participants, join, leave, updateMyData } = useRoom(roomId);
-
-    useEffect(() => {
-        join({ name: "Alice", color: "#3b82f6" });
-        return () => { leave(); };
-    }, []);
-
-    const handleMouseMove = (e: React.MouseEvent) => {
-        updateMyData({ cursor: { type: "canvas", x: e.clientX, y: e.clientY } });
-    };
-
-    return (
-        <div onMouseMove={handleMouseMove}>
-            {participants.map((p) => (
-                <div key={p.nodeId} style={{ color: p.data.color }}>
-                    {p.data.name}
-                    {p.data.cursor && (
-                        <div style={{
-                            position: "absolute",
-                            left: p.data.cursor.x,
-                            top: p.data.cursor.y,
-                        }}>
-                            {p.data.name}'s cursor
-                        </div>
-                    )}
-                </div>
-            ))}
-        </div>
-    );
-}
-```
+Rooms build on presence: participant limits, cursors, typing indicators, metadata and lifecycle hooks, with a room ID that doubles as the presence topic. Turn them on with `crdt.WithRoomManager(true)` next to `crdt.WithPresenceEnabled(true)`, then reach the manager through `ctrl.Rooms()`. See [Room Management](/docs/crdt/rooms) for the Go API, the HTTP routes and the TypeScript client.
