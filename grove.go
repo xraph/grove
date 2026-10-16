@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 
+	gometrics "github.com/xraph/go-utils/metrics"
+
 	"github.com/xraph/grove/hook"
 )
 
@@ -84,6 +86,14 @@ func Open(drv GroveDriver, opts ...Option) (*DB, error) {
 	// without the caller having to wire the engine manually.
 	if hookable, ok := drv.(interface{ SetHooks(engine *hook.Engine) }); ok {
 		hookable.SetHooks(db.hooks)
+	}
+
+	// Drivers that record db.client.operation.duration take the metrics
+	// sink the same way.
+	if o.metrics != nil {
+		if instrumented, ok := drv.(interface{ SetMetrics(m gometrics.Metrics) }); ok {
+			instrumented.SetMetrics(o.metrics)
+		}
 	}
 
 	return db, nil
