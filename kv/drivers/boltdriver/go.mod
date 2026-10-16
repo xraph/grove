@@ -8,7 +8,7 @@ replace (
 )
 
 require (
-	github.com/xraph/grove/kv v1.7.2
+	github.com/xraph/grove/kv v1.8.0
 	go.etcd.io/bbolt v1.4.0
 )
 
