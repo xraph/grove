@@ -4,26 +4,32 @@ name: Release Grove Dart
 #
 # Dispatch it from main, which is the usual one:
 #
-#   gh workflow run release-grove-dart.yml --ref main -f version=1.0.1
+#   gh workflow run release-grove-dart.yml --ref main -f version=1.2.0
 #
-# version is optional. Leave it out and the run releases whatever
-# crdt-dart/pubspec.yaml says. If you pass it, it has to match the pubspec,
-# because the run won't bump anything for you: pub.dev compares the tag with
-# the version inside the uploaded package, and the publish dry run fails when
-# CHANGELOG.md has no entry for that version. So bump the pubspec and the
-# CHANGELOG on main first, then dispatch. dry_run runs the checks and stops
-# there.
+# If version is newer than crdt-dart/pubspec.yaml, the run bumps the pubspec,
+# adds a CHANGELOG.md entry and commits both to main as github-actions[bot].
+# Pass -f changelog='...' to write the entry yourself. Without it, the entry
+# lists the commits that touched crdt-dart/lib since the last release, or says
+# there were none. A heading for the version that's already in CHANGELOG.md is
+# kept as written. Leave version out to release whatever the pubspec says.
+# dry_run makes the bump locally, runs the checks and stops, so nothing is
+# pushed.
 #
-# Or push a tag named grove_crdt-v<version> yourself:
+# Or bump the pubspec and CHANGELOG on main yourself and push a tag named
+# grove_crdt-v<version>:
 #
-#   git tag grove_crdt-v1.0.1 && git push origin grove_crdt-v1.0.1
+#   git tag grove_crdt-v1.2.0 && git push origin grove_crdt-v1.2.0
 #
 # Either way, the upload happens in a run on the tag. pub.dev only trusts the
 # GitHub OIDC token of a run whose ref is a tag matching grove_crdt-v{{version}},
-# so a run on main can never publish. A dispatch from main checks the commit,
-# creates the tag, then dispatches this workflow again on the tag. A tag created
-# with GITHUB_TOKEN doesn't start any workflow, which is why it dispatches
-# instead of waiting for the push.
+# and it compares that tag with the version inside the package, so the bump has
+# to be committed before the tag exists. A dispatch from main runs every check
+# on the bump commit first. Then a second job pushes that exact commit to main,
+# tags it and dispatches this workflow again on the tag. The push only
+# fast-forwards, so if main moved during the run it fails before anything is
+# tagged. A tag created with GITHUB_TOKEN doesn't start any workflow, which is
+# why it dispatches instead of waiting for the push. The write token lives in
+# that second job only, away from the job that runs pub packages and tests.
 #
 # There is no token to store. You set up automated publishing in the package's
 # admin page on pub.dev: repository xraph/grove, tag pattern
@@ -35,7 +41,8 @@ name: Release Grove Dart
 #
 # A tag run for a version that is already on pub.dev (1.0.0, for one) runs the
 # checks and skips the upload, so re-running one is safe. A dispatch from main
-# for that version fails, since there is nothing new to release.
+# fails for a version that's already published, and for one lower than the
+# pubspec.
 
 on:
   push:
@@ -44,11 +51,15 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release, e.g. 1.0.1. Must match crdt-dart/pubspec.yaml. Leave empty to release the pubspec version.'
+        description: 'Version to release, e.g. 1.2.0. A version newer than crdt-dart/pubspec.yaml is bumped and committed to main. Leave empty to release the pubspec version.'
+        required: false
+        type: string
+      changelog:
+        description: 'CHANGELOG.md entry for a bumped version. Leave empty to list the commits that touched crdt-dart/lib since the last release.'
         required: false
         type: string
       dry_run:
-        description: 'Run the checks without tagging or publishing'
+        description: 'Run the checks without committing, tagging or publishing'
         required: false
         type: boolean
         default: false
@@ -68,6 +79,8 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
+      bump: ${{ steps.version.outputs.bump }}
+      commit: ${{ steps.bump.outputs.commit || github.sha }}
       publish: ${{ steps.version.outputs.publish }}
       release: ${{ steps.version.outputs.release }}
     env:
@@ -80,7 +93,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # A generated changelog entry lists the commits since the last
+          # grove_crdt tag, so the run needs the history and the tags.
+          fetch-depth: 0
 
+      # bump: the requested version is newer than the pubspec, so this run
+      # commits the bump locally and the tag job pushes it.
       # publish: this run is on the tag and uploads to pub.dev.
       # release: this run is a dispatch from the default branch and hands off
       # to a new run on the tag.
@@ -91,21 +110,39 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run == true }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          version=$(sed -n 's/^version: *//p' pubspec.yaml)
-          tag="grove_crdt-v$version"
+          current=$(sed -n 's/^version: *//p' pubspec.yaml)
           want="${WANT#v}"
+          version="${want:-$current}"
+          tag="grove_crdt-v$version"
+          bump=false
 
-          if [ -n "$want" ] && [ "$want" != "$version" ]; then
-            echo "::error::asked for $want, but crdt-dart/pubspec.yaml is at $version. Bump pubspec.yaml and CHANGELOG.md on $DEFAULT_BRANCH first."
-            exit 1
-          fi
-          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "$tag" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match pubspec version $version"
-            exit 1
-          fi
-          if [ "$GITHUB_REF_TYPE" = branch ] && [ "$DRY_RUN" != true ] && [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
-            echo "::error::releases are tagged from $DEFAULT_BRANCH. Dispatch on $DEFAULT_BRANCH, or set dry_run to only check $GITHUB_REF_NAME."
-            exit 1
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if [ "$version" != "$current" ]; then
+              echo "::error::asked for $version, but crdt-dart/pubspec.yaml at $GITHUB_REF_NAME is $current"
+              exit 1
+            fi
+            if [ "$GITHUB_REF_NAME" != "$tag" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match pubspec version $current"
+              exit 1
+            fi
+          else
+            if [ "$DRY_RUN" != true ] && [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+              echo "::error::releases are tagged from $DEFAULT_BRANCH. Dispatch on $DEFAULT_BRANCH, or set dry_run to only check $GITHUB_REF_NAME."
+              exit 1
+            fi
+            if [ "$version" != "$current" ]; then
+              if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+                echo "::error::$version is not a semantic version, e.g. 1.2.0 or 1.2.0-beta.1"
+                exit 1
+              fi
+              # Only x.y.z is compared, so 1.2.0 can follow 1.2.0-beta.1.
+              lowest=$(printf '%s\n%s\n' "${current%%[-+]*}" "${version%%[-+]*}" | sort -V | head -n1)
+              if [ "$lowest" != "${current%%[-+]*}" ]; then
+                echo "::error::$version is lower than the pubspec version $current"
+                exit 1
+              fi
+              bump=true
+            fi
           fi
 
           status=$(curl -s -o /dev/null -w '%{http_code}' "https://pub.dev/api/packages/grove_crdt/versions/$version")
@@ -121,7 +158,7 @@ jobs:
           release=false
           if [ "$published" = true ]; then
             if [ "$GITHUB_REF_TYPE" = branch ] && [ "$DRY_RUN" != true ]; then
-              echo "::error::grove_crdt $version is already on pub.dev. Bump pubspec.yaml and CHANGELOG.md to release a new version."
+              echo "::error::grove_crdt $version is already on pub.dev. Pass a newer version to release."
               exit 1
             fi
             echo "::notice::grove_crdt $version is already on pub.dev, so this run only checks it"
@@ -130,12 +167,14 @@ jobs:
           elif [ "$GITHUB_REF_TYPE" = tag ]; then
             publish=true
           else
-            # The tag may exist already from a dispatch whose hand-off failed.
-            # That is fine at this commit and an error anywhere else.
-            # ls-remote prints the peeled commit last for an annotated tag.
+            # Without a bump, the tag may exist already from a dispatch whose
+            # hand-off failed. That is fine at this commit and an error
+            # anywhere else. With a bump, the commit doesn't exist yet, so any
+            # existing tag is an error. ls-remote prints the peeled commit last
+            # for an annotated tag.
             existing=$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}" | tail -n1 | cut -f1)
-            if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then
-              echo "::error::$tag already exists at $existing, not at $GITHUB_SHA"
+            if [ -n "$existing" ] && { [ "$bump" = true ] || [ "$existing" != "$GITHUB_SHA" ]; }; then
+              echo "::error::$tag already exists at $existing"
               exit 1
             fi
             release=true
@@ -144,9 +183,46 @@ jobs:
           {
             echo "version=$version"
             echo "tag=$tag"
+            echo "bump=$bump"
             echo "publish=$publish"
             echo "release=$release"
           } >> "$GITHUB_OUTPUT"
+
+      # Committed before the checks so the publish dry run sees the new
+      # version, its CHANGELOG entry and a clean git tree.
+      - name: Commit the version bump
+        id: bump
+        if: steps.version.outputs.bump == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          NOTES: ${{ inputs.changelog }}
+        run: |
+          sed -i "s/^version: .*/version: $VERSION/" pubspec.yaml
+
+          if grep -Fqx "## $VERSION" CHANGELOG.md; then
+            echo "::notice::CHANGELOG.md already has an entry for $VERSION, so it is kept as written"
+          else
+            if [ -z "$NOTES" ]; then
+              last=$(git describe --tags --abbrev=0 --match 'grove_crdt-v*' 2>/dev/null || true)
+              range=HEAD
+              [ -z "$last" ] || range="$last..HEAD"
+              NOTES=$(git log --no-merges --format='- %s' "$range" -- lib)
+              if [ -z "$NOTES" ]; then
+                NOTES="- No changes to the client library${last:+ since ${last#grove_crdt-v}}."
+              fi
+            elif [ "${NOTES#-}" = "$NOTES" ]; then
+              NOTES="- $NOTES"
+            fi
+            { printf '## %s\n\n%s\n\n' "$VERSION" "$NOTES"; cat CHANGELOG.md; } > CHANGELOG.md.new
+            mv CHANGELOG.md.new CHANGELOG.md
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -am "chore(crdt): release grove_crdt $VERSION"
+          git show --stat HEAD
+          git bundle create "$RUNNER_TEMP/bump.bundle" "$GITHUB_SHA..HEAD"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -179,6 +255,15 @@ jobs:
       - name: Publish dry run
         run: dart pub publish --dry-run
 
+      - name: Hand the bump commit to the tag job
+        if: steps.version.outputs.release == 'true' && steps.version.outputs.bump == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: grove-crdt-bump
+          path: ${{ runner.temp }}/bump.bundle
+          retention-days: 1
+          if-no-files-found: error
+
   tag:
     name: Tag and start the publish run
     needs: verify
@@ -186,20 +271,45 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: write # create the tag
+      contents: write # push the bump commit and create the tag
       actions: write # dispatch this workflow on the tag
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       TAG: ${{ needs.verify.outputs.tag }}
       VERSION: ${{ needs.verify.outputs.version }}
+      COMMIT: ${{ needs.verify.outputs.commit }}
     steps:
+      - name: Checkout
+        if: needs.verify.outputs.bump == 'true'
+        uses: actions/checkout@v6
+
+      - name: Download the bump commit
+        if: needs.verify.outputs.bump == 'true'
+        uses: actions/download-artifact@v6
+        with:
+          name: grove-crdt-bump
+          path: ${{ runner.temp }}
+
+      - name: Push the bump commit
+        if: needs.verify.outputs.bump == 'true'
+        run: |
+          git fetch -q "$RUNNER_TEMP/bump.bundle" HEAD
+          fetched=$(git rev-parse FETCH_HEAD)
+          if [ "$fetched" != "$COMMIT" ]; then
+            echo "::error::the bundle holds $fetched, but the verified commit is $COMMIT"
+            exit 1
+          fi
+          # A plain push only fast-forwards. If main moved during the run,
+          # this fails and nothing gets tagged.
+          git push origin "$COMMIT:refs/heads/$GITHUB_REF_NAME"
+
       - name: Create the tag
         run: |
           if gh api "repos/$GH_REPO/git/ref/tags/$TAG" --silent 2>/dev/null; then
             echo "::notice::$TAG already points at this commit, so it is reused"
           else
-            gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" --silent
+            gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$COMMIT" --silent
           fi
 
       - name: Start the publish run on the tag
