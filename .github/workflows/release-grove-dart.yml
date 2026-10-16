@@ -1,26 +1,57 @@
 name: Release Grove Dart
 
-# Publishes grove_crdt (crdt-dart/) to pub.dev when you push a tag named
-# grove_crdt-v<version>, for example:
+# Publishes grove_crdt (crdt-dart/) to pub.dev. You can start it two ways.
+#
+# Dispatch it from main, which is the usual one:
+#
+#   gh workflow run release-grove-dart.yml --ref main -f version=1.0.1
+#
+# version is optional. Leave it out and the run releases whatever
+# crdt-dart/pubspec.yaml says. If you pass it, it has to match the pubspec,
+# because the run won't bump anything for you: pub.dev compares the tag with
+# the version inside the uploaded package, and the publish dry run fails when
+# CHANGELOG.md has no entry for that version. So bump the pubspec and the
+# CHANGELOG on main first, then dispatch. dry_run runs the checks and stops
+# there.
+#
+# Or push a tag named grove_crdt-v<version> yourself:
 #
 #   git tag grove_crdt-v1.0.1 && git push origin grove_crdt-v1.0.1
 #
-# The tag must match the version in crdt-dart/pubspec.yaml, so bump the
-# pubspec and CHANGELOG on main first, then tag that commit.
+# Either way, the upload happens in a run on the tag. pub.dev only trusts the
+# GitHub OIDC token of a run whose ref is a tag matching grove_crdt-v{{version}},
+# so a run on main can never publish. A dispatch from main checks the commit,
+# creates the tag, then dispatches this workflow again on the tag. A tag created
+# with GITHUB_TOKEN doesn't start any workflow, which is why it dispatches
+# instead of waiting for the push.
 #
-# There is no token to store. pub.dev trusts the GitHub OIDC token of this run,
-# which needs automated publishing turned on in the package's admin page on
-# pub.dev: repository xraph/grove, tag pattern grove_crdt-v{{version}}, and
-# environment pub.dev. pub.dev only lets you turn that on for a package that
-# already exists, which is why 1.0.0 was published by hand.
+# There is no token to store. You set up automated publishing in the package's
+# admin page on pub.dev: repository xraph/grove, tag pattern
+# grove_crdt-v{{version}}, environment pub.dev, with both the push and the
+# workflow_dispatch events ticked. If workflow_dispatch isn't ticked, the run on
+# the tag fails at the upload, and you can re-run it once it is. pub.dev only
+# lets you turn automated publishing on for a package that already exists,
+# which is why 1.0.0 was published by hand.
 #
-# A tag for a version that is already on pub.dev (1.0.0, for one) runs the
-# checks and skips the publish, so tagging a hand-published release is safe.
+# A tag run for a version that is already on pub.dev (1.0.0, for one) runs the
+# checks and skips the upload, so re-running one is safe. A dispatch from main
+# for that version fails, since there is nothing new to release.
 
 on:
   push:
     tags:
       - 'grove_crdt-v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 1.0.1. Must match crdt-dart/pubspec.yaml. Leave empty to release the pubspec version.'
+        required: false
+        type: string
+      dry_run:
+        description: 'Run the checks without tagging or publishing'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -35,7 +66,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
       publish: ${{ steps.version.outputs.publish }}
+      release: ${{ steps.version.outputs.release }}
     env:
       # The conformance tests build crdt-dart/tool/conformance_server with
       # GOWORK=off and GOPROXY=off, so the module cache must be warm first.
@@ -47,26 +81,72 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Tag matches the pubspec version
+      # publish: this run is on the tag and uploads to pub.dev.
+      # release: this run is a dispatch from the default branch and hands off
+      # to a new run on the tag.
+      - name: Resolve the version
         id: version
+        env:
+          WANT: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run == true }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           version=$(sed -n 's/^version: *//p' pubspec.yaml)
-          tagged="${GITHUB_REF_NAME#grove_crdt-v}"
-          if [ "$version" != "$tagged" ]; then
+          tag="grove_crdt-v$version"
+          want="${WANT#v}"
+
+          if [ -n "$want" ] && [ "$want" != "$version" ]; then
+            echo "::error::asked for $want, but crdt-dart/pubspec.yaml is at $version. Bump pubspec.yaml and CHANGELOG.md on $DEFAULT_BRANCH first."
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "$tag" ]; then
             echo "::error::tag $GITHUB_REF_NAME does not match pubspec version $version"
             exit 1
           fi
+          if [ "$GITHUB_REF_TYPE" = branch ] && [ "$DRY_RUN" != true ] && [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "::error::releases are tagged from $DEFAULT_BRANCH. Dispatch on $DEFAULT_BRANCH, or set dry_run to only check $GITHUB_REF_NAME."
+            exit 1
+          fi
+
           status=$(curl -s -o /dev/null -w '%{http_code}' "https://pub.dev/api/packages/grove_crdt/versions/$version")
           case "$status" in
-            200)
-              echo "::notice::grove_crdt $version is already on pub.dev, so this run only checks it"
-              echo "publish=false" >> "$GITHUB_OUTPUT" ;;
-            404)
-              echo "publish=true" >> "$GITHUB_OUTPUT" ;;
+            200) published=true ;;
+            404) published=false ;;
             *)
               echo "::error::pub.dev answered $status for grove_crdt $version"
               exit 1 ;;
           esac
+
+          publish=false
+          release=false
+          if [ "$published" = true ]; then
+            if [ "$GITHUB_REF_TYPE" = branch ] && [ "$DRY_RUN" != true ]; then
+              echo "::error::grove_crdt $version is already on pub.dev. Bump pubspec.yaml and CHANGELOG.md to release a new version."
+              exit 1
+            fi
+            echo "::notice::grove_crdt $version is already on pub.dev, so this run only checks it"
+          elif [ "$DRY_RUN" = true ]; then
+            echo "::notice::dry run, so grove_crdt $version is checked and not released"
+          elif [ "$GITHUB_REF_TYPE" = tag ]; then
+            publish=true
+          else
+            # The tag may exist already from a dispatch whose hand-off failed.
+            # That is fine at this commit and an error anywhere else.
+            # ls-remote prints the peeled commit last for an annotated tag.
+            existing=$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}" | tail -n1 | cut -f1)
+            if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "::error::$tag already exists at $existing, not at $GITHUB_SHA"
+              exit 1
+            fi
+            release=true
+          fi
+
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "publish=$publish"
+            echo "release=$release"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -98,6 +178,34 @@ jobs:
 
       - name: Publish dry run
         run: dart pub publish --dry-run
+
+  tag:
+    name: Tag and start the publish run
+    needs: verify
+    if: needs.verify.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # create the tag
+      actions: write # dispatch this workflow on the tag
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.verify.outputs.tag }}
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - name: Create the tag
+        run: |
+          if gh api "repos/$GH_REPO/git/ref/tags/$TAG" --silent 2>/dev/null; then
+            echo "::notice::$TAG already points at this commit, so it is reused"
+          else
+            gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" --silent
+          fi
+
+      - name: Start the publish run on the tag
+        run: |
+          gh workflow run release-grove-dart.yml --ref "$TAG" -f version="$VERSION"
+          echo "Started the publish run for $TAG: $GITHUB_SERVER_URL/$GH_REPO/actions/workflows/release-grove-dart.yml" >> "$GITHUB_STEP_SUMMARY"
 
   publish:
     name: Publish to pub.dev
