@@ -190,7 +190,7 @@ func (TenantScope) BeforeQuery(ctx context.Context, qc *hook.QueryContext) (*hoo
 db.Hooks().AddHook(TenantScope{}, hook.Scope{Tables: []string{"orders"}})
 ```
 
-Scopes filter by table and by operation (`hook.OpSelect`, `hook.OpInsert`, `hook.OpUpdate`, `hook.OpDelete` and the bulk variants), and a lower `Priority` runs first. The `audit` and `observability` packages are hooks too, for audit logs and query metrics. See [hooks](https://www.xraph.com/docs/grove/hooks/overview) and [tenant isolation](https://www.xraph.com/docs/grove/hooks/tenant-isolation).
+Scopes filter by table and by operation (`hook.OpSelect`, `hook.OpInsert`, `hook.OpUpdate`, `hook.OpDelete` and the bulk variants), and a lower `Priority` runs first. The `audit` package is a hook too, for audit logs. See [hooks](https://www.xraph.com/docs/grove/hooks/overview) and [tenant isolation](https://www.xraph.com/docs/grove/hooks/tenant-isolation).
 
 ## Key-value store
 
@@ -286,6 +286,8 @@ err := app.Router().GET("/users/count", func(ctx forge.Context) error {
 ```
 
 The extension doesn't import any driver itself. You import the driver you want (blank, or by name as above), plus its `<name>migrate` package if you have migrations. Otherwise `WithDSN` fails with an unknown-driver error, or migrations fail with no executor.
+
+You get tracing and metrics for free. Every query runs as a client span (`SELECT users`, `COMMIT`) under the request or job that issued it, and `/_/metrics` gets `db_client_operation_duration_seconds`, labelled by system, operation, table and error type. Outside Forge, pass `grove.WithMetrics(m)` to `grove.Open`. The spans go to whatever OpenTelemetry tracer provider is installed. Grove never records the query text or a bound value. See [tracing and metrics](https://www.xraph.com/docs/grove/integration/observability).
 
 The extension implements `forge.MigratableExtension`, but a plain `app.Run()` doesn't apply migrations. Run your app through Forge's `cli.NewAppRunner` to get `migrate up`, `migrate down` and `migrate status` commands, and call `AutoMigrate()` on the runner if you want pending migrations applied before the server starts.
 

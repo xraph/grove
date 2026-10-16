@@ -1,0 +1,132 @@
+---
+title: Tracing and metrics
+description: The OpenTelemetry spans and the db.client.operation.duration histogram every Grove driver records, and how to wire them up with or without Forge.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Every Grove driver traces and times the calls it makes to the database, following the OpenTelemetry database client conventions. In a Forge app that uses the Grove extension you don't change any code: queries show up as client spans under the request or job that ran them, and `/_/metrics` gets `db_client_operation_duration_seconds`.
+
+## In a Forge app
+
+Use the extension as you already do. It hands `app.Metrics()` to every database and KV store it opens, and the drivers start their spans on the tracer provider `forge.New` installed.
+
+```go
+app := forge.NewApp(forge.AppConfig{
+    Name:       "orders",
+    Extensions: []forge.Extension{groveext.New(groveext.WithDriver(pgdb))},
+})
+```
+
+Then query the histogram like any other series:
+
+```promql
+# p95 per table and operation
+histogram_quantile(0.95,
+  sum by (le, db_collection_name, db_operation_name) (
+    rate(db_client_operation_duration_seconds_bucket[5m])))
+
+# Failed calls per second, by Postgres SQLSTATE
+sum by (db_response_status_code) (
+  rate(db_client_operation_duration_seconds_count{error_type!=""}[5m]))
+```
+
+## Without Forge
+
+Pass any `github.com/xraph/go-utils/metrics` sink to `grove.Open` or `kv.Open`. Spans need no option: they go to the OpenTelemetry global tracer provider, so set one up with `otel.SetTracerProvider` and they appear.
+
+```go
+db, err := grove.Open(pgdb, grove.WithMetrics(m))
+store, err := kv.Open(redisdb, kv.WithMetrics(m))
+```
+
+## Spans
+
+A span is only started when the context already carries one. Queries under an HTTP request, a job or a span you started yourself nest inside it. A background loop that polls the database every second with `context.Background()` doesn't mint a one-span trace per tick. Give each unit of work its own span (one per job run, one per delivery attempt) and the queries it runs land under it.
+
+```go
+ctx, span := forge.StartSpan(ctx, "process job")
+defer span.End()
+
+job, err := store.Claim(ctx) // SELECT dispatch_jobs, as a child of "process job"
+```
+
+Each span is a client span. Its name is the operation and the table, `SELECT users` or `INSERT orders`, or the command alone where there's no table (`COMMIT`, `GET`, `aggregate`). It carries:
+
+| Attribute | Example | When |
+|---|---|---|
+| `db.system.name` | `postgresql` | always |
+| `db.namespace` | `app` | when the driver knows the database name |
+| `db.operation.name` | `SELECT`, `find`, `ZADD` | when the statement starts with a keyword Grove knows |
+| `db.collection.name` | `users` | when the call works on one table, collection or index |
+| `db.query.summary` | `SELECT users` | same as the span name |
+| `server.address`, `server.port` | `db.internal`, `5432` | when the DSN names a host |
+| `error.type` | `23505` | on failure |
+| `db.response.status_code` | `23505` | on failure, when the driver can read a code |
+
+The query text is never recorded, and neither are bound values, keys or document bodies. Grove reads the operation and the first table out of the SQL with a scanner that skips string literals and comments, so `SELECT * FROM users WHERE email = 'alice@example.com'` becomes `SELECT users` and nothing else.
+
+`BEGIN`, `COMMIT` and `ROLLBACK` get spans of their own, which is where a slow fsync shows up. `COMMIT` and `ROLLBACK` take no context, so a transaction remembers the span that was current at `BEGIN` and starts them under it. The `Rollback` you defer after a successful `Commit` doesn't reach the database and isn't recorded.
+
+## The histogram
+
+`db.client.operation.duration`, unit seconds, scraped as `db_client_operation_duration_seconds`. The buckets are the ones the conventions advise: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5 and 10 seconds.
+
+| Label | Values |
+|---|---|
+| `db_system_name` | `postgresql`, `mysql`, `sqlite`, `mongodb`, `clickhouse`, `elasticsearch`, `turso`, and for KV `redis`, `memcached`, `aws.dynamodb`, `badger`, `bbolt` |
+| `db_namespace` | the database name, or empty |
+| `db_operation_name` | the operation, as on the span |
+| `db_collection_name` | the table, collection or index, or empty |
+| `db_response_status_code` | the database's code on failure, otherwise empty |
+| `error_type` | empty on success, otherwise as on the span |
+
+Every series carries all six labels, empty where they don't apply. The server address isn't a label: it's on the span, and a metric label per host would multiply every series by the size of your replica set.
+
+## What counts as a failure
+
+| Driver | `error.type` and status code | Not a failure |
+|---|---|---|
+| pgdriver | the SQLSTATE: `23505`, `40001`, `57014` | no rows |
+| mysqldriver | the error number: `1062`, `1213` | no rows |
+| sqlitedriver | the extended result code: `2067`, `5` | no rows |
+| mongodriver | the server error code: `11000`, `50` | |
+| esdriver | the HTTP status: `404`, `429`, `503` | a 404 from `get` or an `exists` check |
+| clickhousedriver, tursodriver | the Go type of the error, since these drivers don't import their client library | no rows |
+| KV | the Go type of the error | a missing key |
+
+A cancelled or timed-out context reports `context.Canceled` or `context.DeadlineExceeded`, the same names Forge's messaging spans use. Any other error without a code reports the Go type of the innermost error in its chain.
+
+## How each driver hooks in
+
+The SQL drivers wrap the calls on the pool, a transaction, a dedicated connection and a prepared statement. A query's span runs until its rows are drained or closed, because a row error can still arrive while you iterate, and a single-row query's span ends at `Scan`.
+
+mongodriver installs a command monitor on the client, so every command the Go driver sends is covered, including the ones you send through `Client()` yourself. esdriver plugs into the Elasticsearch client's instrumentation hook. A request against a comma-separated list of indices or a wildcard pattern gets no collection, so `logs-*` doesn't turn into a label value per pattern.
+
+The KV store records around each driver call, after its hooks have run, so a slow hook doesn't read as a slow Redis.
+
+<Callout type="warn">
+The table label comes from your SQL. Grove's builders always produce the same table names, but raw SQL against partition tables (`events_2026_10`) or date-named Elasticsearch indices makes a new series for each one. Forge caps a metric at 2000 label sets and folds the rest into one overflow series, so watch for its warning.
+</Callout>
+
+## Testing your own code
+
+`github.com/xraph/grove/observability/telemetrytest` installs an in-memory tracer provider for one test and keeps a metrics sink you can read back.
+
+```go
+func TestClaimIsTraced(t *testing.T) {
+	rec := telemetrytest.Spans(t)
+	m := telemetrytest.NewMetrics()
+	db, _ := grove.Open(drv, grove.WithMetrics(m))
+
+	ctx, parent := telemetrytest.Parent(t.Context())
+	claim(ctx, db)
+	parent.End()
+
+	spans := telemetrytest.Ended(rec) // grove's spans only
+	series := m.Series(observability.OperationDurationMetric)
+	// assert on names, attributes and label sets
+}
+```
+
+`telemetrytest.SQLDB` gives you a `*sql.DB` over an in-memory driver whose answer you pick per statement, for testing failure paths without a server.

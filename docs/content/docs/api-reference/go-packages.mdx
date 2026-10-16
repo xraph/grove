@@ -26,7 +26,8 @@ description: Reference for all Grove Go packages.
 | `grovetest` | `github.com/xraph/grove/grovetest` | Testing utilities: mock driver, fixtures, assertions |
 | `extension` | `github.com/xraph/grove/extension` | Forge extension entry point |
 | `audit` | `github.com/xraph/grove/audit` | Post-mutation audit hook over a `Writer` |
-| `observability` | `github.com/xraph/grove/observability` | Query timing hook over a `Collector` |
+| `observability` | `github.com/xraph/grove/observability` | The OpenTelemetry spans and `db.client.operation.duration` histogram every driver records, the SQL summariser behind them, and the older query timing hook over a `Collector` |
+| `telemetrytest` | `github.com/xraph/grove/observability/telemetrytest` | In-memory span recorder, metrics sink and `*sql.DB` for testing that telemetry |
 | `internal/tagparser` | `github.com/xraph/grove/internal/tagparser` | High-performance struct tag parser |
 | `internal/pool` | `github.com/xraph/grove/internal/pool` | sync.Pool-based byte buffer pool |
 | `internal/safe` | `github.com/xraph/grove/internal/safe` | Safe identifier quoting |
