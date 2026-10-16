@@ -73,6 +73,9 @@ func (m *commandMonitor) monitor() *event.CommandMonitor {
 
 func (m *commandMonitor) started(ctx context.Context, e *event.CommandStartedEvent) {
 	_, op := m.tel.StartIn(ctx, e.DatabaseName, e.CommandName, collectionOf(e.CommandName, e.Command))
+	if op == nil {
+		return // nothing to record, so nothing for succeeded or failed to end
+	}
 	m.ops.Store(opKey{conn: e.ConnectionID, req: e.RequestID}, op)
 }
 

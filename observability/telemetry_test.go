@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"go.opentelemetry.io/otel/codes"
@@ -121,6 +122,70 @@ func TestEndWithStatusCode(t *testing.T) {
 	}
 	if len(s.Events()) != 1 || s.Events()[0].Name != "exception" {
 		t.Errorf("want one exception event, got %v", s.Events())
+	}
+}
+
+// A driver's error message can quote the values it was given (a duplicate
+// key, a bad integer), so the span carries the error's type and never its
+// text.
+func TestEndKeepsErrorTextOffTheSpan(t *testing.T) {
+	const secret = "alice@example.com"
+
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"with a status code", fmt.Errorf("duplicate entry '%s' for key 'users.email': %w", secret, &codeError{code: "1062"})},
+		{"without one", fmt.Errorf("invalid input syntax for type integer: %q", secret)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := telemetrytest.Spans(t)
+			tel := newTelemetry()
+
+			ctx, parent := telemetrytest.Parent(t.Context())
+			_, op := tel.StartSQL(ctx, `INSERT INTO users (email) VALUES ($1)`)
+			op.End(tt.err)
+			parent.End()
+
+			s := telemetrytest.Ended(rec)[0]
+			if s.Status().Code != codes.Error {
+				t.Errorf("status = %v, want error", s.Status().Code)
+			}
+			if strings.Contains(s.Status().Description, secret) {
+				t.Errorf("status description holds the error text: %q", s.Status().Description)
+			}
+			for k, v := range telemetrytest.AttrMap(s) {
+				if strings.Contains(v, secret) {
+					t.Errorf("attribute %s holds the error text: %q", k, v)
+				}
+			}
+			for _, e := range s.Events() {
+				for _, a := range e.Attributes {
+					if strings.Contains(a.Value.String(), secret) {
+						t.Errorf("%s event attribute %s holds the error text", e.Name, a.Key)
+					}
+				}
+			}
+		})
+	}
+}
+
+// With no parent span and no metrics sink there's nothing to record, so a
+// call shouldn't cost an allocation.
+func TestDisabledCallsAllocateNothing(t *testing.T) {
+	tel := newTelemetry()
+	ctx := t.Context()
+
+	allocs := testing.AllocsPerRun(100, func() {
+		_, op := tel.StartSQL(ctx, `SELECT id FROM jobs WHERE id = $1`)
+		op.End(nil)
+		_, op = tel.Start(ctx, "find", "jobs")
+		op.End(nil)
+	})
+	if allocs != 0 {
+		t.Errorf("a call with no parent span and no sink allocated %v times, want 0", allocs)
 	}
 }
 

@@ -136,7 +136,7 @@ func (t *Telemetry) SetMetrics(m gometrics.Metrics) {
 // StartSQL starts an operation for a SQL statement. The operation, table and
 // span name come from SummarizeSQL, so they never hold a value from query.
 func (t *Telemetry) StartSQL(ctx context.Context, query string) (context.Context, *Op) {
-	if t == nil {
+	if t.idle(ctx) {
 		return ctx, nil
 	}
 	s := SummarizeSQL(query)
@@ -147,7 +147,7 @@ func (t *Telemetry) StartSQL(ctx context.Context, query string) (context.Context
 // aren't SQL: operation is the command (find, insert, search) and collection
 // the collection or index, "" when there isn't one.
 func (t *Telemetry) Start(ctx context.Context, operation, collection string) (context.Context, *Op) {
-	if t == nil {
+	if t.idle(ctx) {
 		return ctx, nil
 	}
 	return t.start(ctx, t.namespace, operation, collection, summaryOf(operation, collection))
@@ -156,10 +156,18 @@ func (t *Telemetry) Start(ctx context.Context, operation, collection string) (co
 // StartIn is Start for a driver whose namespace changes per call, like a
 // MongoDB client that talks to several databases.
 func (t *Telemetry) StartIn(ctx context.Context, namespace, operation, collection string) (context.Context, *Op) {
-	if t == nil {
+	if t.idle(ctx) {
 		return ctx, nil
 	}
 	return t.start(ctx, namespace, operation, collection, summaryOf(operation, collection))
+}
+
+// idle reports whether a call on ctx has nothing to record: no parent span to
+// nest under and no metrics sink. The Start methods then return a nil *Op,
+// which every Op method accepts, so a driver with telemetry switched off pays
+// for a pointer load and nothing else.
+func (t *Telemetry) idle(ctx context.Context) bool {
+	return t == nil || (t.sink.Load() == nil && !trace.SpanContextFromContext(ctx).IsValid())
 }
 
 func summaryOf(operation, collection string) string {
@@ -275,8 +283,11 @@ func (o *Op) SetBatchSize(n int) {
 
 // End ends the span and records the duration. A nil err, or one the driver
 // marked benign, is a success. Anything else sets error.type,
-// db.response.status_code when the driver can read one, and an error status
-// on the span. End is safe on a nil *Op and does nothing the second time.
+// db.response.status_code when the driver can read one, an exception event
+// carrying the error's Go type, and an error status on the span. The error's
+// text never goes on the span, because a driver's message can quote the
+// values it was given (a duplicate key, a bad integer). End is safe on a nil
+// *Op and does nothing the second time.
 func (o *Op) End(err error) {
 	if o == nil || o.ended {
 		return
@@ -299,8 +310,9 @@ func (o *Op) End(err error) {
 			if status != "" {
 				o.span.SetAttributes(semconv.DBResponseStatusCode(status))
 			}
-			o.span.RecordError(err)
-			o.span.SetStatus(codes.Error, err.Error())
+			o.span.AddEvent(semconv.ExceptionEventName, trace.WithAttributes(
+				semconv.ExceptionType(errorType(err, ""))))
+			o.span.SetStatus(codes.Error, errType)
 		}
 		o.span.End()
 	}
@@ -375,10 +387,25 @@ func (s *metricSink) observe(v float64, k seriesKey) {
 			labelErrorType:  k.errType,
 		}),
 	)
-	if s.n.Add(1) <= maxCachedSeries {
+	if claim(&s.n, maxCachedSeries) {
 		s.cache.Store(k, hist)
 	}
 	hist.Observe(v)
+}
+
+// claim takes one of limit slots counted on n and reports whether it got one.
+// Once the slots are gone n stops moving, so a stream of misses can't wrap it
+// negative and let a bounded cache grow again.
+func claim(n *atomic.Int32, limit int32) bool {
+	for {
+		cur := n.Load()
+		if cur >= limit {
+			return false
+		}
+		if n.CompareAndSwap(cur, cur+1) {
+			return true
+		}
+	}
 }
 
 // ConnectionFromURL reads the database name, host and port out of a URL-form

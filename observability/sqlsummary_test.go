@@ -1,7 +1,9 @@
 package observability
 
 import (
+	"math"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -153,4 +155,45 @@ func BenchmarkSummarizeSQL(b *testing.B) {
 			summarize(q)
 		}
 	})
+}
+
+// The cache counters stop at their cap. If they kept counting misses they
+// would wrap negative after 2^31 of them and the caches would grow again.
+func TestClaimStopsAtTheLimit(t *testing.T) {
+	var n atomic.Int32
+	for i := range 3 {
+		if !claim(&n, 3) {
+			t.Fatalf("claim %d failed under the limit", i)
+		}
+	}
+	for range 5 {
+		if claim(&n, 3) {
+			t.Fatal("claim succeeded past the limit")
+		}
+	}
+	if got := n.Load(); got != 3 {
+		t.Errorf("counter = %d after misses past the limit, want 3", got)
+	}
+
+	n.Store(math.MaxInt32)
+	if claim(&n, math.MaxInt32) || n.Load() != math.MaxInt32 {
+		t.Errorf("counter moved off MaxInt32: %d", n.Load())
+	}
+}
+
+func TestSummaryCacheStopsCountingWhenFull(t *testing.T) {
+	saved := summaryCache.n.Load()
+	t.Cleanup(func() { summaryCache.n.Store(saved) })
+	summaryCache.n.Store(maxCachedSummaries)
+
+	q := `SELECT id FROM cache_full_probe`
+	SummarizeSQL(q)
+	SummarizeSQL(q)
+
+	if got := summaryCache.n.Load(); got != maxCachedSummaries {
+		t.Errorf("counter = %d, want it to stay at %d", got, maxCachedSummaries)
+	}
+	if _, ok := summaryCache.m.Load(q); ok {
+		t.Error("a statement was cached past the cap")
+	}
 }

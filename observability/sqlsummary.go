@@ -82,7 +82,7 @@ func SummarizeSQL(query string) SQLSummary {
 
 	s := summarize(query)
 
-	if len(query) <= maxCachedQueryLen && summaryCache.n.Add(1) <= maxCachedSummaries {
+	if len(query) <= maxCachedQueryLen && claim(&summaryCache.n, maxCachedSummaries) {
 		summaryCache.m.Store(query, s)
 	}
 

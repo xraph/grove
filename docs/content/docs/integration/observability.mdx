@@ -97,6 +97,8 @@ Every series carries all six labels, empty where they don't apply. The server ad
 
 A cancelled or timed-out context reports `context.Canceled` or `context.DeadlineExceeded`, the same names Forge's messaging spans use. Any other error without a code reports the Go type of the innermost error in its chain.
 
+A failed span gets an error status whose description is the `error.type`, and an `exception` event carrying only `exception.type`, the error's Go type. Your code still gets the full error back, but the span leaves its message out. Drivers quote the values they were given in their messages (`Duplicate entry 'alice@example.com' for key 'users.email'`), so recording it would put bound values on every failed trace.
+
 ## How each driver hooks in
 
 The SQL drivers wrap the calls on the pool, a transaction, a dedicated connection and a prepared statement. A query's span runs until its rows are drained or closed, because a row error can still arrive while you iterate, and a single-row query's span ends at `Scan`.
