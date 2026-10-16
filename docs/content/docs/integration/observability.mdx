@@ -20,7 +20,7 @@ app := forge.NewApp(forge.AppConfig{
 
 Then query the histogram like any other series:
 
-```promql
+```text
 # p95 per table and operation
 histogram_quantile(0.95,
   sum by (le, db_collection_name, db_operation_name) (

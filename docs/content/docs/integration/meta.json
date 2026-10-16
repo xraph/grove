@@ -1,4 +1,9 @@
 {
   "title": "Integration",
-  "pages": ["forge-extension", "configuration", "observability", "plugin-system"]
+  "pages": [
+    "forge-extension",
+    "configuration",
+    "observability",
+    "plugin-system"
+  ]
 }
