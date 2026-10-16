@@ -10,6 +10,7 @@ import (
 	"github.com/xraph/grove/hook"
 	"github.com/xraph/grove/kv/codec"
 	"github.com/xraph/grove/kv/driver"
+	"github.com/xraph/grove/observability"
 )
 
 // Store is the top-level KV handle. It manages the driver connection,
@@ -18,6 +19,7 @@ type Store struct {
 	drv   driver.Driver
 	hooks *hook.Engine
 	codec codec.Codec
+	tel   *observability.Telemetry
 
 	mu     sync.RWMutex
 	closed bool
@@ -37,6 +39,10 @@ func Open(drv driver.Driver, opts ...Option) (*Store, error) {
 		drv:   drv,
 		hooks: hook.NewEngine(),
 		codec: o.codec,
+		tel:   newTelemetry(drv),
+	}
+	if o.metrics != nil {
+		s.tel.SetMetrics(o.metrics)
 	}
 
 	for _, entry := range o.hooks {
@@ -65,7 +71,9 @@ func (s *Store) Get(ctx context.Context, key string, dest any) error {
 	// Resolve potentially modified key from hooks.
 	resolvedKey := resolveKey(qc)
 
-	raw, err := s.drv.Get(ctx, resolvedKey)
+	raw, err := timed(ctx, s.tel, OpGet, func(ctx context.Context) ([]byte, error) {
+		return s.drv.Get(ctx, resolvedKey)
+	})
 	if err != nil {
 		_ = s.hooks.RunPostQuery(ctx, qc, nil)
 		return err
@@ -98,7 +106,9 @@ func (s *Store) GetRaw(ctx context.Context, key string) ([]byte, error) {
 
 	resolvedKey := resolveKey(qc)
 
-	raw, err := s.drv.Get(ctx, resolvedKey)
+	raw, err := timed(ctx, s.tel, OpGet, func(ctx context.Context) ([]byte, error) {
+		return s.drv.Get(ctx, resolvedKey)
+	})
 	if err != nil {
 		_ = s.hooks.RunPostQuery(ctx, qc, nil)
 		return nil, err
@@ -142,7 +152,9 @@ func (s *Store) Set(ctx context.Context, key string, value any, opts ...SetOptio
 			return ErrNotSupported
 		}
 		if so.nx {
-			ok, err := casDriver.SetNX(ctx, resolvedKey, raw, so.ttl)
+			ok, err := timed(ctx, s.tel, OpSet, func(ctx context.Context) (bool, error) {
+				return casDriver.SetNX(ctx, resolvedKey, raw, so.ttl)
+			})
 			if err != nil {
 				return err
 			}
@@ -151,7 +163,9 @@ func (s *Store) Set(ctx context.Context, key string, value any, opts ...SetOptio
 			}
 			return s.hooks.RunPostQuery(ctx, qc, nil)
 		}
-		ok2, err := casDriver.SetXX(ctx, resolvedKey, raw, so.ttl)
+		ok2, err := timed(ctx, s.tel, OpSet, func(ctx context.Context) (bool, error) {
+			return casDriver.SetXX(ctx, resolvedKey, raw, so.ttl)
+		})
 		if err != nil {
 			return err
 		}
@@ -161,7 +175,9 @@ func (s *Store) Set(ctx context.Context, key string, value any, opts ...SetOptio
 		return s.hooks.RunPostQuery(ctx, qc, nil)
 	}
 
-	if err := s.drv.Set(ctx, resolvedKey, raw, so.ttl); err != nil {
+	if err := timedErr(ctx, s.tel, OpSet, func(ctx context.Context) error {
+		return s.drv.Set(ctx, resolvedKey, raw, so.ttl)
+	}); err != nil {
 		return err
 	}
 
@@ -197,7 +213,9 @@ func (s *Store) SetRaw(ctx context.Context, key string, value []byte, opts ...Se
 			return ErrNotSupported
 		}
 		if so.nx {
-			ok, err := casDriver.SetNX(ctx, resolvedKey, value, so.ttl)
+			ok, err := timed(ctx, s.tel, OpSet, func(ctx context.Context) (bool, error) {
+				return casDriver.SetNX(ctx, resolvedKey, value, so.ttl)
+			})
 			if err != nil {
 				return err
 			}
@@ -206,7 +224,9 @@ func (s *Store) SetRaw(ctx context.Context, key string, value []byte, opts ...Se
 			}
 			return s.hooks.RunPostQuery(ctx, qc, nil)
 		}
-		ok2, err := casDriver.SetXX(ctx, resolvedKey, value, so.ttl)
+		ok2, err := timed(ctx, s.tel, OpSet, func(ctx context.Context) (bool, error) {
+			return casDriver.SetXX(ctx, resolvedKey, value, so.ttl)
+		})
 		if err != nil {
 			return err
 		}
@@ -216,7 +236,9 @@ func (s *Store) SetRaw(ctx context.Context, key string, value []byte, opts ...Se
 		return s.hooks.RunPostQuery(ctx, qc, nil)
 	}
 
-	if err := s.drv.Set(ctx, resolvedKey, value, so.ttl); err != nil {
+	if err := timedErr(ctx, s.tel, OpSet, func(ctx context.Context) error {
+		return s.drv.Set(ctx, resolvedKey, value, so.ttl)
+	}); err != nil {
 		return err
 	}
 
@@ -252,7 +274,9 @@ func (s *Store) deleteKeys(ctx context.Context, keys []string) (int64, error) {
 		return 0, err
 	}
 
-	n, err := s.drv.Delete(ctx, resolved...)
+	n, err := timed(ctx, s.tel, OpDelete, func(ctx context.Context) (int64, error) {
+		return s.drv.Delete(ctx, resolved...)
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -281,7 +305,9 @@ func (s *Store) Exists(ctx context.Context, keys ...string) (int64, error) {
 		return 0, err
 	}
 
-	count, err := s.drv.Exists(ctx, resolved...)
+	count, err := timed(ctx, s.tel, OpExists, func(ctx context.Context) (int64, error) {
+		return s.drv.Exists(ctx, resolved...)
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -318,7 +344,9 @@ func (s *Store) MGet(ctx context.Context, keys []string, dest map[string]any) er
 
 	// Results line up with resolved by position, and so with keys: dest
 	// is filled under the caller's keys, not the physical ones.
-	results, err := batchDrv.MGet(ctx, resolved)
+	results, err := timed(ctx, s.tel, OpMGet, func(ctx context.Context) ([][]byte, error) {
+		return batchDrv.MGet(ctx, resolved)
+	})
 	if err != nil {
 		return err
 	}
@@ -390,7 +418,9 @@ func (s *Store) msetRaw(
 		physical[resolved[i]] = pairs[k]
 	}
 
-	if err := batchDrv.MSet(ctx, physical, ttl); err != nil {
+	if err := timedErr(ctx, s.tel, OpMSet, func(ctx context.Context) error {
+		return batchDrv.MSet(ctx, physical, ttl)
+	}); err != nil {
 		return err
 	}
 
@@ -415,7 +445,9 @@ func (s *Store) TTL(ctx context.Context, key string) (time.Duration, error) {
 		return 0, ErrHookDenied
 	}
 
-	ttl, err := ttlDrv.TTL(ctx, resolveKey(qc))
+	ttl, err := timed(ctx, s.tel, OpTTL, func(ctx context.Context) (time.Duration, error) {
+		return ttlDrv.TTL(ctx, resolveKey(qc))
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -442,7 +474,9 @@ func (s *Store) Expire(ctx context.Context, key string, ttl time.Duration) error
 		return ErrHookDenied
 	}
 
-	if err := ttlDrv.Expire(ctx, resolveKey(qc), ttl); err != nil {
+	if err := timedErr(ctx, s.tel, OpExpire, func(ctx context.Context) error {
+		return ttlDrv.Expire(ctx, resolveKey(qc), ttl)
+	}); err != nil {
 		return err
 	}
 
@@ -483,7 +517,9 @@ func (s *Store) Scan(ctx context.Context, pattern string, fn func(key string) er
 		}
 	}
 
-	if err := scanDrv.Scan(ctx, resolved, yield); err != nil {
+	if err := timedErr(ctx, s.tel, OpScan, func(ctx context.Context) error {
+		return scanDrv.Scan(ctx, resolved, yield)
+	}); err != nil {
 		return err
 	}
 

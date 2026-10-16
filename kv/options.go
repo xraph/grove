@@ -3,6 +3,8 @@ package kv
 import (
 	"time"
 
+	gometrics "github.com/xraph/go-utils/metrics"
+
 	"github.com/xraph/grove/hook"
 	"github.com/xraph/grove/kv/codec"
 )
@@ -16,8 +18,9 @@ type hookEntry struct {
 }
 
 type options struct {
-	codec codec.Codec
-	hooks []hookEntry
+	codec   codec.Codec
+	hooks   []hookEntry
+	metrics gometrics.Metrics
 }
 
 func defaultOptions() *options {
