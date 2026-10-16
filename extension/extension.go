@@ -249,7 +249,7 @@ func (e *Extension) registerMultiDB(fapp forge.App) error {
 			return fmt.Errorf("grove: database %q: %w", entry.name, err)
 		}
 
-		db, err := grove.Open(drv)
+		db, err := grove.Open(drv, e.openOptions()...)
 		if err != nil {
 			return fmt.Errorf("grove: open database %q: %w", entry.name, err)
 		}
@@ -685,7 +685,7 @@ func (e *Extension) resolveDriver() error {
 
 // initDB creates the grove.DB and registers hooks (single-DB mode).
 func (e *Extension) initDB() error {
-	db, err := grove.Open(e.driver)
+	db, err := grove.Open(e.driver, e.openOptions()...)
 	if err != nil {
 		return fmt.Errorf("grove: open: %w", err)
 	}
@@ -1302,4 +1302,15 @@ func splitAndTrim(s, sep string) []string {
 		}
 	}
 	return result
+}
+
+// openOptions are the grove.Open options every database the extension opens
+// gets: the app's metrics, so each driver records
+// db_client_operation_duration_seconds on /_/metrics. Spans need nothing
+// here; drivers start them on the tracer provider forge.New installed.
+func (e *Extension) openOptions() []grove.Option {
+	if m := e.Metrics(); m != nil {
+		return []grove.Option{grove.WithMetrics(m)}
+	}
+	return nil
 }
