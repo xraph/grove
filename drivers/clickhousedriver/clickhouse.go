@@ -5,8 +5,12 @@ import (
 	"database/sql"
 	"fmt"
 
+	gometrics "github.com/xraph/go-utils/metrics"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/observability"
 	"github.com/xraph/grove/schema"
 )
 
@@ -28,6 +32,7 @@ type ClickHouseDB struct {
 	txConn   driver.Tx        // non-nil when operating inside a transaction
 	hooks    *hook.Engine     // optional hook engine for lifecycle hooks
 	registry *schema.Registry // cached table metadata to avoid repeated reflection
+	tel      *observability.Telemetry
 }
 
 var _ driver.Driver = (*ClickHouseDB)(nil)
@@ -38,6 +43,7 @@ func New() *ClickHouseDB {
 	return &ClickHouseDB{
 		dialect:  &ClickHouseDialect{},
 		registry: schema.NewRegistry(),
+		tel:      newTelemetry(),
 	}
 }
 
@@ -67,6 +73,7 @@ func (db *ClickHouseDB) Open(ctx context.Context, dsn string, opts ...driver.Opt
 	}
 
 	db.db = sqlDB
+	db.tel.SetConnection(observability.ConnectionFromURL(dsn))
 	return nil
 }
 
@@ -98,7 +105,9 @@ func (db *ClickHouseDB) Exec(ctx context.Context, query string, args ...any) (dr
 	if db.txConn != nil {
 		return db.txConn.Exec(ctx, query, args...)
 	}
+	ctx, op := db.tel.StartSQL(ctx, query)
 	res, err := db.db.ExecContext(ctx, query, args...)
+	op.End(err)
 	if err != nil {
 		return nil, fmt.Errorf("clickhousedriver: exec: %w", err)
 	}
@@ -111,11 +120,13 @@ func (db *ClickHouseDB) Query(ctx context.Context, query string, args ...any) (d
 	if db.txConn != nil {
 		return db.txConn.Query(ctx, query, args...)
 	}
+	ctx, op := db.tel.StartSQL(ctx, query)
 	rows, err := db.db.QueryContext(ctx, query, args...)
 	if err != nil {
+		op.End(err)
 		return nil, fmt.Errorf("clickhousedriver: query: %w", err)
 	}
-	return &chRows{rows: rows}, nil
+	return &chRows{rows: rows, op: op}, nil
 }
 
 // QueryRow executes a query expected to return at most one row.
@@ -123,8 +134,9 @@ func (db *ClickHouseDB) QueryRow(ctx context.Context, query string, args ...any)
 	if db.txConn != nil {
 		return db.txConn.QueryRow(ctx, query, args...)
 	}
+	ctx, op := db.tel.StartSQL(ctx, query)
 	row := db.db.QueryRowContext(ctx, query, args...)
-	return &chRow{row: row}
+	return &chRow{row: row, op: op}
 }
 
 // BeginTx starts a new database transaction with the specified options.
@@ -137,11 +149,16 @@ func (db *ClickHouseDB) BeginTx(ctx context.Context, opts *driver.TxOptions) (dr
 		sqlOpts.ReadOnly = opts.ReadOnly
 	}
 
+	// COMMIT and ROLLBACK get no context, so the transaction keeps the
+	// caller's span to start theirs under.
+	parent := trace.SpanFromContext(ctx)
+	ctx, op := db.tel.Start(ctx, "BEGIN", "")
 	tx, err := db.db.BeginTx(ctx, sqlOpts)
+	op.End(err)
 	if err != nil {
 		return nil, fmt.Errorf("clickhousedriver: begin tx: %w", err)
 	}
-	return &chTx{tx: tx}, nil
+	return &chTx{tx: tx, tel: db.tel, parent: parent}, nil
 }
 
 // GroveTx is the adapter method for grove.DB.BeginTx(). It bridges the
@@ -179,7 +196,7 @@ func (db *ClickHouseDB) Prepare(ctx context.Context, query string) (driver.Stmt,
 	if err != nil {
 		return nil, fmt.Errorf("clickhousedriver: prepare: %w", err)
 	}
-	return &chStmt{stmt: stmt}, nil
+	return &chStmt{stmt: stmt, query: query, tel: db.tel}, nil
 }
 
 // mapIsolationLevel converts a driver.IsolationLevel to the corresponding
@@ -198,4 +215,17 @@ func mapIsolationLevel(level driver.IsolationLevel) sql.IsolationLevel {
 		// LevelDefault: return default isolation level.
 		return sql.LevelDefault
 	}
+}
+
+// SetMetrics records the db.client.operation.duration histogram on m.
+// grove.Open calls it when you pass grove.WithMetrics.
+func (db *ClickHouseDB) SetMetrics(m gometrics.Metrics) {
+	db.tel.SetMetrics(m)
+}
+
+// newTelemetry builds the db.client telemetry for one ClickHouseDB. The
+// driver doesn't import clickhouse-go (you do), so a server exception reports
+// its Go type as error.type and no status code.
+func newTelemetry() *observability.Telemetry {
+	return observability.NewTelemetry("clickhouse")
 }

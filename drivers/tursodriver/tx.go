@@ -76,5 +76,6 @@ func (t *TursoTx) txDB() *TursoDB {
 		opts:     t.db.opts,
 		txConn:   t.tx,
 		registry: t.db.registry,
+		tel:      t.db.tel,
 	}
 }

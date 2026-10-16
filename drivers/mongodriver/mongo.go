@@ -27,6 +27,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/observability"
 )
 
 // MongoDB implements grove.GroveDriver for MongoDB using the official
@@ -37,12 +38,13 @@ type MongoDB struct {
 	database *mongo.Database
 	dbName   string
 	hooks    *hook.Engine
+	tel      *observability.Telemetry
 }
 
 // New creates a new unconnected MongoDB driver. Call Open to establish
 // a connection to the MongoDB server.
 func New() *MongoDB {
-	return &MongoDB{}
+	return &MongoDB{tel: newTelemetry()}
 }
 
 // Name returns the driver identifier.
@@ -80,6 +82,10 @@ func (db *MongoDB) Open(ctx context.Context, uri string, opts ...MongoOption) er
 		clientOpts.SetMaxConnecting(mopts.MaxConnecting)
 	}
 
+	// Every command the client sends is traced and timed through grove's
+	// telemetry, builders and direct Client() use alike.
+	clientOpts.SetMonitor(newCommandMonitor(db.tel).monitor())
+
 	client, err := mongo.Connect(clientOpts)
 	if err != nil {
 		return fmt.Errorf("mongodriver: connect: %w", err)
@@ -96,6 +102,8 @@ func (db *MongoDB) Open(ctx context.Context, uri string, opts ...MongoOption) er
 
 	db.client = client
 	db.dbName = dbName
+	address, port := serverOf(clientOpts.Hosts)
+	db.tel.SetConnection(dbName, address, port)
 	db.database = client.Database(dbName)
 
 	if mopts.SkipPing {

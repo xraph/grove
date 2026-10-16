@@ -91,5 +91,6 @@ func (t *ClickHouseTx) txDB() *ClickHouseDB {
 		opts:     t.db.opts,
 		txConn:   t.tx,
 		registry: t.db.registry,
+		tel:      t.db.tel,
 	}
 }

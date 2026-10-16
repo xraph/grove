@@ -30,6 +30,7 @@ import (
 	"github.com/elastic/go-elasticsearch/v8/esapi"
 
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/observability"
 )
 
 // elasticProductHeader is the response header the go-elasticsearch v8 client's
@@ -63,12 +64,13 @@ type ElasticDB struct {
 	defaultIndex string
 	refresh      string // "true", "false", "wait_for"
 	hooks        *hook.Engine
+	tel          *observability.Telemetry
 }
 
 // New creates a new unconnected Elasticsearch driver. Call Open to
 // establish a connection to the Elasticsearch cluster.
 func New() *ElasticDB {
-	return &ElasticDB{}
+	return &ElasticDB{tel: newTelemetry()}
 }
 
 // Name returns the driver identifier.
@@ -91,7 +93,11 @@ func (db *ElasticDB) Open(ctx context.Context, addresses string, opts ...EsOptio
 
 	cfg := elasticsearch.Config{
 		Addresses: addrs,
+		// Every API call is traced and timed through grove's telemetry.
+		Instrumentation: instrumentation{tel: db.tel},
 	}
+	address, port := serverOf(addrs)
+	db.tel.SetConnection("", address, port)
 
 	if o.Username != "" {
 		cfg.Username = o.Username

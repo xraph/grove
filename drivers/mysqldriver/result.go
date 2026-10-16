@@ -5,7 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/xraph/grove/driver"
+	"github.com/xraph/grove/observability"
 )
 
 // mysqlResult wraps sql.Result to implement driver.Result.
@@ -29,6 +32,7 @@ func (r *mysqlResult) LastInsertId() (int64, error) {
 // mysqlRows wraps *sql.Rows to implement driver.Rows.
 type mysqlRows struct {
 	rows *sql.Rows
+	op   *observability.Op // ends when the rows are drained or closed
 }
 
 var _ driver.Rows = (*mysqlRows)(nil)
@@ -36,7 +40,11 @@ var _ driver.Rows = (*mysqlRows)(nil)
 // Next advances the cursor to the next row. It returns false when there are
 // no more rows or an error occurred.
 func (r *mysqlRows) Next() bool {
-	return r.rows.Next()
+	if r.rows.Next() {
+		return true
+	}
+	r.op.End(r.rows.Err())
+	return false
 }
 
 // Scan copies the current row's column values into dest.
@@ -51,7 +59,13 @@ func (r *mysqlRows) Columns() ([]string, error) {
 
 // Close releases all resources held by the rows iterator.
 func (r *mysqlRows) Close() error {
-	return r.rows.Close()
+	err := r.rows.Close()
+	if err != nil {
+		r.op.End(err)
+	} else {
+		r.op.End(r.rows.Err())
+	}
+	return err
 }
 
 // Err returns any error encountered during iteration.
@@ -62,6 +76,7 @@ func (r *mysqlRows) Err() error {
 // mysqlRow wraps *sql.Row to implement driver.Row.
 type mysqlRow struct {
 	row *sql.Row
+	op  *observability.Op // ends at Scan, where the row's error surfaces
 }
 
 var _ driver.Row = (*mysqlRow)(nil)
@@ -69,12 +84,24 @@ var _ driver.Row = (*mysqlRow)(nil)
 // Scan copies the single row's columns into dest. If the query returned no
 // rows, it returns sql.ErrNoRows.
 func (r *mysqlRow) Scan(dest ...any) error {
-	return r.row.Scan(dest...)
+	err := r.row.Scan(dest...)
+	r.op.End(err)
+	return err
 }
 
 // mysqlTx wraps *sql.Tx to implement driver.Tx.
 type mysqlTx struct {
-	tx *sql.Tx
+	tx  *sql.Tx
+	tel *observability.Telemetry
+
+	// parent is the span that was current when the transaction began.
+	// Commit and Rollback take no context, so their spans start under it.
+	parent trace.Span
+
+	// done is set once Commit or Rollback has run. A later Rollback (every
+	// deferred one after a commit) returns sql.ErrTxDone without reaching
+	// the database, so it isn't recorded as an operation.
+	done bool
 }
 
 var _ driver.Tx = (*mysqlTx)(nil)
@@ -82,7 +109,9 @@ var _ driver.Preparer = (*mysqlTx)(nil)
 
 // Exec executes a query within the transaction that does not return rows.
 func (t *mysqlTx) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
+	ctx, op := t.tel.StartSQL(ctx, query)
 	res, err := t.tx.ExecContext(ctx, query, args...)
+	op.End(err)
 	if err != nil {
 		return nil, fmt.Errorf("mysqldriver: tx exec: %w", err)
 	}
@@ -91,30 +120,56 @@ func (t *mysqlTx) Exec(ctx context.Context, query string, args ...any) (driver.R
 
 // Query executes a query within the transaction that returns rows.
 func (t *mysqlTx) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	ctx, op := t.tel.StartSQL(ctx, query)
 	rows, err := t.tx.QueryContext(ctx, query, args...)
 	if err != nil {
+		op.End(err)
 		return nil, fmt.Errorf("mysqldriver: tx query: %w", err)
 	}
-	return &mysqlRows{rows: rows}, nil
+	return &mysqlRows{rows: rows, op: op}, nil
 }
 
 // QueryRow executes a query within the transaction expected to return at most
 // one row.
 func (t *mysqlTx) QueryRow(ctx context.Context, query string, args ...any) driver.Row {
+	ctx, op := t.tel.StartSQL(ctx, query)
 	row := t.tx.QueryRowContext(ctx, query, args...)
-	return &mysqlRow{row: row}
+	return &mysqlRow{row: row, op: op}
 }
 
 // Commit commits the transaction.
 func (t *mysqlTx) Commit() error {
-	return t.tx.Commit()
+	if t.done {
+		return t.tx.Commit()
+	}
+	t.done = true
+	_, op := t.tel.Start(t.parentContext(), "COMMIT", "")
+	err := t.tx.Commit()
+	op.End(err)
+	return err
 }
 
 // Rollback rolls back the transaction. It is safe to call after Commit; the
 // underlying sql driver will return sql.ErrTxDone if the transaction is
 // already closed.
 func (t *mysqlTx) Rollback() error {
-	return t.tx.Rollback()
+	if t.done {
+		return t.tx.Rollback()
+	}
+	t.done = true
+	_, op := t.tel.Start(t.parentContext(), "ROLLBACK", "")
+	err := t.tx.Rollback()
+	op.End(err)
+	return err
+}
+
+// parentContext is a fresh context carrying the span that was current when
+// the transaction began.
+func (t *mysqlTx) parentContext() context.Context {
+	if t.parent == nil {
+		return context.Background()
+	}
+	return trace.ContextWithSpan(context.Background(), t.parent)
 }
 
 // Prepare creates a prepared statement within the transaction.
@@ -123,5 +178,5 @@ func (t *mysqlTx) Prepare(ctx context.Context, query string) (driver.Stmt, error
 	if err != nil {
 		return nil, fmt.Errorf("mysqldriver: tx prepare: %w", err)
 	}
-	return &mysqlStmt{stmt: stmt}, nil
+	return &mysqlStmt{stmt: stmt, query: query, tel: t.tel}, nil
 }

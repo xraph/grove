@@ -140,7 +140,10 @@ func (l *Listener) exec(ctx context.Context, sql string) error {
 // It uses a connection from the pool (not the dedicated listener connection)
 // so that notifications can be sent independently of the listener.
 func (l *Listener) Notify(ctx context.Context, channel, payload string) error {
-	_, err := l.db.pool.Exec(ctx, "SELECT pg_notify($1, $2)", channel, payload)
+	const notifySQL = "SELECT pg_notify($1, $2)"
+	ctx, op := l.db.tel.StartSQL(ctx, notifySQL)
+	_, err := l.db.pool.Exec(ctx, notifySQL, channel, payload)
+	op.End(err)
 	if err != nil {
 		return fmt.Errorf("pgdriver: notify %q: %w", channel, err)
 	}

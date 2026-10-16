@@ -76,5 +76,6 @@ func (t *MysqlTx) txDB() *MysqlDB {
 		opts:     t.db.opts,
 		txConn:   t.tx,
 		registry: t.db.registry,
+		tel:      t.db.tel,
 	}
 }

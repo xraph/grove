@@ -3,12 +3,18 @@ package mysqldriver
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"net"
+	"strconv"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
+	gometrics "github.com/xraph/go-utils/metrics"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/observability"
 	"github.com/xraph/grove/schema"
 )
 
@@ -25,6 +31,7 @@ type MysqlDB struct {
 	txConn   driver.Tx        // non-nil when operating inside a transaction
 	hooks    *hook.Engine     // optional hook engine for lifecycle hooks
 	registry *schema.Registry // cached table metadata to avoid repeated reflection
+	tel      *observability.Telemetry
 }
 
 var _ driver.Driver = (*MysqlDB)(nil)
@@ -36,6 +43,7 @@ func New() *MysqlDB {
 	return &MysqlDB{
 		dialect:  &MysqlDialect{},
 		registry: schema.NewRegistry(),
+		tel:      newTelemetry(),
 	}
 }
 
@@ -74,6 +82,7 @@ func (db *MysqlDB) Open(ctx context.Context, dsn string, opts ...driver.Option) 
 	}
 
 	db.db = sqlDB
+	db.tel.SetConnection(connectionOf(dsn))
 	return db.db.PingContext(ctx)
 }
 
@@ -105,7 +114,9 @@ func (db *MysqlDB) Exec(ctx context.Context, query string, args ...any) (driver.
 	if db.txConn != nil {
 		return db.txConn.Exec(ctx, query, args...)
 	}
+	ctx, op := db.tel.StartSQL(ctx, query)
 	res, err := db.db.ExecContext(ctx, query, args...)
+	op.End(err)
 	if err != nil {
 		return nil, fmt.Errorf("mysqldriver: exec: %w", err)
 	}
@@ -118,11 +129,13 @@ func (db *MysqlDB) Query(ctx context.Context, query string, args ...any) (driver
 	if db.txConn != nil {
 		return db.txConn.Query(ctx, query, args...)
 	}
+	ctx, op := db.tel.StartSQL(ctx, query)
 	rows, err := db.db.QueryContext(ctx, query, args...)
 	if err != nil {
+		op.End(err)
 		return nil, fmt.Errorf("mysqldriver: query: %w", err)
 	}
-	return &mysqlRows{rows: rows}, nil
+	return &mysqlRows{rows: rows, op: op}, nil
 }
 
 // QueryRow executes a query expected to return at most one row.
@@ -130,8 +143,9 @@ func (db *MysqlDB) QueryRow(ctx context.Context, query string, args ...any) driv
 	if db.txConn != nil {
 		return db.txConn.QueryRow(ctx, query, args...)
 	}
+	ctx, op := db.tel.StartSQL(ctx, query)
 	row := db.db.QueryRowContext(ctx, query, args...)
-	return &mysqlRow{row: row}
+	return &mysqlRow{row: row, op: op}
 }
 
 // BeginTx starts a new database transaction with the specified options.
@@ -143,11 +157,16 @@ func (db *MysqlDB) BeginTx(ctx context.Context, opts *driver.TxOptions) (driver.
 		sqlOpts.ReadOnly = opts.ReadOnly
 	}
 
+	// COMMIT and ROLLBACK get no context, so the transaction keeps the
+	// caller's span to start theirs under.
+	parent := trace.SpanFromContext(ctx)
+	ctx, op := db.tel.Start(ctx, "BEGIN", "")
 	tx, err := db.db.BeginTx(ctx, sqlOpts)
+	op.End(err)
 	if err != nil {
 		return nil, fmt.Errorf("mysqldriver: begin tx: %w", err)
 	}
-	return &mysqlTx{tx: tx}, nil
+	return &mysqlTx{tx: tx, tel: db.tel, parent: parent}, nil
 }
 
 // GroveTx is the adapter method for grove.DB.BeginTx(). It bridges the
@@ -185,7 +204,7 @@ func (db *MysqlDB) Prepare(ctx context.Context, query string) (driver.Stmt, erro
 	if err != nil {
 		return nil, fmt.Errorf("mysqldriver: prepare: %w", err)
 	}
-	return &mysqlStmt{stmt: stmt}, nil
+	return &mysqlStmt{stmt: stmt, query: query, tel: db.tel}, nil
 }
 
 // AcquireConn acquires a dedicated connection from the pool.
@@ -197,19 +216,22 @@ func (db *MysqlDB) AcquireConn(ctx context.Context) (driver.DedicatedConn, error
 	if err != nil {
 		return nil, fmt.Errorf("mysqldriver: acquire dedicated conn: %w", err)
 	}
-	return &mysqlDedicatedConn{conn: conn}, nil
+	return &mysqlDedicatedConn{conn: conn, tel: db.tel}, nil
 }
 
 // mysqlDedicatedConn wraps a single *sql.Conn to implement driver.DedicatedConn.
 // All queries execute on the same underlying connection.
 type mysqlDedicatedConn struct {
 	conn *sql.Conn
+	tel  *observability.Telemetry
 }
 
 var _ driver.DedicatedConn = (*mysqlDedicatedConn)(nil)
 
 func (c *mysqlDedicatedConn) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
+	ctx, op := c.tel.StartSQL(ctx, query)
 	res, err := c.conn.ExecContext(ctx, query, args...)
+	op.End(err)
 	if err != nil {
 		return nil, fmt.Errorf("mysqldriver: dedicated exec: %w", err)
 	}
@@ -217,16 +239,19 @@ func (c *mysqlDedicatedConn) Exec(ctx context.Context, query string, args ...any
 }
 
 func (c *mysqlDedicatedConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	ctx, op := c.tel.StartSQL(ctx, query)
 	rows, err := c.conn.QueryContext(ctx, query, args...) //nolint:rowserrcheck // caller checks Err() via driver.Rows
 	if err != nil {
+		op.End(err)
 		return nil, fmt.Errorf("mysqldriver: dedicated query: %w", err)
 	}
-	return &mysqlRows{rows: rows}, nil
+	return &mysqlRows{rows: rows, op: op}, nil
 }
 
 func (c *mysqlDedicatedConn) QueryRow(ctx context.Context, query string, args ...any) driver.Row {
+	ctx, op := c.tel.StartSQL(ctx, query)
 	row := c.conn.QueryRowContext(ctx, query, args...)
-	return &mysqlRow{row: row}
+	return &mysqlRow{row: row, op: op}
 }
 
 func (c *mysqlDedicatedConn) Release() {
@@ -252,4 +277,44 @@ func mapIsolationLevel(level driver.IsolationLevel) sql.IsolationLevel {
 		// LevelDefault: return default so database uses its default.
 		return sql.LevelDefault
 	}
+}
+
+// SetMetrics records the db.client.operation.duration histogram on m.
+// grove.Open calls it when you pass grove.WithMetrics.
+func (db *MysqlDB) SetMetrics(m gometrics.Metrics) {
+	db.tel.SetMetrics(m)
+}
+
+// newTelemetry builds the db.client telemetry for one MysqlDB. A MySQL
+// server error reports its error number (1062 for a duplicate key) as
+// db.response.status_code and error.type.
+func newTelemetry() *observability.Telemetry {
+	return observability.NewTelemetry("mysql", observability.WithStatusCode(errorNumber))
+}
+
+func errorNumber(err error) string {
+	var myErr *mysql.MySQLError
+	if errors.As(err, &myErr) {
+		return strconv.Itoa(int(myErr.Number))
+	}
+	return ""
+}
+
+// connectionOf reads the database name and the TCP address out of a DSN for
+// the span attributes. A DSN it can't parse, or a unix socket, reports only
+// what it can.
+func connectionOf(dsn string) (namespace, address string, port int) {
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return "", "", 0
+	}
+	if cfg.Net != "tcp" {
+		return cfg.DBName, "", 0
+	}
+	host, portStr, err := net.SplitHostPort(cfg.Addr)
+	if err != nil {
+		return cfg.DBName, cfg.Addr, 0
+	}
+	port, _ = strconv.Atoi(portStr) //nolint:errcheck // a bad port is reported as none
+	return cfg.DBName, host, port
 }
