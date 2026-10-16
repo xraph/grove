@@ -2,15 +2,20 @@ package pgdriver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	gometrics "github.com/xraph/go-utils/metrics"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/observability"
 	"github.com/xraph/grove/schema"
 )
 
@@ -27,6 +32,7 @@ type PgDB struct {
 	txConn   driver.Tx        // non-nil when operating inside a transaction
 	hooks    *hook.Engine     // optional hook engine for lifecycle hooks
 	registry *schema.Registry // cached table metadata to avoid repeated reflection
+	tel      *observability.Telemetry
 }
 
 var _ driver.Driver = (*PgDB)(nil)
@@ -39,7 +45,28 @@ func New() *PgDB {
 	return &PgDB{
 		dialect:  &PgDialect{},
 		registry: schema.NewRegistry(),
+		tel:      newTelemetry(),
 	}
+}
+
+// newTelemetry builds the db.client telemetry for one PgDB. A Postgres error
+// reports its SQLSTATE as db.response.status_code and error.type.
+func newTelemetry() *observability.Telemetry {
+	return observability.NewTelemetry("postgresql", observability.WithStatusCode(sqlState))
+}
+
+func sqlState(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	return ""
+}
+
+// SetMetrics records the db.client.operation.duration histogram on m.
+// grove.Open calls it when you pass grove.WithMetrics.
+func (db *PgDB) SetMetrics(m gometrics.Metrics) {
+	db.tel.SetMetrics(m)
 }
 
 // Name returns the driver identifier.
@@ -113,6 +140,8 @@ func (db *PgDB) Open(ctx context.Context, dsn string, opts ...driver.Option) err
 	}
 
 	db.pool = pool
+	cc := poolCfg.ConnConfig
+	db.tel.SetConnection(cc.Database, cc.Host, int(cc.Port))
 	return nil
 }
 
@@ -144,7 +173,9 @@ func (db *PgDB) Exec(ctx context.Context, query string, args ...any) (driver.Res
 	if db.txConn != nil {
 		return db.txConn.Exec(ctx, query, args...)
 	}
+	ctx, op := db.tel.StartSQL(ctx, query)
 	ct, err := db.pool.Exec(ctx, query, args...)
+	op.End(err)
 	if err != nil {
 		return nil, fmt.Errorf("pgdriver: exec: %w", err)
 	}
@@ -157,11 +188,13 @@ func (db *PgDB) Query(ctx context.Context, query string, args ...any) (driver.Ro
 	if db.txConn != nil {
 		return db.txConn.Query(ctx, query, args...)
 	}
+	ctx, op := db.tel.StartSQL(ctx, query)
 	rows, err := db.pool.Query(ctx, query, args...)
 	if err != nil {
+		op.End(err)
 		return nil, fmt.Errorf("pgdriver: query: %w", err)
 	}
-	return &pgRows{rows: rows}, nil
+	return &pgRows{rows: rows, op: op}, nil
 }
 
 // QueryRow executes a query expected to return at most one row.
@@ -169,8 +202,9 @@ func (db *PgDB) QueryRow(ctx context.Context, query string, args ...any) driver.
 	if db.txConn != nil {
 		return db.txConn.QueryRow(ctx, query, args...)
 	}
+	ctx, op := db.tel.StartSQL(ctx, query)
 	row := db.pool.QueryRow(ctx, query, args...)
-	return &pgRow{row: row}
+	return &pgRow{row: row, op: op}
 }
 
 // BeginTx starts a new database transaction with the specified options.
@@ -184,11 +218,16 @@ func (db *PgDB) BeginTx(ctx context.Context, opts *driver.TxOptions) (driver.Tx,
 		}
 	}
 
+	// COMMIT and ROLLBACK get no context, so the transaction keeps the
+	// caller's span to start theirs under.
+	parent := trace.SpanFromContext(ctx)
+	ctx, op := db.tel.Start(ctx, "BEGIN", "")
 	tx, err := db.pool.BeginTx(ctx, pgxOpts)
+	op.End(err)
 	if err != nil {
 		return nil, fmt.Errorf("pgdriver: begin tx: %w", err)
 	}
-	return &pgTx{tx: tx}, nil
+	return &pgTx{tx: tx, tel: db.tel, parent: parent}, nil
 }
 
 // GroveTx is the adapter method for grove.DB.BeginTx(). It bridges the
@@ -234,7 +273,7 @@ func (db *PgDB) Prepare(ctx context.Context, query string) (driver.Stmt, error) 
 		conn.Release()
 		return nil, fmt.Errorf("pgdriver: prepare: %w", err)
 	}
-	return &pgPoolStmt{conn: conn, sd: sd}, nil
+	return &pgPoolStmt{conn: conn, sd: sd, query: query, tel: db.tel}, nil
 }
 
 // AcquireConn acquires a dedicated connection from the pool.
@@ -246,19 +285,22 @@ func (db *PgDB) AcquireConn(ctx context.Context) (driver.DedicatedConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pgdriver: acquire dedicated conn: %w", err)
 	}
-	return &pgDedicatedConn{conn: conn}, nil
+	return &pgDedicatedConn{conn: conn, tel: db.tel}, nil
 }
 
 // pgDedicatedConn wraps a single pgxpool.Conn to implement driver.DedicatedConn.
 // All queries execute on the same underlying connection.
 type pgDedicatedConn struct {
 	conn *pgxpool.Conn
+	tel  *observability.Telemetry
 }
 
 var _ driver.DedicatedConn = (*pgDedicatedConn)(nil)
 
 func (c *pgDedicatedConn) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
+	ctx, op := c.tel.StartSQL(ctx, query)
 	ct, err := c.conn.Exec(ctx, query, args...)
+	op.End(err)
 	if err != nil {
 		return nil, fmt.Errorf("pgdriver: dedicated exec: %w", err)
 	}
@@ -266,16 +308,19 @@ func (c *pgDedicatedConn) Exec(ctx context.Context, query string, args ...any) (
 }
 
 func (c *pgDedicatedConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	ctx, op := c.tel.StartSQL(ctx, query)
 	rows, err := c.conn.Query(ctx, query, args...)
 	if err != nil {
+		op.End(err)
 		return nil, fmt.Errorf("pgdriver: dedicated query: %w", err)
 	}
-	return &pgRows{rows: rows}, nil
+	return &pgRows{rows: rows, op: op}, nil
 }
 
 func (c *pgDedicatedConn) QueryRow(ctx context.Context, query string, args ...any) driver.Row {
+	ctx, op := c.tel.StartSQL(ctx, query)
 	row := c.conn.QueryRow(ctx, query, args...)
-	return &pgRow{row: row}
+	return &pgRow{row: row, op: op}
 }
 
 func (c *pgDedicatedConn) Release() {

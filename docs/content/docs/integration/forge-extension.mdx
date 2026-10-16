@@ -197,6 +197,10 @@ err = pgdriver.Unwrap(db).NewSelect(&users).
 
 You can also keep the `*extension.Extension` and call `ext.DB()` once it has registered.
 
+## Tracing and Metrics
+
+The extension passes `app.Metrics()` to every database and KV store it opens. Every query then records `db_client_operation_duration_seconds` on `/_/metrics`, and runs as a client span (`SELECT users`, `COMMIT`) under the request or job that issued it. You don't add anything. [Tracing and metrics](/docs/integration/observability) lists the span attributes and metric labels, and says what each driver reports when a call fails.
+
 ## Multi-Database Support
 
 ### YAML Configuration

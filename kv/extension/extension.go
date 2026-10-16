@@ -132,8 +132,8 @@ func (e *Extension) registerMultiStore(fapp forge.App) error {
 		}
 
 		// Collect options: global + per-store.
-		opts := make([]kv.Option, len(e.storeOpts))
-		copy(opts, e.storeOpts)
+		opts := e.metricsOptions()
+		opts = append(opts, e.storeOpts...)
 		if perStoreOpts, ok := e.storeOptions[entry.name]; ok {
 			opts = append(opts, perStoreOpts...)
 		}
@@ -435,7 +435,7 @@ func (e *Extension) resolveDriver() error {
 
 // initStore creates the kv.Store and registers hooks (single-store mode).
 func (e *Extension) initStore() error {
-	s, err := kv.Open(e.driver, e.storeOpts...)
+	s, err := kv.Open(e.driver, append(e.metricsOptions(), e.storeOpts...)...)
 	if err != nil {
 		return fmt.Errorf("kv: open: %w", err)
 	}
@@ -445,5 +445,15 @@ func (e *Extension) initStore() error {
 		s.Hooks().AddHook(h.hook, h.scope)
 	}
 
+	return nil
+}
+
+// metricsOptions hands every store the app's metrics, so each command records
+// db_client_operation_duration_seconds on /_/metrics. They go first, so a
+// kv.WithMetrics you pass yourself still wins.
+func (e *Extension) metricsOptions() []kv.Option {
+	if m := e.Metrics(); m != nil {
+		return []kv.Option{kv.WithMetrics(m)}
+	}
 	return nil
 }

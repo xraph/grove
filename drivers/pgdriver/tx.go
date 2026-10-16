@@ -79,5 +79,6 @@ func (t *PgTx) txDB() *PgDB {
 		txConn:   t.tx,
 		hooks:    t.db.hooks,
 		registry: t.db.registry,
+		tel:      t.db.tel,
 	}
 }

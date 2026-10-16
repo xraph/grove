@@ -7,8 +7,12 @@ import (
 	"net/url"
 	"strings"
 
+	gometrics "github.com/xraph/go-utils/metrics"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/observability"
 	"github.com/xraph/grove/schema"
 )
 
@@ -27,6 +31,7 @@ type TursoDB struct {
 	txConn   driver.Tx        // non-nil when operating inside a transaction
 	hooks    *hook.Engine     // optional hook engine for lifecycle hooks
 	registry *schema.Registry // cached table metadata to avoid repeated reflection
+	tel      *observability.Telemetry
 }
 
 var _ driver.Driver = (*TursoDB)(nil)
@@ -37,6 +42,7 @@ func New() *TursoDB {
 	return &TursoDB{
 		dialect:  &TursoDialect{},
 		registry: schema.NewRegistry(),
+		tel:      newTelemetry(),
 	}
 }
 
@@ -112,6 +118,7 @@ connected:
 	}
 
 	db.db = sqlDB
+	db.tel.SetConnection(observability.ConnectionFromURL(dsn))
 	return nil
 }
 
@@ -143,7 +150,9 @@ func (db *TursoDB) Exec(ctx context.Context, query string, args ...any) (driver.
 	if db.txConn != nil {
 		return db.txConn.Exec(ctx, query, args...)
 	}
+	ctx, op := db.tel.StartSQL(ctx, query)
 	res, err := db.db.ExecContext(ctx, query, args...)
+	op.End(err)
 	if err != nil {
 		return nil, fmt.Errorf("tursodriver: exec: %w", err)
 	}
@@ -156,11 +165,13 @@ func (db *TursoDB) Query(ctx context.Context, query string, args ...any) (driver
 	if db.txConn != nil {
 		return db.txConn.Query(ctx, query, args...)
 	}
+	ctx, op := db.tel.StartSQL(ctx, query)
 	rows, err := db.db.QueryContext(ctx, query, args...)
 	if err != nil {
+		op.End(err)
 		return nil, fmt.Errorf("tursodriver: query: %w", err)
 	}
-	return &tursoRows{rows: rows}, nil
+	return &tursoRows{rows: rows, op: op}, nil
 }
 
 // QueryRow executes a query expected to return at most one row.
@@ -168,8 +179,9 @@ func (db *TursoDB) QueryRow(ctx context.Context, query string, args ...any) driv
 	if db.txConn != nil {
 		return db.txConn.QueryRow(ctx, query, args...)
 	}
+	ctx, op := db.tel.StartSQL(ctx, query)
 	row := db.db.QueryRowContext(ctx, query, args...)
-	return &tursoRow{row: row}
+	return &tursoRow{row: row, op: op}
 }
 
 // BeginTx starts a new database transaction with the specified options.
@@ -181,11 +193,16 @@ func (db *TursoDB) BeginTx(ctx context.Context, opts *driver.TxOptions) (driver.
 		sqlOpts.ReadOnly = opts.ReadOnly
 	}
 
+	// COMMIT and ROLLBACK get no context, so the transaction keeps the
+	// caller's span to start theirs under.
+	parent := trace.SpanFromContext(ctx)
+	ctx, op := db.tel.Start(ctx, "BEGIN", "")
 	tx, err := db.db.BeginTx(ctx, sqlOpts)
+	op.End(err)
 	if err != nil {
 		return nil, fmt.Errorf("tursodriver: begin tx: %w", err)
 	}
-	return &tursoTx{tx: tx}, nil
+	return &tursoTx{tx: tx, tel: db.tel, parent: parent}, nil
 }
 
 // GroveTx is the adapter method for grove.DB.BeginTx(). It bridges the
@@ -223,7 +240,7 @@ func (db *TursoDB) Prepare(ctx context.Context, query string) (driver.Stmt, erro
 	if err != nil {
 		return nil, fmt.Errorf("tursodriver: prepare: %w", err)
 	}
-	return &tursoStmt{stmt: stmt}, nil
+	return &tursoStmt{stmt: stmt, query: query, tel: db.tel}, nil
 }
 
 // mapIsolationLevel converts a driver.IsolationLevel to the corresponding
@@ -243,4 +260,16 @@ func mapIsolationLevel(level driver.IsolationLevel) sql.IsolationLevel {
 		// LevelDefault: return default isolation level.
 		return sql.LevelDefault
 	}
+}
+
+// SetMetrics records the db.client.operation.duration histogram on m.
+// grove.Open calls it when you pass grove.WithMetrics.
+func (db *TursoDB) SetMetrics(m gometrics.Metrics) {
+	db.tel.SetMetrics(m)
+}
+
+// newTelemetry builds the db.client telemetry for one TursoDB. libSQL has no
+// entry in the OTel database conventions, so db.system.name is "turso".
+func newTelemetry() *observability.Telemetry {
+	return observability.NewTelemetry("turso")
 }

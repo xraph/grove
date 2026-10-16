@@ -4,6 +4,7 @@ import (
 	"time"
 
 	log "github.com/xraph/go-utils/log"
+	gometrics "github.com/xraph/go-utils/metrics"
 )
 
 // Option configures a DB instance.
@@ -13,6 +14,7 @@ type options struct {
 	poolSize     int
 	queryTimeout time.Duration
 	logger       log.Logger
+	metrics      gometrics.Metrics
 }
 
 func defaultOptions() *options {
@@ -52,5 +54,18 @@ func WithQueryTimeout(d time.Duration) Option {
 func WithLogger(l log.Logger) Option {
 	return func(o *options) {
 		o.logger = l
+	}
+}
+
+// WithMetrics records the OpenTelemetry db.client.operation.duration histogram
+// on m for every call the driver makes. In a Forge app pass app.Metrics(), and
+// the series lands on /_/metrics as db_client_operation_duration_seconds.
+// grove's Forge extension does this for you.
+//
+// Spans need no option: drivers start them on the global tracer provider,
+// which forge.New installs. A nil m records nothing.
+func WithMetrics(m gometrics.Metrics) Option {
+	return func(o *options) {
+		o.metrics = m
 	}
 }

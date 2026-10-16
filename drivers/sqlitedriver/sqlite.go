@@ -3,13 +3,18 @@ package sqlitedriver
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
-	_ "modernc.org/sqlite"
+	gometrics "github.com/xraph/go-utils/metrics"
+	"go.opentelemetry.io/otel/trace"
+	"modernc.org/sqlite"
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/observability"
 	"github.com/xraph/grove/schema"
 )
 
@@ -27,6 +32,7 @@ type SqliteDB struct {
 	txConn   driver.Tx        // non-nil when operating inside a transaction
 	hooks    *hook.Engine     // optional hook engine for lifecycle hooks
 	registry *schema.Registry // cached table metadata to avoid repeated reflection
+	tel      *observability.Telemetry
 }
 
 var _ driver.Driver = (*SqliteDB)(nil)
@@ -37,6 +43,7 @@ func New() *SqliteDB {
 	return &SqliteDB{
 		dialect:  &SqliteDialect{},
 		registry: schema.NewRegistry(),
+		tel:      newTelemetry(),
 	}
 }
 
@@ -108,7 +115,9 @@ func (db *SqliteDB) Exec(ctx context.Context, query string, args ...any) (driver
 	if db.txConn != nil {
 		return db.txConn.Exec(ctx, query, args...)
 	}
+	ctx, op := db.tel.StartSQL(ctx, query)
 	res, err := db.db.ExecContext(ctx, query, utcArgs(args)...)
+	op.End(err)
 	if err != nil {
 		return nil, fmt.Errorf("sqlitedriver: exec: %w", err)
 	}
@@ -121,11 +130,13 @@ func (db *SqliteDB) Query(ctx context.Context, query string, args ...any) (drive
 	if db.txConn != nil {
 		return db.txConn.Query(ctx, query, args...)
 	}
+	ctx, op := db.tel.StartSQL(ctx, query)
 	rows, err := db.db.QueryContext(ctx, query, utcArgs(args)...)
 	if err != nil {
+		op.End(err)
 		return nil, fmt.Errorf("sqlitedriver: query: %w", err)
 	}
-	return &sqliteRows{rows: rows}, nil
+	return &sqliteRows{rows: rows, op: op}, nil
 }
 
 // QueryRow executes a query expected to return at most one row.
@@ -133,8 +144,9 @@ func (db *SqliteDB) QueryRow(ctx context.Context, query string, args ...any) dri
 	if db.txConn != nil {
 		return db.txConn.QueryRow(ctx, query, args...)
 	}
+	ctx, op := db.tel.StartSQL(ctx, query)
 	row := db.db.QueryRowContext(ctx, query, utcArgs(args)...)
-	return &sqliteRow{row: row}
+	return &sqliteRow{row: row, op: op}
 }
 
 // BeginTx starts a new database transaction with the specified options.
@@ -146,11 +158,16 @@ func (db *SqliteDB) BeginTx(ctx context.Context, opts *driver.TxOptions) (driver
 		sqlOpts.ReadOnly = opts.ReadOnly
 	}
 
+	// COMMIT and ROLLBACK get no context, so the transaction keeps the
+	// caller's span to start theirs under.
+	parent := trace.SpanFromContext(ctx)
+	ctx, op := db.tel.Start(ctx, "BEGIN", "")
 	tx, err := db.db.BeginTx(ctx, sqlOpts)
+	op.End(err)
 	if err != nil {
 		return nil, fmt.Errorf("sqlitedriver: begin tx: %w", err)
 	}
-	return &sqliteTx{tx: tx}, nil
+	return &sqliteTx{tx: tx, tel: db.tel, parent: parent}, nil
 }
 
 // GroveTx is the adapter method for grove.DB.BeginTx(). It bridges the
@@ -188,7 +205,7 @@ func (db *SqliteDB) Prepare(ctx context.Context, query string) (driver.Stmt, err
 	if err != nil {
 		return nil, fmt.Errorf("sqlitedriver: prepare: %w", err)
 	}
-	return &sqliteStmt{stmt: stmt}, nil
+	return &sqliteStmt{stmt: stmt, query: query, tel: db.tel}, nil
 }
 
 // utcArgs returns args with every time.Time, non-nil *time.Time and valid
@@ -252,4 +269,25 @@ func mapIsolationLevel(level driver.IsolationLevel) sql.IsolationLevel {
 		// LevelDefault: return default isolation level.
 		return sql.LevelDefault
 	}
+}
+
+// SetMetrics records the db.client.operation.duration histogram on m.
+// grove.Open calls it when you pass grove.WithMetrics.
+func (db *SqliteDB) SetMetrics(m gometrics.Metrics) {
+	db.tel.SetMetrics(m)
+}
+
+// newTelemetry builds the db.client telemetry for one SqliteDB. A SQLite
+// error reports its extended result code (2067 for a unique constraint) as
+// db.response.status_code and error.type.
+func newTelemetry() *observability.Telemetry {
+	return observability.NewTelemetry("sqlite", observability.WithStatusCode(resultCode))
+}
+
+func resultCode(err error) string {
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		return strconv.Itoa(sqliteErr.Code())
+	}
+	return ""
 }

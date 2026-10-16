@@ -63,6 +63,8 @@ They call `t.Skip` under `-short` and `t.Skipf("container runtime unavailable: .
 
 The other driver tests (MySQL, MongoDB, ClickHouse, Elasticsearch, Turso) cover query builders and dialects with no live server. `sqlitedriver` opens real database files under `t.TempDir()`. The badger, bolt, dynamo and memcached KV drivers have no tests.
 
+The telemetry tests need no Docker either. `drivers/pgdriver/telemetry_test.go` runs pgx against a fake server, defined in the same file, that speaks the simple query protocol. mysqldriver, tursodriver and clickhousedriver use `telemetrytest.SQLDB`, mongodriver feeds its command monitor synthetic events, and esdriver talks to an `httptest` server. `extension/telemetry_test.go` scrapes a real `forge.New` app. When you add a call path to a driver (a new way to execute, a new transaction method), wrap it with the driver's `Telemetry` and add it to that driver's telemetry test, or the call goes untraced and untimed.
+
 ## Layout
 
 Root module:
@@ -75,7 +77,8 @@ Root module:
 - `migrate/`: Go-code migrations, groups with `DependsOn`, the migrator, the planner and the migration lock.
 - `stream/`: the generic `Stream[T]` iterator, its transforms and changefeeds.
 - `crdt/`: CRDT field types, the sync server and transports, presence and rooms.
-- `audit/`, `observability/`, `plugin/`: hooks for audit logs and query metrics, and the plugin registry.
+- `audit/`, `plugin/`: the audit-log hook and the plugin registry.
+- `observability/`: the OpenTelemetry spans and `db.client.operation.duration` histogram every driver records (`Telemetry`, `Op`), the SQL summariser that names them, and the older `Hook` over a `Collector`. `observability/telemetrytest/` has the span recorder, metrics sink and fake `*sql.DB` the driver tests use.
 - `grovetest/`: a mock driver and dialect, fixtures and query assertions.
 - `internal/`: `pool` (byte buffers), `safe` (identifier quoting) and `tagparser`.
 
@@ -129,7 +132,7 @@ Commit messages follow Conventional Commits, scoped where it helps: `fix(crdt): 
 
 ## Dependencies
 
-Grove is the base layer. Upstream, the root module requires only `github.com/xraph/go-utils` (`kv` and the conformance server require it too), and `extension` and `kv/extension` also require `github.com/xraph/forge` and `github.com/xraph/vessel`. Downstream, nearly every forgery repo pins grove and its drivers: chronicle, relay, keysmith, ledger, sentinel, shield, vault, warden, nexus, bastion, herald, dispatch, trove, weave, authsome and cortex, plus fabriq (`github.com/xraph/fabriq`). Forge's own `github.com/xraph/forge/models` sub-module requires grove too.
+Grove is the base layer. Upstream, the root module requires `github.com/xraph/go-utils` and the OpenTelemetry API and SDK (`go.opentelemetry.io/otel`, `otel/trace`, and `otel/sdk` for `telemetrytest`), never forge. `kv` and the conformance server require go-utils too, and `extension` and `kv/extension` also require `github.com/xraph/forge` and `github.com/xraph/vessel`. Downstream, nearly every forgery repo pins grove and its drivers: chronicle, relay, keysmith, ledger, sentinel, shield, vault, warden, nexus, bastion, herald, dispatch, trove, weave, authsome and cortex, plus fabriq (`github.com/xraph/fabriq`). Forge's own `github.com/xraph/forge/models` sub-module requires grove too.
 
 To bump an xraph dependency, run `go get` in each module that requires it, then tidy all of them:
 

@@ -38,7 +38,9 @@ func (s *Store) observe(
 		return err
 	}
 
-	if err := fn(resolved); err != nil {
+	// The span and the duration cover the driver call only, so a slow
+	// hook doesn't read as a slow database.
+	if err := timedErr(ctx, s.tel, op, func(context.Context) error { return fn(resolved) }); err != nil {
 		return err
 	}
 
