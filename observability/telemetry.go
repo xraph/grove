@@ -139,8 +139,8 @@ func (t *Telemetry) StartSQL(ctx context.Context, query string) (context.Context
 	if t.idle(ctx) {
 		return ctx, nil
 	}
-	s := SummarizeSQL(query)
-	return t.start(ctx, t.namespace, s.Operation, s.Collection, s.Summary)
+	s := summarizeCached(query)
+	return t.start(ctx, t.namespace, s.Operation, s.Collection, s.table, s.Summary)
 }
 
 // Start starts an operation the driver describes itself, for databases that
@@ -150,7 +150,7 @@ func (t *Telemetry) Start(ctx context.Context, operation, collection string) (co
 	if t.idle(ctx) {
 		return ctx, nil
 	}
-	return t.start(ctx, t.namespace, operation, collection, summaryOf(operation, collection))
+	return t.start(ctx, t.namespace, operation, collection, collection, summaryOf(operation, collection))
 }
 
 // StartIn is Start for a driver whose namespace changes per call, like a
@@ -159,7 +159,7 @@ func (t *Telemetry) StartIn(ctx context.Context, namespace, operation, collectio
 	if t.idle(ctx) {
 		return ctx, nil
 	}
-	return t.start(ctx, namespace, operation, collection, summaryOf(operation, collection))
+	return t.start(ctx, namespace, operation, collection, collection, summaryOf(operation, collection))
 }
 
 // idle reports whether a call on ctx has nothing to record: no parent span to
@@ -177,13 +177,14 @@ func summaryOf(operation, collection string) string {
 	return operation + " " + collection
 }
 
-func (t *Telemetry) start(ctx context.Context, namespace, operation, collection, summary string) (context.Context, *Op) {
+func (t *Telemetry) start(ctx context.Context, namespace, operation, collection, table, summary string) (context.Context, *Op) {
 	op := &Op{
 		t:          t,
 		start:      time.Now(),
 		namespace:  namespace,
 		operation:  operation,
 		collection: collection,
+		table:      table,
 	}
 
 	if !trace.SpanContextFromContext(ctx).IsValid() {
@@ -242,7 +243,8 @@ type Op struct {
 	start      time.Time
 	namespace  string
 	operation  string
-	collection string
+	collection string // as reported, for the span
+	table      string // the metric label: collection minus a SQL qualifier
 	ended      bool
 }
 
@@ -257,12 +259,14 @@ func (o *Op) Context(ctx context.Context) context.Context {
 
 // SetCollection names the collection after Start, for a client that reports
 // it late, like the Elasticsearch client reporting the index once the request
-// path is built. It renames the span and sets the metric label to match.
+// path is built. It renames the span and sets the metric label to match. The
+// name is taken as is, with no SQL qualifier to drop.
 func (o *Op) SetCollection(collection string) {
 	if o == nil || o.ended || collection == "" {
 		return
 	}
 	o.collection = collection
+	o.table = collection
 	if o.span == nil || !o.span.IsRecording() {
 		return
 	}
@@ -322,7 +326,7 @@ func (o *Op) End(err error) {
 			system:     t.system,
 			namespace:  o.namespace,
 			operation:  o.operation,
-			collection: o.collection,
+			collection: o.table,
 			status:     status,
 			errType:    errType,
 		})

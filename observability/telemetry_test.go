@@ -419,3 +419,86 @@ func TestSetCollection(t *testing.T) {
 		t.Errorf("metric collection = %q", got)
 	}
 }
+
+// collections returns the db.collection.name values recorded on m, with the
+// number of calls behind each.
+func collections(m *telemetrytest.Metrics) map[string]uint64 {
+	out := map[string]uint64{}
+	for _, s := range m.Series(observability.OperationDurationMetric) {
+		out[s.Labels["db.collection.name"]] += s.Count
+	}
+	return out
+}
+
+// Per-tenant schemas would add a label value per tenant. The metric drops the
+// qualifier, so a thousand tenants share one, while the span keeps the table
+// as written.
+func TestCollectionLabelDropsSchema(t *testing.T) {
+	rec := telemetrytest.Spans(t)
+	m := telemetrytest.NewMetrics()
+	tel := newTelemetry()
+	tel.SetMetrics(m)
+
+	ctx, parent := telemetrytest.Parent(t.Context())
+	for i := range 1000 {
+		_, op := tel.StartSQL(ctx, fmt.Sprintf(`SELECT "id" FROM "tenant_%d"."fabriq_crdt_docs" WHERE "id" = $1`, i))
+		op.End(nil)
+		_, op = tel.StartSQL(ctx, fmt.Sprintf(`UPDATE tenant_%d.fabriq_crdt_docs SET v = $1`, i))
+		op.End(nil)
+	}
+	parent.End()
+
+	series := m.Series(observability.OperationDurationMetric)
+	if len(series) != 2 {
+		t.Fatalf("got %d series for 1000 tenants, want 2 (SELECT and UPDATE): %+v", len(series), series)
+	}
+	for _, s := range series {
+		if got := s.Labels["db.collection.name"]; got != "fabriq_crdt_docs" {
+			t.Errorf("metric collection = %q, want fabriq_crdt_docs", got)
+		}
+		if s.Count != 1000 {
+			t.Errorf("%s count = %d, want 1000", s.Labels["db.operation.name"], s.Count)
+		}
+	}
+
+	s := telemetrytest.Ended(rec)[2*42]
+	if s.Name() != "SELECT tenant_42.fabriq_crdt_docs" {
+		t.Errorf("span name = %q, want the table as written", s.Name())
+	}
+	want := map[string]string{
+		"db.system.name":     "postgresql",
+		"db.namespace":       "app",
+		"db.operation.name":  "SELECT",
+		"db.collection.name": "tenant_42.fabriq_crdt_docs",
+		"db.query.summary":   "SELECT tenant_42.fabriq_crdt_docs",
+		"server.address":     "db.internal",
+		"server.port":        "5432",
+	}
+	if got := telemetrytest.AttrMap(s); !reflect.DeepEqual(got, want) {
+		t.Errorf("span attributes = %v\nwant %v", got, want)
+	}
+}
+
+// A dot is part of a MongoDB collection or Elasticsearch index name, and the
+// database is already db.namespace, so names that don't come from SQL are
+// used as reported.
+func TestCollectionLabelKeepsNonSQLNames(t *testing.T) {
+	m := telemetrytest.NewMetrics()
+	tel := observability.NewTelemetry("mongodb")
+	tel.SetMetrics(m)
+	ctx := t.Context()
+
+	_, op := tel.Start(ctx, "find", "fs.files")
+	op.End(nil)
+	_, op = tel.StartIn(ctx, "other", "find", "system.profile")
+	op.End(nil)
+	_, op = tel.Start(ctx, "search", "")
+	op.SetCollection("logs-2026.10.19")
+	op.End(nil)
+
+	got := collections(m)
+	want := map[string]uint64{"fs.files": 1, "system.profile": 1, "logs-2026.10.19": 1}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("collections = %v, want %v", got, want)
+	}
+}

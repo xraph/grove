@@ -102,6 +102,34 @@ func TestSummarizeSQL(t *testing.T) {
 	}
 }
 
+// The metric label is built from the table without its qualifier. The
+// scanner splits the parts, so a quoted name holding a dot stays whole.
+func TestSummarizeSQLTable(t *testing.T) {
+	tests := []struct {
+		query, coll, table string
+	}{
+		{`SELECT * FROM jobs`, "jobs", "jobs"},
+		{`SELECT * FROM public.jobs`, "public.jobs", "jobs"},
+		{`SELECT "id" FROM "tenant_42"."fabriq_crdt_docs" WHERE "id" = $1`, "tenant_42.fabriq_crdt_docs", "fabriq_crdt_docs"},
+		{"SELECT `id` FROM `analytics`.`events`", "analytics.events", "events"},
+		{"SELECT [id] FROM [db].[dbo].[orders]", "db.dbo.orders", "orders"},
+		{`SELECT 1 FROM "odd.name"`, "odd.name", "odd.name"},
+		{`SELECT 1 FROM "s"."odd.name"`, "s.odd.name", "odd.name"},
+		{`INSERT INTO tenant_7.events (a) VALUES ($1)`, "tenant_7.events", "events"},
+		{`UPDATE ONLY tenant_7.events SET a = 1`, "tenant_7.events", "events"},
+		{`CREATE TABLE IF NOT EXISTS tenant_7.events (id int)`, "tenant_7.events", "events"},
+		{`CREATE INDEX idx ON tenant_7.events (id)`, "tenant_7.events", "events"},
+		{`SELECT * FROM (SELECT 1) AS s`, "", ""},
+		{`COMMIT`, "", ""},
+	}
+	for _, tc := range tests {
+		got := summarize(tc.query)
+		if got.Collection != tc.coll || got.table != tc.table {
+			t.Errorf("summarize(%q) = (%q, %q), want (%q, %q)", tc.query, got.Collection, got.table, tc.coll, tc.table)
+		}
+	}
+}
+
 func TestSummarizeSQLNeverReturnsValues(t *testing.T) {
 	q := `SELECT * FROM users WHERE email = 'alice@example.com' AND id = 42`
 	got := SummarizeSQL(q)
@@ -127,8 +155,8 @@ func TestSummarizeSQLCachesRepeats(t *testing.T) {
 	if !ok {
 		t.Fatal("summary was not cached")
 	}
-	if cached, _ := v.(SQLSummary); cached != first {
-		t.Fatalf("cached %+v, returned %+v", cached, first)
+	if cached, _ := v.(sqlShape); cached.SQLSummary != first {
+		t.Fatalf("cached %+v, returned %+v", cached.SQLSummary, first)
 	}
 
 	long := "SELECT id FROM t WHERE " + strings.Repeat("a = $1 AND ", maxCachedQueryLen/10)
