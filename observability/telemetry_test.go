@@ -432,8 +432,9 @@ func collections(m *telemetrytest.Metrics) map[string]uint64 {
 }
 
 // Per-tenant schemas would add a label value per tenant. The metric drops the
-// qualifier, so a thousand tenants share one, while the span keeps the table
-// as written.
+// qualifier, so more tenants than the limit share one, while the span keeps
+// the table as written. The tenant count stays small because every statement
+// takes a slot in the process-wide summary cache, which other tests rely on.
 func TestCollectionLabelDropsSchema(t *testing.T) {
 	rec := telemetrytest.Spans(t)
 	m := telemetrytest.NewMetrics()
@@ -441,7 +442,8 @@ func TestCollectionLabelDropsSchema(t *testing.T) {
 	tel.SetMetrics(m)
 
 	ctx, parent := telemetrytest.Parent(t.Context())
-	for i := range 1000 {
+	const tenants = observability.DefaultCollectionLabelLimit + 44
+	for i := range tenants {
 		_, op := tel.StartSQL(ctx, fmt.Sprintf(`SELECT "id" FROM "tenant_%d"."fabriq_crdt_docs" WHERE "id" = $1`, i))
 		op.End(nil)
 		_, op = tel.StartSQL(ctx, fmt.Sprintf(`UPDATE tenant_%d.fabriq_crdt_docs SET v = $1`, i))
@@ -451,14 +453,14 @@ func TestCollectionLabelDropsSchema(t *testing.T) {
 
 	series := m.Series(observability.OperationDurationMetric)
 	if len(series) != 2 {
-		t.Fatalf("got %d series for 1000 tenants, want 2 (SELECT and UPDATE): %+v", len(series), series)
+		t.Fatalf("got %d series for %d tenants, want 2 (SELECT and UPDATE): %+v", len(series), tenants, series)
 	}
 	for _, s := range series {
 		if got := s.Labels["db.collection.name"]; got != "fabriq_crdt_docs" {
 			t.Errorf("metric collection = %q, want fabriq_crdt_docs", got)
 		}
-		if s.Count != 1000 {
-			t.Errorf("%s count = %d, want 1000", s.Labels["db.operation.name"], s.Count)
+		if s.Count != tenants {
+			t.Errorf("%s count = %d, want %d", s.Labels["db.operation.name"], s.Count, tenants)
 		}
 	}
 
@@ -626,6 +628,31 @@ func TestCollectionLabelFunc(t *testing.T) {
 	}
 }
 
+// grove.WithMetrics(MetricsWithCollectionLabels(m, a)) plus
+// grove.WithCollectionLabelLimit wraps the sink twice. The outer limit applies
+// and the inner label function, which the outer wrap leaves unset, survives.
+func TestMetricsWithCollectionLabelsWrappedTwice(t *testing.T) {
+	m := telemetrytest.NewMetrics()
+	tel := newTelemetry()
+
+	inner := observability.MetricsWithCollectionLabels(m, observability.CollectionLabels{
+		Label: strings.ToUpper,
+		Limit: 5,
+	})
+	tel.SetMetrics(observability.MetricsWithCollectionLabels(inner, observability.CollectionLabels{Limit: 1}))
+
+	ctx := context.Background()
+	for _, q := range []string{`SELECT * FROM users`, `SELECT * FROM jobs`} {
+		_, op := tel.StartSQL(ctx, q)
+		op.End(nil)
+	}
+
+	want := map[string]uint64{"USERS": 1, observability.OtherCollection: 1}
+	if got := collections(m); !reflect.DeepEqual(got, want) {
+		t.Errorf("collections = %v, want %v", got, want)
+	}
+}
+
 func TestMetricsWithCollectionLabelsNil(t *testing.T) {
 	if m := observability.MetricsWithCollectionLabels(nil, observability.CollectionLabels{Limit: 1}); m != nil {
 		t.Fatalf("a nil sink came back as %T", m)
@@ -649,10 +676,10 @@ func TestCollectionLabelLimitConcurrent(t *testing.T) {
 		wg.Go(func() {
 			ctx := context.Background()
 			for i := range tables {
-				// Each worker walks the tables from a different start, so
-				// first sightings of the same table race.
+				// Each worker walks the same tables from a different start,
+				// so first sightings of a table race.
 				n := (i + w*7) % tables
-				_, op := tel.StartSQL(ctx, fmt.Sprintf(`SELECT * FROM tenant_%d.t_%d`, w, n))
+				_, op := tel.StartSQL(ctx, fmt.Sprintf(`SELECT * FROM t_%d`, n))
 				op.End(nil)
 			}
 		})

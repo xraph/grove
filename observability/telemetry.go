@@ -87,10 +87,20 @@ type CollectionLabels struct {
 // records on m and applies c, so whoever hands a driver its metrics sink can
 // set the collection label without the driver knowing about it. grove.Open
 // does this for grove.WithCollectionLabel and grove.WithCollectionLabelLimit.
-// A nil m returns nil.
+// If m already carries settings, a field c leaves unset (a nil Label, a Limit
+// of zero or less) keeps the one m had. A nil m returns nil.
 func MetricsWithCollectionLabels(m gometrics.Metrics, c CollectionLabels) gometrics.Metrics {
 	if m == nil {
 		return nil
+	}
+	if lm, ok := m.(*labelledMetrics); ok {
+		if c.Label == nil {
+			c.Label = lm.labels.Label
+		}
+		if c.Limit <= 0 {
+			c.Limit = lm.labels.Limit
+		}
+		m = lm.Metrics
 	}
 	return &labelledMetrics{Metrics: m, labels: c}
 }

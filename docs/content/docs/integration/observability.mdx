@@ -107,13 +107,13 @@ The KV store records around each driver call, after its hooks have run, so a slo
 
 ## Keeping the collection label bounded
 
-Forge caps one metric at 2000 label sets. Past that, every new set lands in `otel_metric_overflow`, and that means every Grove series in your process, not only the noisy one. So `db_collection_name` stays bounded without you doing anything:
+By default Forge caps one metric at 2000 label sets, and `metrics.limits.max_series_per_metric` can set it lower. Past that, every new set lands in `otel_metric_overflow`, and that means every Grove series in your process, not only the noisy one. So `db_collection_name` stays bounded without you doing anything:
 
 - A SQL table loses its schema or database qualifier on the metric. `tenant_42.orders` and `"tenant_43"."orders"` both record as `orders`, so a schema per tenant adds no values. The span still says `tenant_42.orders`.
 - MongoDB collections and Elasticsearch indices are used as reported. A dot is part of the name there (`fs.files`), and the database is already `db_namespace`.
 - Each driver lets 256 distinct values through. After that, a table it hasn't seen records as `other` and the ones it has seen keep their own label. That's what catches a table per runtime-created entity, raw SQL against `x_<random>`, partition tables like `events_2026_10` and date-named indices.
 
-The limit counts collection values, not series. 256 tables times four operations is already half of Forge's 2000, so set it lower if you run several databases in one process or your schema is small. It's also first come, first served: if throwaway names fill the slots before a real table is queried, that table records as `other`.
+The limit counts collection values, not series, and each database you open gets its own 256. 256 tables times four operations is already half of Forge's default 2000, so set it lower if you run several databases in one process, lower Forge's cap, or have a small schema. It's also first come, first served: if throwaway names fill the slots before a real table is queried, that table records as `other`.
 
 You can pick the label yourself. Your function gets the collection as the driver reported it, schema included, and returns the label, `""` for none or `"other"` to fold it in with the rest. Anything else it returns counts toward the limit, while `""` and `"other"` never take a slot, so a function that knows your tables and sends everything else to `other` gets around the first-come problem.
 
