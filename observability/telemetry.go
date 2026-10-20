@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"strconv"
 	"strings"
@@ -54,8 +55,52 @@ const maxCachedSeries = 4096
 const DefaultCollectionLabelLimit = 256
 
 // OtherCollection is the db.collection.name metric label a collection gets
-// once the limit is reached.
+// once the limit is reached. A label function can return it too.
 const OtherCollection = "other"
+
+// CollectionLabels decides the db.collection.name label on
+// OperationDurationMetric. Spans don't use it: they carry the collection as
+// the driver reported it.
+//
+// The zero value is the default. A SQL table loses its schema or database
+// qualifier, so tenant_42.orders and tenant_43.orders both record as orders.
+// A MongoDB collection or Elasticsearch index is used as reported, since a
+// dot is part of its name there and the database is already db.namespace.
+// After DefaultCollectionLabelLimit distinct values, a new one records as
+// OtherCollection; the values already seen keep recording under their own.
+type CollectionLabels struct {
+	// Label maps a collection to its label value, in place of the default.
+	// It gets the collection as the driver reported it, never empty: for SQL
+	// the first table as written, schema included (tenant_42.orders), for
+	// MongoDB and Elasticsearch the collection or index. Return "" to record
+	// no collection or OtherCollection to fold it in with the rest. Any other
+	// value counts toward Limit. It runs on every recorded call, so keep it
+	// cheap, and it must be safe for concurrent use.
+	Label func(collection string) string
+
+	// Limit caps the distinct label values one Telemetry records. Zero or
+	// less means DefaultCollectionLabelLimit.
+	Limit int
+}
+
+// MetricsWithCollectionLabels returns m carrying c. Telemetry.SetMetrics
+// records on m and applies c, so whoever hands a driver its metrics sink can
+// set the collection label without the driver knowing about it. grove.Open
+// does this for grove.WithCollectionLabel and grove.WithCollectionLabelLimit.
+// A nil m returns nil.
+func MetricsWithCollectionLabels(m gometrics.Metrics, c CollectionLabels) gometrics.Metrics {
+	if m == nil {
+		return nil
+	}
+	return &labelledMetrics{Metrics: m, labels: c}
+}
+
+// labelledMetrics is a metrics sink with collection label settings attached
+// for SetMetrics to take off again.
+type labelledMetrics struct {
+	gometrics.Metrics
+	labels CollectionLabels
+}
 
 // Telemetry traces and times the calls one driver makes, following the
 // OpenTelemetry database client conventions. Each driver builds one in New
@@ -132,17 +177,22 @@ func (t *Telemetry) Namespace() string {
 // pass app.Metrics(); grove's Forge extension does this for you. A nil m
 // stops recording.
 //
-// The db.collection.name label lets DefaultCollectionLabelLimit distinct
-// values through. Each call starts a fresh count.
+// The db.collection.name label follows the CollectionLabels attached by
+// MetricsWithCollectionLabels, or the default when m carries none. Each call
+// starts a fresh count toward the label limit.
 func (t *Telemetry) SetMetrics(m gometrics.Metrics) {
 	if t == nil {
 		return
+	}
+	var labels CollectionLabels
+	if lm, ok := m.(*labelledMetrics); ok {
+		m, labels = lm.Metrics, lm.labels
 	}
 	if m == nil {
 		t.sink.Store(nil)
 		return
 	}
-	t.sink.Store(newMetricSink(m))
+	t.sink.Store(newMetricSink(m, labels))
 }
 
 // StartSQL starts an operation for a SQL statement. The operation, table and
@@ -255,7 +305,7 @@ type Op struct {
 	start      time.Time
 	namespace  string
 	operation  string
-	collection string // as reported, for the span
+	collection string // as reported, for the span and a label function
 	table      string // the default metric label: collection minus a SQL qualifier
 	ended      bool
 }
@@ -381,23 +431,34 @@ type metricSink struct {
 	cache sync.Map // seriesKey -> gometrics.Histogram
 	n     atomic.Int32
 
+	label       func(string) string
 	limit       int32
 	collections sync.Map // label value -> struct{}, the values let through
 	nColl       atomic.Int32
 }
 
-func newMetricSink(m gometrics.Metrics) *metricSink {
-	return &metricSink{m: m, limit: DefaultCollectionLabelLimit}
+func newMetricSink(m gometrics.Metrics, c CollectionLabels) *metricSink {
+	s := &metricSink{m: m, label: c.Label, limit: DefaultCollectionLabelLimit}
+	switch {
+	case c.Limit >= math.MaxInt32:
+		s.limit = math.MaxInt32
+	case c.Limit > 0:
+		s.limit = int32(c.Limit)
+	}
+	return s
 }
 
-// collectionLabel turns an operation's collection into its metric label: the
-// unqualified table, through the limit. A value seen before costs one map
-// lookup.
+// collectionLabel turns an operation's collection into its metric label:
+// through the label function, or the unqualified table by default, then
+// through the limit. A value seen before costs one map lookup.
 func (s *metricSink) collectionLabel(collection, table string) string {
 	if collection == "" {
 		return ""
 	}
 	v := table
+	if s.label != nil {
+		v = s.label(collection)
+	}
 	if v == "" || v == OtherCollection {
 		return v
 	}
