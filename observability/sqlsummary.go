@@ -39,8 +39,19 @@ const (
 )
 
 var summaryCache struct {
-	m sync.Map // string -> SQLSummary
+	m sync.Map // string -> sqlShape
 	n atomic.Int32
+}
+
+// sqlShape is a SQLSummary plus what the metric label needs: the table
+// without its schema or database qualifier.
+type sqlShape struct {
+	SQLSummary
+
+	// table is the last part of Collection, so "tenant_42"."orders" gives
+	// orders. It comes from the scanner rather than a split on '.', which
+	// keeps a quoted name holding a dot whole.
+	table string
 }
 
 type tokKind int
@@ -73,9 +84,15 @@ type sqlScanner struct {
 // It is a scanner, not a parser. Comments and quoted strings are skipped, and
 // a table inside parentheses (a subquery) is never reported.
 func SummarizeSQL(query string) SQLSummary {
+	return summarizeCached(query).SQLSummary
+}
+
+// summarizeCached is SummarizeSQL with the unqualified table kept, through
+// the summary cache.
+func summarizeCached(query string) sqlShape {
 	if len(query) <= maxCachedQueryLen {
 		if v, ok := summaryCache.m.Load(query); ok {
-			s, _ := v.(SQLSummary) //nolint:errcheck // only SQLSummary values are stored
+			s, _ := v.(sqlShape) //nolint:errcheck // only sqlShape values are stored
 			return s
 		}
 	}
@@ -89,7 +106,7 @@ func SummarizeSQL(query string) SQLSummary {
 	return s
 }
 
-func summarize(query string) SQLSummary {
+func summarize(query string) sqlShape {
 	sc := &sqlScanner{s: query}
 
 	tok := sc.next()
@@ -97,61 +114,64 @@ func summarize(query string) SQLSummary {
 		tok = sc.next()
 	}
 	if tok.kind != tokWord {
-		return SQLSummary{}
+		return sqlShape{}
 	}
 
 	op := strings.ToUpper(tok.text)
 	if op == "WITH" {
 		op = sc.mainAfterWith()
 		if op == "" {
-			return SQLSummary{}
+			return sqlShape{}
 		}
 	}
 
-	var operation, collection string
+	var operation, collection, table string
 
 	switch op {
 	case "SELECT":
 		operation = op
 		if sc.seekWord("FROM") {
 			sc.skipWords("ONLY")
-			collection = sc.tableName()
+			collection, table = sc.tableName()
 		}
 	case "INSERT", "REPLACE", "UPSERT":
 		operation = op
 		if sc.seekWordWithin("INTO", 4) {
 			sc.skipWords("TABLE")
-			collection = sc.tableName()
+			collection, table = sc.tableName()
 		}
 	case "UPDATE":
 		operation = op
 		sc.skipUpdateModifiers()
-		collection = sc.tableName()
+		collection, table = sc.tableName()
 	case "DELETE":
 		operation = op
 		if sc.seekWord("FROM") {
 			sc.skipWords("ONLY")
-			collection = sc.tableName()
+			collection, table = sc.tableName()
 		}
 	case "MERGE":
 		operation = op
 		if sc.seekWordWithin("INTO", 1) {
-			collection = sc.tableName()
+			collection, table = sc.tableName()
 		}
 	case "CREATE", "DROP", "ALTER":
-		operation, collection = sc.ddl(op)
+		operation, collection, table = sc.ddl(op)
 	case "TRUNCATE":
 		operation = op
 		sc.skipWords("TABLE")
-		collection = sc.tableName()
+		collection, table = sc.tableName()
 	default:
 		if _, ok := plainOperations[op]; !ok {
-			return SQLSummary{}
+			return sqlShape{}
 		}
 		operation = op
 	}
 
-	s := SQLSummary{Operation: operation, Collection: collection, Summary: operation}
+	s := sqlShape{
+		SQLSummary: SQLSummary{Operation: operation, Collection: collection, Summary: operation},
+		table:      table,
+	}
 	if collection != "" {
 		s.Summary = operation + " " + collection
 	}
@@ -181,34 +201,36 @@ var ddlObjects = map[string]struct{}{
 	"TYPE": {}, "USER": {}, "VIEW": {},
 }
 
-func (sc *sqlScanner) ddl(verb string) (operation, collection string) {
+func (sc *sqlScanner) ddl(verb string) (operation, collection, table string) {
 	// CREATE [OR REPLACE] [UNIQUE] [TEMP | TEMPORARY | UNLOGGED | ...] <object>
 	sc.skipWords("OR", "REPLACE", "UNIQUE", "TEMP", "TEMPORARY", "UNLOGGED",
 		"GLOBAL", "LOCAL", "MATERIALIZED", "VIRTUAL", "RECURSIVE", "IF", "NOT", "EXISTS")
 
 	tok := sc.next()
 	if tok.kind != tokWord {
-		return verb, ""
+		return verb, "", ""
 	}
 	object := strings.ToUpper(tok.text)
 	if _, ok := ddlObjects[object]; !ok {
-		return verb, ""
+		return verb, "", ""
 	}
 	operation = verb + " " + object
 
 	switch object {
 	case "TABLE":
 		sc.skipWords("IF", "NOT", "EXISTS", "ONLY")
-		return operation, sc.tableName()
+		collection, table = sc.tableName()
+		return operation, collection, table
 	case "INDEX":
 		// CREATE INDEX [CONCURRENTLY] [IF NOT EXISTS] name ON [ONLY] table
 		if verb == "CREATE" && sc.seekWordWithin("ON", 6) {
 			sc.skipWords("ONLY")
-			return operation, sc.tableName()
+			collection, table = sc.tableName()
+			return operation, collection, table
 		}
 	}
 
-	return operation, ""
+	return operation, "", ""
 }
 
 // mainAfterWith skips the CTEs of a WITH statement and returns the keyword
@@ -318,24 +340,28 @@ func (sc *sqlScanner) skipUpdateModifiers() {
 }
 
 // tableName reads a possibly qualified, possibly quoted table name. It returns
-// "" for a subquery, a missing name or one too long to be real.
-func (sc *sqlScanner) tableName() string {
+// the name as written, parts joined by dots and quotes dropped, and its last
+// part on its own: dispatch.jobs and jobs. Both are "" for a subquery, a
+// missing name or one too long to be real.
+func (sc *sqlScanner) tableName() (name, table string) {
 	var b strings.Builder
 	for {
 		tok := sc.next()
 		if tok.kind != tokWord && tok.kind != tokQuoted {
-			return ""
+			return "", ""
 		}
 		if b.Len()+len(tok.text) > maxIdentifierLen {
-			return ""
+			return "", ""
 		}
+		last := b.Len()
 		b.WriteString(tok.text)
 
 		save := sc.i
 		dot := sc.next()
 		if dot.kind != tokPunct || dot.text != "." {
 			sc.i = save
-			return b.String()
+			name = b.String()
+			return name, name[last:]
 		}
 		b.WriteByte('.')
 	}

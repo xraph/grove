@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"strconv"
 	"strings"
@@ -47,6 +48,69 @@ const (
 // it, a new label set still records; it just goes through the registry each
 // time. The registry's own series cap is what bounds the exported series.
 const maxCachedSeries = 4096
+
+// DefaultCollectionLabelLimit is how many distinct db.collection.name values
+// one Telemetry puts on OperationDurationMetric before it records every new
+// one as OtherCollection.
+const DefaultCollectionLabelLimit = 256
+
+// OtherCollection is the db.collection.name metric label a collection gets
+// once the limit is reached. A label function can return it too.
+const OtherCollection = "other"
+
+// CollectionLabels decides the db.collection.name label on
+// OperationDurationMetric. Spans don't use it: they carry the collection as
+// the driver reported it.
+//
+// The zero value is the default. A SQL table loses its schema or database
+// qualifier, so tenant_42.orders and tenant_43.orders both record as orders.
+// A MongoDB collection or Elasticsearch index is used as reported, since a
+// dot is part of its name there and the database is already db.namespace.
+// After DefaultCollectionLabelLimit distinct values, a new one records as
+// OtherCollection; the values already seen keep recording under their own.
+type CollectionLabels struct {
+	// Label maps a collection to its label value, in place of the default.
+	// It gets the collection as the driver reported it, never empty: for SQL
+	// the first table as written, schema included (tenant_42.orders), for
+	// MongoDB and Elasticsearch the collection or index. Return "" to record
+	// no collection or OtherCollection to fold it in with the rest. Any other
+	// value counts toward Limit. It runs on every recorded call, so keep it
+	// cheap, and it must be safe for concurrent use.
+	Label func(collection string) string
+
+	// Limit caps the distinct label values one Telemetry records. Zero or
+	// less means DefaultCollectionLabelLimit.
+	Limit int
+}
+
+// MetricsWithCollectionLabels returns m carrying c. Telemetry.SetMetrics
+// records on m and applies c, so whoever hands a driver its metrics sink can
+// set the collection label without the driver knowing about it. grove.Open
+// does this for grove.WithCollectionLabel and grove.WithCollectionLabelLimit.
+// If m already carries settings, a field c leaves unset (a nil Label, a Limit
+// of zero or less) keeps the one m had. A nil m returns nil.
+func MetricsWithCollectionLabels(m gometrics.Metrics, c CollectionLabels) gometrics.Metrics {
+	if m == nil {
+		return nil
+	}
+	if lm, ok := m.(*labelledMetrics); ok {
+		if c.Label == nil {
+			c.Label = lm.labels.Label
+		}
+		if c.Limit <= 0 {
+			c.Limit = lm.labels.Limit
+		}
+		m = lm.Metrics
+	}
+	return &labelledMetrics{Metrics: m, labels: c}
+}
+
+// labelledMetrics is a metrics sink with collection label settings attached
+// for SetMetrics to take off again.
+type labelledMetrics struct {
+	gometrics.Metrics
+	labels CollectionLabels
+}
 
 // Telemetry traces and times the calls one driver makes, following the
 // OpenTelemetry database client conventions. Each driver builds one in New
@@ -122,15 +186,23 @@ func (t *Telemetry) Namespace() string {
 // SetMetrics starts recording OperationDurationMetric on m. In a Forge app,
 // pass app.Metrics(); grove's Forge extension does this for you. A nil m
 // stops recording.
+//
+// The db.collection.name label follows the CollectionLabels attached by
+// MetricsWithCollectionLabels, or the default when m carries none. Each call
+// starts a fresh count toward the label limit.
 func (t *Telemetry) SetMetrics(m gometrics.Metrics) {
 	if t == nil {
 		return
+	}
+	var labels CollectionLabels
+	if lm, ok := m.(*labelledMetrics); ok {
+		m, labels = lm.Metrics, lm.labels
 	}
 	if m == nil {
 		t.sink.Store(nil)
 		return
 	}
-	t.sink.Store(&metricSink{m: m})
+	t.sink.Store(newMetricSink(m, labels))
 }
 
 // StartSQL starts an operation for a SQL statement. The operation, table and
@@ -139,8 +211,8 @@ func (t *Telemetry) StartSQL(ctx context.Context, query string) (context.Context
 	if t.idle(ctx) {
 		return ctx, nil
 	}
-	s := SummarizeSQL(query)
-	return t.start(ctx, t.namespace, s.Operation, s.Collection, s.Summary)
+	s := summarizeCached(query)
+	return t.start(ctx, t.namespace, s.Operation, s.Collection, s.table, s.Summary)
 }
 
 // Start starts an operation the driver describes itself, for databases that
@@ -150,7 +222,7 @@ func (t *Telemetry) Start(ctx context.Context, operation, collection string) (co
 	if t.idle(ctx) {
 		return ctx, nil
 	}
-	return t.start(ctx, t.namespace, operation, collection, summaryOf(operation, collection))
+	return t.start(ctx, t.namespace, operation, collection, collection, summaryOf(operation, collection))
 }
 
 // StartIn is Start for a driver whose namespace changes per call, like a
@@ -159,7 +231,7 @@ func (t *Telemetry) StartIn(ctx context.Context, namespace, operation, collectio
 	if t.idle(ctx) {
 		return ctx, nil
 	}
-	return t.start(ctx, namespace, operation, collection, summaryOf(operation, collection))
+	return t.start(ctx, namespace, operation, collection, collection, summaryOf(operation, collection))
 }
 
 // idle reports whether a call on ctx has nothing to record: no parent span to
@@ -177,13 +249,14 @@ func summaryOf(operation, collection string) string {
 	return operation + " " + collection
 }
 
-func (t *Telemetry) start(ctx context.Context, namespace, operation, collection, summary string) (context.Context, *Op) {
+func (t *Telemetry) start(ctx context.Context, namespace, operation, collection, table, summary string) (context.Context, *Op) {
 	op := &Op{
 		t:          t,
 		start:      time.Now(),
 		namespace:  namespace,
 		operation:  operation,
 		collection: collection,
+		table:      table,
 	}
 
 	if !trace.SpanContextFromContext(ctx).IsValid() {
@@ -242,7 +315,8 @@ type Op struct {
 	start      time.Time
 	namespace  string
 	operation  string
-	collection string
+	collection string // as reported, for the span and a label function
+	table      string // the default metric label: collection minus a SQL qualifier
 	ended      bool
 }
 
@@ -257,12 +331,14 @@ func (o *Op) Context(ctx context.Context) context.Context {
 
 // SetCollection names the collection after Start, for a client that reports
 // it late, like the Elasticsearch client reporting the index once the request
-// path is built. It renames the span and sets the metric label to match.
+// path is built. It renames the span and sets the metric label to match. The
+// name is taken as is, with no SQL qualifier to drop.
 func (o *Op) SetCollection(collection string) {
 	if o == nil || o.ended || collection == "" {
 		return
 	}
 	o.collection = collection
+	o.table = collection
 	if o.span == nil || !o.span.IsRecording() {
 		return
 	}
@@ -322,7 +398,7 @@ func (o *Op) End(err error) {
 			system:     t.system,
 			namespace:  o.namespace,
 			operation:  o.operation,
-			collection: o.collection,
+			collection: s.collectionLabel(o.collection, o.table),
 			status:     status,
 			errType:    errType,
 		})
@@ -364,6 +440,55 @@ type metricSink struct {
 	m     gometrics.Metrics
 	cache sync.Map // seriesKey -> gometrics.Histogram
 	n     atomic.Int32
+
+	label       func(string) string
+	limit       int32
+	collections sync.Map // label value -> struct{}, the values let through
+	nColl       atomic.Int32
+}
+
+func newMetricSink(m gometrics.Metrics, c CollectionLabels) *metricSink {
+	s := &metricSink{m: m, label: c.Label, limit: DefaultCollectionLabelLimit}
+	switch {
+	case c.Limit >= math.MaxInt32:
+		s.limit = math.MaxInt32
+	case c.Limit > 0:
+		s.limit = int32(c.Limit)
+	}
+	return s
+}
+
+// collectionLabel turns an operation's collection into its metric label:
+// through the label function, or the unqualified table by default, then
+// through the limit. A value seen before costs one map lookup.
+func (s *metricSink) collectionLabel(collection, table string) string {
+	if collection == "" {
+		return ""
+	}
+	v := table
+	if s.label != nil {
+		v = s.label(collection)
+	}
+	if v == "" || v == OtherCollection {
+		return v
+	}
+	if _, ok := s.collections.Load(v); ok {
+		return v
+	}
+	if !claim(&s.nColl, s.limit) {
+		// The call that took the last slot may have been admitting v.
+		if _, ok := s.collections.Load(v); ok {
+			return v
+		}
+		return OtherCollection
+	}
+	if _, loaded := s.collections.LoadOrStore(v, struct{}{}); loaded {
+		// Another call admitted v between our Load and the claim, so give
+		// the slot back. Until we do, a third new value can find the slots
+		// gone and record one call as other.
+		s.nColl.Add(-1)
+	}
+	return v
 }
 
 func (s *metricSink) observe(v float64, k seriesKey) {

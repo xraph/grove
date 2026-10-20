@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"go.opentelemetry.io/otel/codes"
@@ -417,5 +418,290 @@ func TestSetCollection(t *testing.T) {
 	}
 	if got := m.Series(observability.OperationDurationMetric)[0].Labels["db.collection.name"]; got != "orders" {
 		t.Errorf("metric collection = %q", got)
+	}
+}
+
+// collections returns the db.collection.name values recorded on m, with the
+// number of calls behind each.
+func collections(m *telemetrytest.Metrics) map[string]uint64 {
+	out := map[string]uint64{}
+	for _, s := range m.Series(observability.OperationDurationMetric) {
+		out[s.Labels["db.collection.name"]] += s.Count
+	}
+	return out
+}
+
+// Per-tenant schemas would add a label value per tenant. The metric drops the
+// qualifier, so more tenants than the limit share one, while the span keeps
+// the table as written. The tenant count stays small because every statement
+// takes a slot in the process-wide summary cache, which other tests rely on.
+func TestCollectionLabelDropsSchema(t *testing.T) {
+	rec := telemetrytest.Spans(t)
+	m := telemetrytest.NewMetrics()
+	tel := newTelemetry()
+	tel.SetMetrics(m)
+
+	ctx, parent := telemetrytest.Parent(t.Context())
+	const tenants = observability.DefaultCollectionLabelLimit + 44
+	for i := range tenants {
+		_, op := tel.StartSQL(ctx, fmt.Sprintf(`SELECT "id" FROM "tenant_%d"."fabriq_crdt_docs" WHERE "id" = $1`, i))
+		op.End(nil)
+		_, op = tel.StartSQL(ctx, fmt.Sprintf(`UPDATE tenant_%d.fabriq_crdt_docs SET v = $1`, i))
+		op.End(nil)
+	}
+	parent.End()
+
+	series := m.Series(observability.OperationDurationMetric)
+	if len(series) != 2 {
+		t.Fatalf("got %d series for %d tenants, want 2 (SELECT and UPDATE): %+v", len(series), tenants, series)
+	}
+	for _, s := range series {
+		if got := s.Labels["db.collection.name"]; got != "fabriq_crdt_docs" {
+			t.Errorf("metric collection = %q, want fabriq_crdt_docs", got)
+		}
+		if s.Count != tenants {
+			t.Errorf("%s count = %d, want %d", s.Labels["db.operation.name"], s.Count, tenants)
+		}
+	}
+
+	s := telemetrytest.Ended(rec)[2*42]
+	if s.Name() != "SELECT tenant_42.fabriq_crdt_docs" {
+		t.Errorf("span name = %q, want the table as written", s.Name())
+	}
+	want := map[string]string{
+		"db.system.name":     "postgresql",
+		"db.namespace":       "app",
+		"db.operation.name":  "SELECT",
+		"db.collection.name": "tenant_42.fabriq_crdt_docs",
+		"db.query.summary":   "SELECT tenant_42.fabriq_crdt_docs",
+		"server.address":     "db.internal",
+		"server.port":        "5432",
+	}
+	if got := telemetrytest.AttrMap(s); !reflect.DeepEqual(got, want) {
+		t.Errorf("span attributes = %v\nwant %v", got, want)
+	}
+}
+
+// A dot is part of a MongoDB collection or Elasticsearch index name, and the
+// database is already db.namespace, so names that don't come from SQL are
+// used as reported.
+func TestCollectionLabelKeepsNonSQLNames(t *testing.T) {
+	m := telemetrytest.NewMetrics()
+	tel := observability.NewTelemetry("mongodb")
+	tel.SetMetrics(m)
+	ctx := t.Context()
+
+	_, op := tel.Start(ctx, "find", "fs.files")
+	op.End(nil)
+	_, op = tel.StartIn(ctx, "other", "find", "system.profile")
+	op.End(nil)
+	_, op = tel.Start(ctx, "search", "")
+	op.SetCollection("logs-2026.10.19")
+	op.End(nil)
+
+	got := collections(m)
+	want := map[string]uint64{"fs.files": 1, "system.profile": 1, "logs-2026.10.19": 1}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("collections = %v, want %v", got, want)
+	}
+}
+
+// Past the limit a new table records as other, and the tables already seen
+// keep their own label.
+func TestCollectionLabelLimit(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		m := telemetrytest.NewMetrics()
+		tel := newTelemetry()
+		tel.SetMetrics(m)
+		ctx := t.Context()
+
+		const n = observability.DefaultCollectionLabelLimit + 50
+		for i := range n {
+			_, op := tel.StartSQL(ctx, fmt.Sprintf(`SELECT * FROM x_%d`, i))
+			op.End(nil)
+		}
+		_, op := tel.StartSQL(ctx, `SELECT * FROM x_0`)
+		op.End(nil)
+
+		got := collections(m)
+		if len(got) != observability.DefaultCollectionLabelLimit+1 {
+			t.Fatalf("got %d label values, want %d plus other", len(got), observability.DefaultCollectionLabelLimit)
+		}
+		if got[observability.OtherCollection] != 50 {
+			t.Errorf("other = %d, want the 50 tables past the limit", got[observability.OtherCollection])
+		}
+		if got["x_0"] != 2 {
+			t.Errorf("x_0 = %d, want 2: a table seen before the limit keeps its label", got["x_0"])
+		}
+		if _, ok := got[fmt.Sprintf("x_%d", n-1)]; ok {
+			t.Error("a table past the limit got its own label")
+		}
+	})
+
+	t.Run("custom", func(t *testing.T) {
+		m := telemetrytest.NewMetrics()
+		tel := newTelemetry()
+		tel.SetMetrics(observability.MetricsWithCollectionLabels(m, observability.CollectionLabels{Limit: 2}))
+		ctx := t.Context()
+
+		for _, q := range []string{
+			`SELECT * FROM a`, `SELECT * FROM b`, `SELECT * FROM c`, `SELECT * FROM a`,
+			`SELECT 1`, `COMMIT`,
+		} {
+			_, op := tel.StartSQL(ctx, q)
+			op.End(nil)
+		}
+
+		want := map[string]uint64{"a": 2, "b": 1, observability.OtherCollection: 1, "": 2}
+		if got := collections(m); !reflect.DeepEqual(got, want) {
+			t.Errorf("collections = %v, want %v (no collection doesn't count toward the limit)", got, want)
+		}
+	})
+
+	t.Run("SetMetrics starts a fresh count", func(t *testing.T) {
+		tel := newTelemetry()
+		first := telemetrytest.NewMetrics()
+		tel.SetMetrics(observability.MetricsWithCollectionLabels(first, observability.CollectionLabels{Limit: 1}))
+		_, op := tel.StartSQL(t.Context(), `SELECT * FROM a`)
+		op.End(nil)
+
+		second := telemetrytest.NewMetrics()
+		tel.SetMetrics(observability.MetricsWithCollectionLabels(second, observability.CollectionLabels{Limit: 1}))
+		_, op = tel.StartSQL(t.Context(), `SELECT * FROM b`)
+		op.End(nil)
+
+		if got := collections(second); !reflect.DeepEqual(got, map[string]uint64{"b": 1}) {
+			t.Errorf("collections after SetMetrics = %v, want b alone", got)
+		}
+	})
+}
+
+func TestCollectionLabelFunc(t *testing.T) {
+	rec := telemetrytest.Spans(t)
+	m := telemetrytest.NewMetrics()
+	tel := newTelemetry()
+
+	var seen []string
+	tel.SetMetrics(observability.MetricsWithCollectionLabels(m, observability.CollectionLabels{
+		Limit: 2,
+		Label: func(collection string) string {
+			seen = append(seen, collection)
+			switch {
+			case strings.HasPrefix(collection, "tenant_"):
+				return "tenant_table"
+			case strings.HasPrefix(collection, "scratch_"):
+				return ""
+			case strings.HasPrefix(collection, "raw_"):
+				return observability.OtherCollection
+			}
+			return collection
+		},
+	}))
+
+	ctx, parent := telemetrytest.Parent(t.Context())
+	for _, q := range []string{
+		`SELECT * FROM tenant_1.orders`,
+		`SELECT * FROM tenant_2.orders`,
+		`SELECT * FROM scratch_9f2c`,
+		`SELECT * FROM raw_77`,
+		`SELECT * FROM users`,
+		`SELECT * FROM jobs`, // past the limit of 2
+		`COMMIT`,             // no collection, so the function isn't called
+	} {
+		_, op := tel.StartSQL(ctx, q)
+		op.End(nil)
+	}
+	parent.End()
+
+	wantSeen := []string{"tenant_1.orders", "tenant_2.orders", "scratch_9f2c", "raw_77", "users", "jobs"}
+	if !reflect.DeepEqual(seen, wantSeen) {
+		t.Errorf("label function got %q, want the collections as written %q", seen, wantSeen)
+	}
+
+	want := map[string]uint64{"tenant_table": 2, "": 2, observability.OtherCollection: 2, "users": 1}
+	if got := collections(m); !reflect.DeepEqual(got, want) {
+		t.Errorf("collections = %v, want %v", got, want)
+	}
+
+	if s := telemetrytest.Ended(rec)[0]; s.Name() != "SELECT tenant_1.orders" {
+		t.Errorf("span name = %q: the label function must not touch spans", s.Name())
+	}
+}
+
+// grove.WithMetrics(MetricsWithCollectionLabels(m, a)) plus
+// grove.WithCollectionLabelLimit wraps the sink twice. The outer limit applies
+// and the inner label function, which the outer wrap leaves unset, survives.
+func TestMetricsWithCollectionLabelsWrappedTwice(t *testing.T) {
+	m := telemetrytest.NewMetrics()
+	tel := newTelemetry()
+
+	inner := observability.MetricsWithCollectionLabels(m, observability.CollectionLabels{
+		Label: strings.ToUpper,
+		Limit: 5,
+	})
+	tel.SetMetrics(observability.MetricsWithCollectionLabels(inner, observability.CollectionLabels{Limit: 1}))
+
+	ctx := context.Background()
+	for _, q := range []string{`SELECT * FROM users`, `SELECT * FROM jobs`} {
+		_, op := tel.StartSQL(ctx, q)
+		op.End(nil)
+	}
+
+	want := map[string]uint64{"USERS": 1, observability.OtherCollection: 1}
+	if got := collections(m); !reflect.DeepEqual(got, want) {
+		t.Errorf("collections = %v, want %v", got, want)
+	}
+}
+
+func TestMetricsWithCollectionLabelsNil(t *testing.T) {
+	if m := observability.MetricsWithCollectionLabels(nil, observability.CollectionLabels{Limit: 1}); m != nil {
+		t.Fatalf("a nil sink came back as %T", m)
+	}
+}
+
+// Many goroutines minting new tables at once must not let more than the
+// limit through, and every call must still be counted.
+func TestCollectionLabelLimitConcurrent(t *testing.T) {
+	const (
+		workers = 16
+		limit   = observability.DefaultCollectionLabelLimit
+		tables  = 2 * limit
+	)
+	m := telemetrytest.NewMetrics()
+	tel := newTelemetry()
+	tel.SetMetrics(m)
+
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			ctx := context.Background()
+			for i := range tables {
+				// Each worker walks the same tables from a different start,
+				// so first sightings of a table race.
+				n := (i + w*7) % tables
+				_, op := tel.StartSQL(ctx, fmt.Sprintf(`SELECT * FROM t_%d`, n))
+				op.End(nil)
+			}
+		})
+	}
+	wg.Wait()
+
+	got := collections(m)
+	var total uint64
+	named := 0
+	for v, c := range got {
+		total += c
+		if v != observability.OtherCollection {
+			named++
+		}
+	}
+	if total != workers*tables {
+		t.Errorf("recorded %d calls, want %d", total, workers*tables)
+	}
+	if named > limit {
+		t.Errorf("%d label values got through a limit of %d", named, limit)
+	}
+	if got[observability.OtherCollection] == 0 {
+		t.Error("no call recorded as other with more tables than the limit")
 	}
 }

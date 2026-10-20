@@ -8,6 +8,7 @@ import (
 	gometrics "github.com/xraph/go-utils/metrics"
 
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/observability"
 )
 
 // GroveDriver is the minimal interface that a database driver must satisfy
@@ -89,10 +90,18 @@ func Open(drv GroveDriver, opts ...Option) (*DB, error) {
 	}
 
 	// Drivers that record db.client.operation.duration take the metrics
-	// sink the same way.
+	// sink the same way. The collection label settings ride on the sink, so
+	// a driver that only forwards SetMetrics to its Telemetry applies them.
 	if o.metrics != nil {
 		if instrumented, ok := drv.(interface{ SetMetrics(m gometrics.Metrics) }); ok {
-			instrumented.SetMetrics(o.metrics)
+			m := o.metrics
+			if o.collectionLabel != nil || o.collectionLimit > 0 {
+				m = observability.MetricsWithCollectionLabels(m, observability.CollectionLabels{
+					Label: o.collectionLabel,
+					Limit: o.collectionLimit,
+				})
+			}
+			instrumented.SetMetrics(m)
 		}
 	}
 

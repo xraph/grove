@@ -3,8 +3,6 @@ title: Tracing and metrics
 description: The OpenTelemetry spans and the db.client.operation.duration histogram every Grove driver records, and how to wire them up with or without Forge.
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
-
 Every Grove driver traces and times the calls it makes to the database, following the OpenTelemetry database client conventions. In a Forge app that uses the Grove extension you don't change any code: queries show up as client spans under the request or job that ran them, and `/_/metrics` gets `db_client_operation_duration_seconds`.
 
 ## In a Forge app
@@ -58,7 +56,7 @@ Each span is a client span. Its name is the operation and the table, `SELECT use
 | `db.system.name` | `postgresql` | always |
 | `db.namespace` | `app` | when the driver knows the database name |
 | `db.operation.name` | `SELECT`, `find`, `ZADD` | when the statement starts with a keyword Grove knows |
-| `db.collection.name` | `users` | when the call works on one table, collection or index |
+| `db.collection.name` | `users`, `tenant_42.orders` | when the call works on one table, collection or index, as written |
 | `db.query.summary` | `SELECT users` | same as the span name |
 | `server.address`, `server.port` | `db.internal`, `5432` | when the DSN names a host |
 | `error.type` | `23505` | on failure |
@@ -77,7 +75,7 @@ The query text is never recorded, and neither are bound values, keys or document
 | `db_system_name` | `postgresql`, `mysql`, `sqlite`, `mongodb`, `clickhouse`, `elasticsearch`, `turso`, and for KV `redis`, `memcached`, `aws.dynamodb`, `badger`, `bbolt` |
 | `db_namespace` | the database name, or empty |
 | `db_operation_name` | the operation, as on the span |
-| `db_collection_name` | the table, collection or index, or empty |
+| `db_collection_name` | the table without its schema, the collection or index, `other` past the limit, or empty (see [below](#keeping-the-collection-label-bounded)) |
 | `db_response_status_code` | the database's code on failure, otherwise empty |
 | `error_type` | empty on success, otherwise as on the span |
 
@@ -107,9 +105,39 @@ mongodriver installs a command monitor on the client, so every command the Go dr
 
 The KV store records around each driver call, after its hooks have run, so a slow hook doesn't read as a slow Redis.
 
-<Callout type="warn">
-The table label comes from your SQL. Grove's builders always produce the same table names, but raw SQL against partition tables (`events_2026_10`) or date-named Elasticsearch indices makes a new series for each one. Forge caps a metric at 2000 label sets and folds the rest into one overflow series, so watch for its warning.
-</Callout>
+## Keeping the collection label bounded
+
+By default Forge caps one metric at 2000 label sets, and `metrics.limits.max_series_per_metric` can set it lower. Past that, every new set lands in `otel_metric_overflow`, and that means every Grove series in your process, not only the noisy one. So `db_collection_name` stays bounded without you doing anything:
+
+- A SQL table loses its schema or database qualifier on the metric. `tenant_42.orders` and `"tenant_43"."orders"` both record as `orders`, so a schema per tenant adds no values. The span still says `tenant_42.orders`.
+- MongoDB collections and Elasticsearch indices are used as reported. A dot is part of the name there (`fs.files`), and the database is already `db_namespace`.
+- Each driver lets 256 distinct values through. After that, a table it hasn't seen records as `other` and the ones it has seen keep their own label. That's what catches a table per runtime-created entity, raw SQL against `x_<random>`, partition tables like `events_2026_10` and date-named indices.
+
+The limit counts collection values, not series, and each database you open gets its own 256. 256 tables times four operations is already half of Forge's default 2000, so set it lower if you run several databases in one process, lower Forge's cap, or have a small schema. It's also first come, first served: if throwaway names fill the slots before a real table is queried, that table records as `other`.
+
+You can pick the label yourself. Your function gets the collection as the driver reported it, schema included, and returns the label, `""` for none or `"other"` to fold it in with the rest. Anything else it returns counts toward the limit, while `""` and `"other"` never take a slot, so a function that knows your tables and sends everything else to `other` gets around the first-come problem.
+
+```go
+db, err := grove.Open(pgdb,
+    grove.WithMetrics(m),
+    grove.WithCollectionLabel(func(table string) string {
+        if i := strings.LastIndexByte(table, '.'); i >= 0 {
+            table = table[i+1:] // keep dropping the schema
+        }
+        if strings.HasPrefix(table, "entity_") {
+            return "entity" // one value for every runtime-created table
+        }
+        return table
+    }),
+    grove.WithCollectionLabelLimit(64),
+)
+```
+
+Both options ride on the metrics sink, so they need `WithMetrics`, and every driver honours them without a change. A driver you wrote yourself on `observability.Telemetry` picks them up the same way: pass `observability.MetricsWithCollectionLabels(m, observability.CollectionLabels{...})` to its `SetMetrics`. The Forge extension uses the defaults and has no option for a label function yet.
+
+The KV store never fills `db_collection_name`, since keys and keyspaces stay off the metric, so there's nothing there to bound.
+
+If you use fabriq, its sink decorator keeps working on top of this. It still turns every table it doesn't know into `other`, and the names it gets are already bare, which is what it matched on anyway.
 
 ## Testing your own code
 

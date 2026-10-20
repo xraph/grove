@@ -11,10 +11,12 @@ import (
 type Option func(*options)
 
 type options struct {
-	poolSize     int
-	queryTimeout time.Duration
-	logger       log.Logger
-	metrics      gometrics.Metrics
+	poolSize        int
+	queryTimeout    time.Duration
+	logger          log.Logger
+	metrics         gometrics.Metrics
+	collectionLabel func(string) string
+	collectionLimit int
 }
 
 func defaultOptions() *options {
@@ -67,5 +69,35 @@ func WithLogger(l log.Logger) Option {
 func WithMetrics(m gometrics.Metrics) Option {
 	return func(o *options) {
 		o.metrics = m
+	}
+}
+
+// WithCollectionLabel sets how a collection becomes the db.collection.name
+// label on db.client.operation.duration. fn gets the collection as the driver
+// reported it, never empty: for SQL the first table as written, schema
+// included (tenant_42.orders), for MongoDB and Elasticsearch the collection or
+// index. It returns the label value, "" for no collection, or "other" to fold
+// it in with the rest. Values still count toward WithCollectionLabelLimit. fn
+// runs on every recorded call and must be safe for concurrent use.
+//
+// Without it, a SQL table loses its schema or database qualifier and other
+// names are used as reported. Spans always carry the collection as reported.
+// It has no effect without WithMetrics.
+func WithCollectionLabel(fn func(collection string) string) Option {
+	return func(o *options) {
+		o.collectionLabel = fn
+	}
+}
+
+// WithCollectionLabelLimit caps the distinct db.collection.name values the
+// driver puts on db.client.operation.duration. Past n, a collection it hasn't
+// seen records as "other", and the ones it has keep their own label. Default:
+// 256 (observability.DefaultCollectionLabelLimit). It has no effect without
+// WithMetrics.
+func WithCollectionLabelLimit(n int) Option {
+	return func(o *options) {
+		if n > 0 {
+			o.collectionLimit = n
+		}
 	}
 }
