@@ -99,7 +99,12 @@ Embed in your model structs to declare them as Grove models. Tag with `grove:"ta
 func WithPoolSize(n int) Option
 func WithQueryTimeout(d time.Duration) Option
 func WithLogger(l log.Logger) Option // github.com/xraph/go-utils/log
+func WithMetrics(m gometrics.Metrics) Option // github.com/xraph/go-utils/metrics
+func WithCollectionLabel(fn func(collection string) string) Option
+func WithCollectionLabelLimit(n int) Option // default 256
 ```
+
+The last three set up the `db.client.operation.duration` histogram and its `db.collection.name` label. See [tracing and metrics](/docs/integration/observability#keeping-the-collection-label-bounded).
 
 ## Driver Interfaces
 

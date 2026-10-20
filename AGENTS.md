@@ -78,7 +78,7 @@ Root module:
 - `stream/`: the generic `Stream[T]` iterator, its transforms and changefeeds.
 - `crdt/`: CRDT field types, the sync server and transports, presence and rooms.
 - `audit/`, `plugin/`: the audit-log hook and the plugin registry.
-- `observability/`: the OpenTelemetry spans and `db.client.operation.duration` histogram every driver records (`Telemetry`, `Op`), the SQL summariser that names them, and the older `Hook` over a `Collector`. `observability/telemetrytest/` has the span recorder, metrics sink and fake `*sql.DB` the driver tests use.
+- `observability/`: the OpenTelemetry spans and `db.client.operation.duration` histogram every driver records (`Telemetry`, `Op`), the SQL summariser that names them, and the older `Hook` over a `Collector`. The metric's `db.collection.name` label is bounded there: SQL tables lose their schema and each `Telemetry` lets 256 distinct values through before the rest record as `other`. `grove.WithCollectionLabel` and `WithCollectionLabelLimit` reach a driver's `Telemetry` on the sink passed to `SetMetrics` (`MetricsWithCollectionLabels`), so drivers never need to know about them. Spans keep the name as written. `observability/telemetrytest/` has the span recorder, metrics sink and fake `*sql.DB` the driver tests use.
 - `grovetest/`: a mock driver and dialect, fixtures and query assertions.
 - `internal/`: `pool` (byte buffers), `safe` (identifier quoting) and `tagparser`.
 
@@ -90,7 +90,7 @@ Everything else:
 - `bench/`: benchmarks, plus `bench/cmd/benchreport`, which `make bench-update` uses to rewrite the README tables.
 - `docs/content/docs/`: the documentation pages.
 
-The root `grove` package imports only `hook`. `driver` imports `schema`, `migrate` imports `driver`, and `schema` must never import the root (it recognises `BaseModel` by package path). Break that order and you get an import cycle.
+The root `grove` package imports only `hook` and `observability`, and neither of those imports the root. `driver` imports `schema`, `migrate` imports `driver`, and `schema` must never import the root (it recognises `BaseModel` by package path). Break that order and you get an import cycle.
 
 ## Conventions
 
