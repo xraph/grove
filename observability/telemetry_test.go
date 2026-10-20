@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"go.opentelemetry.io/otel/codes"
@@ -500,5 +501,86 @@ func TestCollectionLabelKeepsNonSQLNames(t *testing.T) {
 	want := map[string]uint64{"fs.files": 1, "system.profile": 1, "logs-2026.10.19": 1}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("collections = %v, want %v", got, want)
+	}
+}
+
+// Past the limit a new table records as other, and the tables already seen
+// keep their own label.
+func TestCollectionLabelLimit(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		m := telemetrytest.NewMetrics()
+		tel := newTelemetry()
+		tel.SetMetrics(m)
+		ctx := t.Context()
+
+		const n = observability.DefaultCollectionLabelLimit + 50
+		for i := range n {
+			_, op := tel.StartSQL(ctx, fmt.Sprintf(`SELECT * FROM x_%d`, i))
+			op.End(nil)
+		}
+		_, op := tel.StartSQL(ctx, `SELECT * FROM x_0`)
+		op.End(nil)
+
+		got := collections(m)
+		if len(got) != observability.DefaultCollectionLabelLimit+1 {
+			t.Fatalf("got %d label values, want %d plus other", len(got), observability.DefaultCollectionLabelLimit)
+		}
+		if got[observability.OtherCollection] != 50 {
+			t.Errorf("other = %d, want the 50 tables past the limit", got[observability.OtherCollection])
+		}
+		if got["x_0"] != 2 {
+			t.Errorf("x_0 = %d, want 2: a table seen before the limit keeps its label", got["x_0"])
+		}
+		if _, ok := got[fmt.Sprintf("x_%d", n-1)]; ok {
+			t.Error("a table past the limit got its own label")
+		}
+	})
+
+}
+
+// Many goroutines minting new tables at once must not let more than the
+// limit through, and every call must still be counted.
+func TestCollectionLabelLimitConcurrent(t *testing.T) {
+	const (
+		workers = 16
+		limit   = observability.DefaultCollectionLabelLimit
+		tables  = 2 * limit
+	)
+	m := telemetrytest.NewMetrics()
+	tel := newTelemetry()
+	tel.SetMetrics(m)
+
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			ctx := context.Background()
+			for i := range tables {
+				// Each worker walks the tables from a different start, so
+				// first sightings of the same table race.
+				n := (i + w*7) % tables
+				_, op := tel.StartSQL(ctx, fmt.Sprintf(`SELECT * FROM tenant_%d.t_%d`, w, n))
+				op.End(nil)
+			}
+		})
+	}
+	wg.Wait()
+
+	got := collections(m)
+	var total uint64
+	named := 0
+	for v, c := range got {
+		total += c
+		if v != observability.OtherCollection {
+			named++
+		}
+	}
+	if total != workers*tables {
+		t.Errorf("recorded %d calls, want %d", total, workers*tables)
+	}
+	if named > limit {
+		t.Errorf("%d label values got through a limit of %d", named, limit)
+	}
+	if got[observability.OtherCollection] == 0 {
+		t.Error("no call recorded as other with more tables than the limit")
 	}
 }

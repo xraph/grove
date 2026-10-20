@@ -48,6 +48,15 @@ const (
 // time. The registry's own series cap is what bounds the exported series.
 const maxCachedSeries = 4096
 
+// DefaultCollectionLabelLimit is how many distinct db.collection.name values
+// one Telemetry puts on OperationDurationMetric before it records every new
+// one as OtherCollection.
+const DefaultCollectionLabelLimit = 256
+
+// OtherCollection is the db.collection.name metric label a collection gets
+// once the limit is reached.
+const OtherCollection = "other"
+
 // Telemetry traces and times the calls one driver makes, following the
 // OpenTelemetry database client conventions. Each driver builds one in New
 // and calls Start (or StartSQL) around every call that reaches the database.
@@ -122,6 +131,9 @@ func (t *Telemetry) Namespace() string {
 // SetMetrics starts recording OperationDurationMetric on m. In a Forge app,
 // pass app.Metrics(); grove's Forge extension does this for you. A nil m
 // stops recording.
+//
+// The db.collection.name label lets DefaultCollectionLabelLimit distinct
+// values through. Each call starts a fresh count.
 func (t *Telemetry) SetMetrics(m gometrics.Metrics) {
 	if t == nil {
 		return
@@ -130,7 +142,7 @@ func (t *Telemetry) SetMetrics(m gometrics.Metrics) {
 		t.sink.Store(nil)
 		return
 	}
-	t.sink.Store(&metricSink{m: m})
+	t.sink.Store(newMetricSink(m))
 }
 
 // StartSQL starts an operation for a SQL statement. The operation, table and
@@ -244,7 +256,7 @@ type Op struct {
 	namespace  string
 	operation  string
 	collection string // as reported, for the span
-	table      string // the metric label: collection minus a SQL qualifier
+	table      string // the default metric label: collection minus a SQL qualifier
 	ended      bool
 }
 
@@ -326,7 +338,7 @@ func (o *Op) End(err error) {
 			system:     t.system,
 			namespace:  o.namespace,
 			operation:  o.operation,
-			collection: o.table,
+			collection: s.collectionLabel(o.collection, o.table),
 			status:     status,
 			errType:    errType,
 		})
@@ -368,6 +380,44 @@ type metricSink struct {
 	m     gometrics.Metrics
 	cache sync.Map // seriesKey -> gometrics.Histogram
 	n     atomic.Int32
+
+	limit       int32
+	collections sync.Map // label value -> struct{}, the values let through
+	nColl       atomic.Int32
+}
+
+func newMetricSink(m gometrics.Metrics) *metricSink {
+	return &metricSink{m: m, limit: DefaultCollectionLabelLimit}
+}
+
+// collectionLabel turns an operation's collection into its metric label: the
+// unqualified table, through the limit. A value seen before costs one map
+// lookup.
+func (s *metricSink) collectionLabel(collection, table string) string {
+	if collection == "" {
+		return ""
+	}
+	v := table
+	if v == "" || v == OtherCollection {
+		return v
+	}
+	if _, ok := s.collections.Load(v); ok {
+		return v
+	}
+	if !claim(&s.nColl, s.limit) {
+		// The call that took the last slot may have been admitting v.
+		if _, ok := s.collections.Load(v); ok {
+			return v
+		}
+		return OtherCollection
+	}
+	if _, loaded := s.collections.LoadOrStore(v, struct{}{}); loaded {
+		// Another call admitted v between our Load and the claim, so give
+		// the slot back. Until we do, a third new value can find the slots
+		// gone and record one call as other.
+		s.nColl.Add(-1)
+	}
+	return v
 }
 
 func (s *metricSink) observe(v float64, k seriesKey) {
