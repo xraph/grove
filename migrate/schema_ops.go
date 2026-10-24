@@ -17,9 +17,11 @@ var (
 
 // CreateTable creates a table, or a collection on drivers without tables.
 //
-// Columns and Constraints render in the order written, because a driver that
-// names unnamed constraints derives the name from that order. A builder never
-// sets Model together with Columns or Constraints.
+// Columns render in the order written, then Constraints in the order written,
+// because a driver that names unnamed constraints derives the name from that
+// order. A builder enforces this by rejecting a column declared after a table
+// constraint, so the order you write is the order a driver sees. A builder
+// never sets Model together with Columns or Constraints.
 type CreateTable struct {
 	Table       string
 	IfNotExists bool

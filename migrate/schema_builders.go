@@ -110,6 +110,9 @@ func Check(sql string) ColumnOption {
 		if sql == "" {
 			return errors.New("check expression is empty")
 		}
+		if c.Check != "" {
+			return errors.New("column already has a check, combine them with AND in one Check")
+		}
 		c.Check = sql
 		return nil
 	}
@@ -204,9 +207,17 @@ func (q *CreateTableQuery) IfNotExists() *CreateTableQuery {
 	return q
 }
 
-// Column adds a column. Columns render in the order you add them.
+// Column adds a column. Columns render in the order you add them, and they
+// all come before the table constraints. Declare every column first: a Column
+// after PrimaryKey, Unique, Check or ForeignKey is a misuse, because the
+// constraint modifiers (Named, References, OnDelete) bind to the last
+// constraint and the written order would no longer be the rendered order.
 func (q *CreateTableQuery) Column(name string, typ ColumnType, opts ...ColumnOption) *CreateTableQuery {
 	if q.err != nil {
+		return q
+	}
+	if len(q.op.Constraints) > 0 {
+		q.failf("column %q declared after a table constraint; declare columns before table constraints", name)
 		return q
 	}
 	col, err := newColumn(name, typ, opts)

@@ -209,6 +209,27 @@ func TestCreateTableQuery_misuse(t *testing.T) {
 		{"empty table name", func() *CreateTableQuery {
 			return NewDB(nil).NewCreateTable("").Column("id", Text)
 		}},
+		{"column after a table constraint", func() *CreateTableQuery {
+			return newT().
+				Column("org_id", Text).Column("slug", Text).
+				Unique("org_id", "slug").
+				Column("email", Text, Unique()).Named("t_email_key")
+		}},
+		{"column after a table check", func() *CreateTableQuery {
+			return newT().
+				Column("a", Integer).
+				Check("a < 10").
+				Column("b", Integer, Check("a > 0"))
+		}},
+		{"column after a foreign key", func() *CreateTableQuery {
+			return newT().
+				Column("a", Text).
+				ForeignKey("a").References("p", "id").
+				Column("b", Text)
+		}},
+		{"column check twice", func() *CreateTableQuery {
+			return newT().Column("x", Integer, Check("x > 0"), Check("x < 10"))
+		}},
 	}
 
 	for _, tt := range tests {
@@ -220,6 +241,28 @@ func TestCreateTableQuery_misuse(t *testing.T) {
 			assert.Nil(t, op)
 		})
 	}
+}
+
+func TestCreateTableQuery_columnAfterConstraintExplainsTheOrder(t *testing.T) {
+	_, err := NewDB(nil).NewCreateTable("t").
+		Column("org_id", Text).Column("slug", Text).
+		Unique("org_id", "slug").
+		Column("email", Text, Unique()).Named("t_email_key").
+		Operation()
+
+	require.ErrorIs(t, err, ErrInvalidOperation)
+	assert.Contains(t, err.Error(), `column "email" declared after a table constraint`)
+	assert.Contains(t, err.Error(), "declare columns before table constraints")
+}
+
+func TestCreateTableQuery_columnCheckTwiceSaysSo(t *testing.T) {
+	_, err := NewDB(nil).NewCreateTable("t").
+		Column("x", Integer, Check("x > 0"), Check("x < 10")).
+		Operation()
+
+	require.ErrorIs(t, err, ErrInvalidOperation)
+	assert.Contains(t, err.Error(), `column "x"`)
+	assert.Contains(t, err.Error(), "already has a check")
 }
 
 func TestCreateTableQuery_keepsTheFirstError(t *testing.T) {
