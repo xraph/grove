@@ -33,6 +33,11 @@ type Migration struct {
 
 	// Comment is an optional description.
 	Comment string
+
+	// Transactional makes the migrator run Up or Down and its applied record
+	// in one transaction when the executor supports it. Add and Define set
+	// it. Migrations registered as structs keep running without one.
+	Transactional bool
 }
 
 // AppliedMigration records that a migration has been applied.
