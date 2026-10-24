@@ -44,7 +44,9 @@ func (o *Orchestrator) SetLockTimeout(d time.Duration) *Orchestrator {
 //  2. Acquire distributed lock
 //  3. Load already-applied migrations
 //  4. Topologically sort groups by dependencies
-//  5. Execute pending migrations in order
+//  5. Execute pending migrations in order, each in a transaction with its
+//     applied record when the migration is Transactional and the executor
+//     is a [TxExecutor]
 //  6. Release lock
 func (o *Orchestrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	if err := o.executor.EnsureMigrationTable(ctx); err != nil {
@@ -94,12 +96,17 @@ func (o *Orchestrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 			return nil, fmt.Errorf("migrate: migration %s/%s has no Up function", m.Group, m.Name)
 		}
 
-		if err := m.Up(ctx, o.executor); err != nil {
-			return result, fmt.Errorf("migrate: %s/%s up failed: %w", m.Group, m.Name, err)
-		}
-
-		if err := o.executor.RecordApplied(ctx, m); err != nil {
-			return result, fmt.Errorf("migrate: record %s/%s: %w", m.Group, m.Name, err)
+		err := o.runStep(ctx, m, func(ctx context.Context) error {
+			if err := m.Up(ctx, o.executor); err != nil {
+				return fmt.Errorf("migrate: %s/%s up failed: %w", m.Group, m.Name, err)
+			}
+			if err := o.executor.RecordApplied(ctx, m); err != nil {
+				return fmt.Errorf("migrate: record %s/%s: %w", m.Group, m.Name, err)
+			}
+			return nil
+		})
+		if err != nil {
+			return result, err
 		}
 
 		result.Applied = append(result.Applied, m)
@@ -162,14 +169,19 @@ func (o *Orchestrator) Rollback(ctx context.Context) (*MigrateResult, error) {
 
 	result := &MigrateResult{}
 
-	if target.Down != nil {
-		if err := target.Down(ctx, o.executor); err != nil {
-			return result, fmt.Errorf("migrate: %s/%s down failed: %w", target.Group, target.Name, err)
+	err = o.runStep(ctx, target, func(ctx context.Context) error {
+		if target.Down != nil {
+			if downErr := target.Down(ctx, o.executor); downErr != nil {
+				return fmt.Errorf("migrate: %s/%s down failed: %w", target.Group, target.Name, downErr)
+			}
 		}
-	}
-
-	if err := o.executor.RemoveApplied(ctx, target); err != nil {
-		return result, fmt.Errorf("migrate: remove record %s/%s: %w", target.Group, target.Name, err)
+		if removeErr := o.executor.RemoveApplied(ctx, target); removeErr != nil {
+			return fmt.Errorf("migrate: remove record %s/%s: %w", target.Group, target.Name, removeErr)
+		}
+		return nil
+	})
+	if err != nil {
+		return result, err
 	}
 
 	result.Rollback = append(result.Rollback, target)
