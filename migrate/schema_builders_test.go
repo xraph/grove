@@ -644,19 +644,33 @@ func TestDropIndexQuery_misuse(t *testing.T) {
 	}
 }
 
-func TestQuery_execReturnsTheOperationError(t *testing.T) {
+func TestQuery_execReportsMisuseBeforeLookingAtTheExecutor(t *testing.T) {
 	ctx := context.Background()
 	db := NewDB(nil)
 
-	require.NoError(t, db.NewDropTable("t").Exec(ctx))
-	require.NoError(t, db.NewCreateTable("t").Column("id", Text).Exec(ctx))
-	require.NoError(t, db.NewAlterTable("t").DropColumn("a").Exec(ctx))
-	require.NoError(t, db.NewCreateIndex("i").On("t").Columns("a").Exec(ctx))
-	require.NoError(t, db.NewDropIndex("i").Exec(ctx))
+	for _, err := range []error{
+		db.NewDropTable("").Exec(ctx),
+		db.NewCreateTable("t").Exec(ctx),
+		db.NewAlterTable("t").Exec(ctx),
+		db.NewCreateIndex("i").Exec(ctx),
+		db.NewDropIndex("").Exec(ctx),
+	} {
+		require.ErrorIs(t, err, ErrInvalidOperation)
+		assert.NotErrorIs(t, err, ErrUnknownDriver)
+	}
+}
 
-	assert.ErrorIs(t, db.NewDropTable("").Exec(ctx), ErrInvalidOperation)
-	assert.ErrorIs(t, db.NewCreateTable("t").Exec(ctx), ErrInvalidOperation)
-	assert.ErrorIs(t, db.NewAlterTable("t").Exec(ctx), ErrInvalidOperation)
-	assert.ErrorIs(t, db.NewCreateIndex("i").Exec(ctx), ErrInvalidOperation)
-	assert.ErrorIs(t, db.NewDropIndex("").Exec(ctx), ErrInvalidOperation)
+func TestQuery_execOfAValidOperationNeedsADriver(t *testing.T) {
+	ctx := context.Background()
+	db := NewDB(nil)
+
+	for _, err := range []error{
+		db.NewDropTable("t").Exec(ctx),
+		db.NewCreateTable("t").Column("id", Text).Exec(ctx),
+		db.NewAlterTable("t").DropColumn("a").Exec(ctx),
+		db.NewCreateIndex("i").On("t").Columns("a").Exec(ctx),
+		db.NewDropIndex("i").Exec(ctx),
+	} {
+		assert.ErrorIs(t, err, ErrUnknownDriver)
+	}
 }

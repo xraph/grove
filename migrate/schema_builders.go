@@ -320,10 +320,16 @@ func (q *CreateTableQuery) Operation() (*CreateTable, error) {
 	return op, nil
 }
 
-// Exec runs the operation on the driver the migration is connected to.
-func (q *CreateTableQuery) Exec(_ context.Context) error {
-	_, err := q.Operation()
-	return err
+// Exec checks the chain, then has the renderer for the executor's driver apply
+// it. A misused chain returns its error without touching the executor. An
+// executor whose driver can't be told returns [ErrUnknownDriver], and a driver
+// with no renderer returns [ErrSchemaUnsupported].
+func (q *CreateTableQuery) Exec(ctx context.Context) error {
+	op, err := q.Operation()
+	if err != nil {
+		return err
+	}
+	return q.db.Apply(ctx, op)
 }
 
 func (q *CreateTableQuery) addConstraint(c Constraint, err error) *CreateTableQuery {
@@ -380,10 +386,16 @@ func (q *DropTableQuery) Operation() (*DropTable, error) {
 	return q.op, nil
 }
 
-// Exec runs the operation on the driver the migration is connected to.
-func (q *DropTableQuery) Exec(_ context.Context) error {
-	_, err := q.Operation()
-	return err
+// Exec checks the chain, then has the renderer for the executor's driver apply
+// it. A misused chain returns its error without touching the executor. An
+// executor whose driver can't be told returns [ErrUnknownDriver], and a driver
+// with no renderer returns [ErrSchemaUnsupported].
+func (q *DropTableQuery) Exec(ctx context.Context) error {
+	op, err := q.Operation()
+	if err != nil {
+		return err
+	}
+	return q.db.Apply(ctx, op)
 }
 
 // AlterTableQuery builds an [AlterTable]. Each call adds one action, and the
@@ -585,10 +597,16 @@ func (q *AlterTableQuery) Operation() (*AlterTable, error) {
 	return q.op, nil
 }
 
-// Exec runs the operation on the driver the migration is connected to.
-func (q *AlterTableQuery) Exec(_ context.Context) error {
-	_, err := q.Operation()
-	return err
+// Exec checks the chain, then has the renderer for the executor's driver apply
+// it. A misused chain returns its error without touching the executor. An
+// executor whose driver can't be told returns [ErrUnknownDriver], and a driver
+// with no renderer returns [ErrSchemaUnsupported].
+func (q *AlterTableQuery) Exec(ctx context.Context) error {
+	op, err := q.Operation()
+	if err != nil {
+		return err
+	}
+	return q.db.Apply(ctx, op)
 }
 
 func (q *AlterTableQuery) push(a AlterAction) *AlterTableQuery {
@@ -760,10 +778,16 @@ func (q *CreateIndexQuery) Operation() (*CreateIndex, error) {
 	return q.op, nil
 }
 
-// Exec runs the operation on the driver the migration is connected to.
-func (q *CreateIndexQuery) Exec(_ context.Context) error {
-	_, err := q.Operation()
-	return err
+// Exec checks the chain, then has the renderer for the executor's driver apply
+// it. A misused chain returns its error without touching the executor. An
+// executor whose driver can't be told returns [ErrUnknownDriver], and a driver
+// with no renderer returns [ErrSchemaUnsupported].
+func (q *CreateIndexQuery) Exec(ctx context.Context) error {
+	op, err := q.Operation()
+	if err != nil {
+		return err
+	}
+	return q.db.Apply(ctx, op)
 }
 
 // DropIndexQuery builds a [DropIndex].
@@ -811,8 +835,14 @@ func (q *DropIndexQuery) Operation() (*DropIndex, error) {
 	return q.op, nil
 }
 
-// Exec runs the operation on the driver the migration is connected to.
-func (q *DropIndexQuery) Exec(_ context.Context) error {
-	_, err := q.Operation()
-	return err
+// Exec checks the chain, then has the renderer for the executor's driver apply
+// it. A misused chain returns its error without touching the executor. An
+// executor whose driver can't be told returns [ErrUnknownDriver], and a driver
+// with no renderer returns [ErrSchemaUnsupported].
+func (q *DropIndexQuery) Exec(ctx context.Context) error {
+	op, err := q.Operation()
+	if err != nil {
+		return err
+	}
+	return q.db.Apply(ctx, op)
 }
