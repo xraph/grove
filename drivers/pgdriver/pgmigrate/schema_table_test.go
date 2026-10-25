@@ -388,9 +388,68 @@ func TestRender_model_withoutIfNotExists(t *testing.T) {
 	assert.NotContains(t, got, "IF NOT EXISTS")
 }
 
+// gadget has no BaseModel tag, so its table name is the default derived from
+// the type name.
+type gadget struct {
+	ID int64 `grove:"id,pk"`
+}
+
+func TestRender_model_tableName(t *testing.T) {
+	tests := []struct {
+		name    string
+		table   string
+		model   any
+		wantErr string // empty when the name is expected to match
+	}{
+		{"tag matches", "widgets", (*widget)(nil), ""},
+		{"tag matches a value model", "widgets", widget{}, ""},
+		{"tag differs", "loomplane_widgets", (*widget)(nil), `model *pgmigrate.widget maps to table "widgets"`},
+		{"default name matches", "gadgets", (*gadget)(nil), ""},
+		{"default name differs", "gadget", (*gadget)(nil), `model *pgmigrate.gadget maps to table "gadgets"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			op := &migrate.CreateTable{Table: tt.table, Model: tt.model}
+			stmts, err := Render(op)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				require.Len(t, stmts, 1)
+				assert.Contains(t, stmts[0], quoteIdent(tt.table))
+				return
+			}
+			require.Error(t, err)
+			assert.Nil(t, stmts)
+			assert.ErrorIs(t, err, migrate.ErrInvalidOperation)
+			assert.True(t, strings.HasPrefix(err.Error(), "pgmigrate: "), err.Error())
+			assert.Contains(t, err.Error(), `create table "`+tt.table+`"`)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestRender_model_mismatchedTableFromBuilder(t *testing.T) {
+	op, err := migrate.NewDB(nil).NewCreateTable("loomplane_widgets").Model((*widget)(nil)).Operation()
+	require.NoError(t, err)
+
+	_, err = Render(op)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, migrate.ErrInvalidOperation)
+}
+
+func TestRenderer_Apply_mismatchedModelTableDoesNotExecute(t *testing.T) {
+	exec := &recordingExec{}
+	op := &migrate.CreateTable{Table: "loomplane_widgets", Model: (*widget)(nil)}
+
+	err := Renderer{}.Apply(context.Background(), exec, op)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, migrate.ErrInvalidOperation)
+	assert.Empty(t, exec.stmts)
+}
+
 func TestRender_model_notAStruct(t *testing.T) {
 	_, err := Render(&migrate.CreateTable{Table: "t", Model: 42})
 	require.Error(t, err)
+	assert.ErrorIs(t, err, migrate.ErrInvalidOperation)
 	assert.True(t, strings.HasPrefix(err.Error(), "pgmigrate: "), err.Error())
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/xraph/grove/drivers/pgdriver"
 	"github.com/xraph/grove/migrate"
+	"github.com/xraph/grove/schema"
 )
 
 // driverName is what migrate.Unsupported reports and what the executor
@@ -140,12 +141,22 @@ func renderCreateTable(op *migrate.CreateTable) ([]string, error) {
 }
 
 // renderModelTable leaves the columns to the query builder that already knows
-// how to read a model's tags. The table name comes from the model's own
-// grove tag, so op.Table is not consulted here.
+// how to read a model's tags. That builder takes the table name from the
+// model's grove tag and nothing else, so the name the migration wrote is
+// checked against it first. Without the check a mismatch would create a table
+// other than the one asked for and still report success.
 func renderModelTable(op *migrate.CreateTable) ([]string, error) {
 	if len(op.Columns) > 0 || len(op.Constraints) > 0 {
 		return nil, invalidf("create table %q mixes a model with columns or constraints", op.Table)
 	}
+	table, err := schema.NewRegistry().Register(op.Model)
+	if err != nil {
+		return nil, fmt.Errorf("pgmigrate: create table %q from model: %w: %w", op.Table, err, migrate.ErrInvalidOperation)
+	}
+	if table.Name != op.Table {
+		return nil, invalidf("create table %q: model %T maps to table %q", op.Table, op.Model, table.Name)
+	}
+
 	q := pgdriver.New().NewCreateTable(op.Model)
 	if op.IfNotExists {
 		q.IfNotExists()
