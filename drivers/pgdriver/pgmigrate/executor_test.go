@@ -21,8 +21,8 @@ import (
 )
 
 // liveBootTimeout bounds how long the shared container may take to accept
-// connections. A cold start on a loaded machine has run past the library's
-// 60 second default.
+// connections, and is the timeout of each step of its wait. A cold start on a
+// loaded machine has run past the library's 60 second default for a step.
 const liveBootTimeout = 4 * time.Minute
 
 // sharedPostgres is the one container every live test borrows. Booting one
@@ -53,11 +53,14 @@ func bootSharedPostgres() {
 		tcpostgres.WithDatabase("grove"),
 		tcpostgres.WithUsername("grove"),
 		tcpostgres.WithPassword("grove"),
-		// Same two steps as tcpostgres.BasicWaitStrategies, with a deadline
-		// that survives a slow machine.
+		// The same two steps as tcpostgres.BasicWaitStrategies, with the long
+		// timeout on each. The deadline alone only caps the whole wait: every
+		// step still gives up after its own 60 second default.
 		testcontainers.WithWaitStrategyAndDeadline(liveBootTimeout,
-			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
-			wait.ForListeningPort("5432/tcp"),
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(liveBootTimeout),
+			wait.ForListeningPort("5432/tcp").WithStartupTimeout(liveBootTimeout),
 		),
 	)
 	sharedPostgres.ctr = ctr
