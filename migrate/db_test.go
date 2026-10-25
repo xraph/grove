@@ -169,7 +169,7 @@ func TestDB_ApplyNoRenderer(t *testing.T) {
 	err := NewDB(&fakeExecutor{driver: "nobody"}).NewDropTable("t").Exec(context.Background())
 
 	require.ErrorIs(t, err, ErrSchemaUnsupported)
-	assert.Contains(t, err.Error(), "nobody")
+	assert.Contains(t, err.Error(), "nobody does not support schema builders yet; use db.Exec")
 }
 
 func TestDB_ExecPassesThrough(t *testing.T) {

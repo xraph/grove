@@ -26,5 +26,5 @@ func TestExecutor_buildersAreUnsupported(t *testing.T) {
 
 	require.ErrorIs(t, err, migrate.ErrSchemaUnsupported)
 	assert.NotErrorIs(t, err, migrate.ErrUnknownDriver)
-	assert.Contains(t, err.Error(), "turso")
+	assert.Contains(t, err.Error(), "turso does not support schema builders yet; use db.Exec")
 }

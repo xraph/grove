@@ -56,7 +56,7 @@ func (db *DB) Apply(ctx context.Context, op Operation) error {
 	}
 	r, ok := rendererFor(name)
 	if !ok {
-		return Unsupported(name, "schema builders (import its migrate package)")
+		return Unsupported(name, "schema builders yet; use db.Exec")
 	}
 	return r.Apply(ctx, db.exec, op)
 }
