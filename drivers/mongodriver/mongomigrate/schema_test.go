@@ -86,7 +86,6 @@ func TestJSONSchema_bsonTypes(t *testing.T) {
 		{"smallint", migrate.SmallInt, bson.M{"bsonType": "int"}},
 		{"integer", migrate.Integer, bson.M{"bsonType": "int"}},
 		{"bigint", migrate.BigInt, bson.M{"bsonType": "long"}},
-		{"bigserial", migrate.BigSerial, bson.M{"bsonType": "long"}},
 		{"boolean", migrate.Boolean, bson.M{"bsonType": "bool"}},
 		{"timestamp", migrate.Timestamp, bson.M{"bsonType": "date"}},
 		{"date", migrate.Date, bson.M{"bsonType": "date"}},
@@ -278,6 +277,12 @@ func TestRender_unsupported(t *testing.T) {
 		{"column identity", createTable(t, "c", func(q *migrate.CreateTableQuery) *migrate.CreateTableQuery {
 			return q.Column("a", migrate.BigInt, migrate.Identity())
 		}), `identity column "a"`},
+		{"column bigserial", createTable(t, "c", func(q *migrate.CreateTableQuery) *migrate.CreateTableQuery {
+			return q.Column("a", migrate.BigSerial)
+		}), `bigserial column "a"`},
+		{"column array of bigserial", createTable(t, "c", func(q *migrate.CreateTableQuery) *migrate.CreateTableQuery {
+			return q.Column("a", migrate.ArrayOf(migrate.BigSerial))
+		}), `bigserial column "a"`},
 		{"column generated", createTable(t, "c", func(q *migrate.CreateTableQuery) *migrate.CreateTableQuery {
 			return q.Column("a", migrate.Integer, migrate.GeneratedAs("b * 2"))
 		}), `generated column "a"`},
@@ -365,6 +370,9 @@ func TestRender_unsupported(t *testing.T) {
 		{"alter add column identity", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
 			return q.AddColumn("a", migrate.BigInt, migrate.Identity())
 		}), `identity column "a"`},
+		{"alter add column bigserial", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.AddColumn("a", migrate.BigSerial)
+		}), `bigserial column "a"`},
 		{"alter unsupported action after supported ones", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
 			// Settled before anything runs, so the first action is never applied.
 			return q.AddColumn("a", migrate.Text).SetNotNull("a")
@@ -604,7 +612,8 @@ func TestExecutor_DriverName(t *testing.T) {
 
 func TestExecutor_registersTheRenderer(t *testing.T) {
 	// The builder finds our renderer by the executor's driver name. Without
-	// one registered it would say "import its migrate package" instead.
+	// one registered it would say "mongo does not support schema builders yet"
+	// instead.
 	db := migrate.NewDB(offlineExecutor())
 
 	err := db.NewDropTable("c").Cascade().Exec(context.Background())
@@ -988,7 +997,6 @@ func TestColumnDefault(t *testing.T) {
 		{name: "largest int32 on integer", typ: migrate.Integer, value: int64(math.MaxInt32), want: int32(math.MaxInt32)},
 		{name: "int on bigint", typ: migrate.BigInt, value: 0, want: int64(0)},
 		{name: "int32 on bigint", typ: migrate.BigInt, value: int32(5), want: int64(5)},
-		{name: "int on bigserial", typ: migrate.BigSerial, value: 9, want: int64(9)},
 		{name: "int on float", typ: migrate.Float, value: 0, want: float64(0)},
 		{name: "float32 on float", typ: migrate.Float, value: float32(1.5), want: 1.5},
 		{name: "float64 on float", typ: migrate.Float, value: 2.5, want: 2.5},

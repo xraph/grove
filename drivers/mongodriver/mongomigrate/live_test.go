@@ -1244,6 +1244,74 @@ func TestLive_addFieldChecksExistingValues(t *testing.T) {
 	})
 }
 
+func TestLive_addFieldNeverOverwritesAnArrayHoldingNull(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+	db := migrate.NewDB(New(mdb))
+
+	// Matching null in a query also matches an array with a null element, so a
+	// filter built on it would count this document as missing and replace it.
+	arrayWithNull := bson.A{"a", nil}
+
+	t.Run("a required field with a default fails and leaves the array alone", func(t *testing.T) {
+		require.NoError(t, db.NewCreateTable("arrays").Column("email", migrate.Text, migrate.NotNull()).Exec(ctx))
+		insertDocs(t, mdb, "arrays", bson.M{"_id": 1, "email": "a", "f": arrayWithNull})
+
+		err := db.NewAlterTable("arrays").
+			AddColumn("f", migrate.Text, migrate.NotNull(), migrate.Default("x")).
+			Exec(ctx)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `cannot add field "f" to "arrays": 1 documents hold a value that is not bsonType "string"`)
+		assert.Equal(t, arrayWithNull, docsOf(t, mdb, "arrays")[0]["f"], "the document is unchanged")
+		schema := schemaOf(t, mdb, "arrays")
+		require.NotNil(t, schema)
+		assert.NotContains(t, schema.Properties, "f")
+	})
+
+	t.Run("a required field without a default reports the array, not a missing value", func(t *testing.T) {
+		require.NoError(t, db.NewCreateTable("arrays2").Column("email", migrate.Text, migrate.NotNull()).Exec(ctx))
+		insertDocs(t, mdb, "arrays2", bson.M{"_id": 1, "email": "a", "f": arrayWithNull})
+
+		err := db.NewAlterTable("arrays2").AddColumn("f", migrate.Text, migrate.NotNull()).Exec(ctx)
+
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "lack it")
+		assert.ErrorContains(t, err, `1 documents hold a value that is not bsonType "string"`)
+		assert.Equal(t, arrayWithNull, docsOf(t, mdb, "arrays2")[0]["f"])
+	})
+
+	t.Run("an optional field with a default fails too", func(t *testing.T) {
+		require.NoError(t, db.NewCreateTable("arrays3").Column("email", migrate.Text, migrate.NotNull()).Exec(ctx))
+		insertDocs(t, mdb, "arrays3", bson.M{"_id": 1, "email": "a", "f": arrayWithNull})
+
+		err := db.NewAlterTable("arrays3").AddColumn("f", migrate.Text, migrate.Default("x")).Exec(ctx)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `1 documents hold a value that is not bsonType "string" or "null"`)
+		assert.Equal(t, arrayWithNull, docsOf(t, mdb, "arrays3")[0]["f"])
+	})
+
+	t.Run("a top-level null is still backfilled", func(t *testing.T) {
+		require.NoError(t, db.NewCreateTable("nulls3").Column("email", migrate.Text, migrate.NotNull()).Exec(ctx))
+		insertDocs(t, mdb, "nulls3",
+			bson.M{"_id": 1, "email": "a", "f": nil},
+			bson.M{"_id": 2, "email": "b"},
+			bson.M{"_id": 3, "email": "c", "f": "keep"},
+		)
+
+		err := db.NewAlterTable("nulls3").
+			AddColumn("f", migrate.Text, migrate.NotNull(), migrate.Default("x")).
+			Exec(ctx)
+		require.NoError(t, err)
+
+		docs := docsOf(t, mdb, "nulls3")
+		assert.Equal(t, "x", docs[0]["f"], "a null is filled")
+		assert.Equal(t, "x", docs[1]["f"], "a missing field is filled")
+		assert.Equal(t, "keep", docs[2]["f"], "a value is kept")
+	})
+}
+
 func TestLive_alterRefusesAValidatorItCannotEdit(t *testing.T) {
 	ctx := context.Background()
 	mdb := openLive(t)

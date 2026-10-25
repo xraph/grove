@@ -37,7 +37,6 @@ var bsonTypes = map[migrate.TypeKind]string{
 	migrate.KindSmallInt:  "int",
 	migrate.KindInteger:   "int",
 	migrate.KindBigInt:    "long",
-	migrate.KindBigSerial: "long",
 	migrate.KindBoolean:   "bool",
 	migrate.KindTimestamp: "date",
 	migrate.KindDate:      "date",
@@ -378,10 +377,23 @@ func checkColumnFeatures(c *migrate.Column) error {
 		return migrate.Unsupported(driverName, fmt.Sprintf("foreign keys on column %q", c.Name))
 	case c.Identity:
 		return migrate.Unsupported(driverName, fmt.Sprintf("identity column %q", c.Name))
+	case usesBigSerial(c.Type):
+		// Mongo has no sequence behind it, so mapping it to long would drop
+		// the auto-increment without a word.
+		return migrate.Unsupported(driverName, fmt.Sprintf("bigserial column %q (use BigInt and assign the value yourself)", c.Name))
 	case c.Generated != "":
 		return migrate.Unsupported(driverName, fmt.Sprintf("generated column %q", c.Name))
 	}
 	return nil
+}
+
+// usesBigSerial reports whether t is BigSerial or an array of it, however
+// deeply nested.
+func usesBigSerial(t migrate.ColumnType) bool {
+	for t.Kind == migrate.KindArray && t.Elem != nil {
+		t = *t.Elem
+	}
+	return t.Kind == migrate.KindBigSerial
 }
 
 func constraintFeature(kind migrate.ConstraintKind) string {
@@ -751,8 +763,9 @@ func (e *Executor) addField(ctx context.Context, table string, a *migrate.AlterA
 		return err
 	}
 
-	// A required property doesn't accept null, so for one a null counts as
-	// missing. An optional one accepts it, and a null there is a real value.
+	// A required property doesn't accept null, so for one a top-level null
+	// counts as missing. An optional one accepts it, and a null there is a real
+	// value.
 	missing := missingValue(c.Name, c.NotNull)
 	if def == nil && c.NotNull {
 		n, countErr := e.countDocuments(ctx, table, missing)
@@ -785,15 +798,15 @@ func (e *Executor) addField(ctx context.Context, table string, a *migrate.AlterA
 // collMod doesn't revalidate, so without this a document of the wrong type
 // would pass the migration and fail its next ordinary write.
 func (e *Executor) checkFieldValues(ctx context.Context, table string, c *migrate.Column, prop bson.M) error {
-	present := bson.M{"$exists": true}
+	accepted := bson.A{bson.M{"$jsonSchema": bson.M{"properties": bson.M{c.Name: prop}}}}
 	if c.NotNull {
-		// A null is either about to be filled by the default or has already been
-		// counted as a missing value.
-		present["$ne"] = nil
+		// A top-level null is either about to be filled by the default or has
+		// already been counted as a missing value.
+		accepted = append(accepted, topLevelNull(c.Name))
 	}
 	filter := bson.M{
-		c.Name: present,
-		"$nor": bson.A{bson.M{"$jsonSchema": bson.M{"properties": bson.M{c.Name: prop}}}},
+		c.Name: bson.M{"$exists": true},
+		"$nor": accepted,
 	}
 
 	n, err := e.countDocuments(ctx, table, filter)
@@ -1001,13 +1014,23 @@ func coerceElements(elem migrate.ColumnType, v any) (any, error) {
 	return out, nil
 }
 
-// missingValue matches the documents that hold no value for field.
+// missingValue matches the documents that hold no value for field: the field
+// is absent or, when nullCounts, a null at the top level.
 func missingValue(field string, nullCounts bool) bson.M {
-	if nullCounts {
-		// Matching null in a query matches a missing field as well.
-		return bson.M{field: nil}
+	absent := bson.M{field: bson.M{"$exists": false}}
+	if !nullCounts {
+		return absent
 	}
-	return bson.M{field: bson.M{"$exists": false}}
+	return bson.M{"$or": bson.A{absent, topLevelNull(field)}}
+}
+
+// topLevelNull matches the documents whose field is itself null. It can't be
+// written as {field: null}, which also matches a missing field and any array
+// with a null element, nor as {field: {$type: "null"}}, which matches array
+// elements too. Overwriting an array that happens to hold a null would lose
+// data, so the comparison runs on the whole value with $expr.
+func topLevelNull(field string) bson.M {
+	return bson.M{"$expr": bson.M{"$eq": bson.A{"$" + field, nil}}}
 }
 
 func (e *Executor) dropField(ctx context.Context, table string, a *migrate.AlterAction) error {

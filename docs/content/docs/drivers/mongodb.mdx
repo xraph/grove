@@ -642,7 +642,7 @@ The data writes that go with a validator edit use `bypassDocumentValidation`, so
 
 A literal default is coerced to the property's `bsonType` where that loses nothing: a Go integer becomes an int32 for `int` (with a range check) and an int64 for `long`, and a Go integer or float becomes a float64 for `double`. Anything else must already encode as the property's type. A typed nil pointer is an error, and so is `Default(0)` on a `migrate.Numeric` column. Pass a `bson.Decimal128` there instead (`bson.ParseDecimal128("0")` builds one).
 
-If existing documents hold a value for the new field that doesn't fit its type, the action fails and tells you how many, even when the collection has no validator.
+If existing documents hold a value for the new field that doesn't fit its type, the action fails and tells you how many, even when the collection has no validator. An array that contains a null counts as such a value. The backfill fills a field that is missing, or a top-level null on a `NotNull()` column, and never writes over an array.
 
 ### What MongoDB Can't Do
 
@@ -650,7 +650,7 @@ The builders return an error wrapping `migrate.ErrSchemaUnsupported`, naming the
 
 | Where | Not supported |
 |---|---|
-| Columns and tables | Primary keys, unique constraints (create a unique index instead), check constraints, foreign keys, identity and generated columns, and defaults when you create a collection. |
+| Columns and tables | Primary keys, unique constraints (create a unique index instead), check constraints, foreign keys, identity, generated and `migrate.BigSerial` columns (use `migrate.BigInt` and assign the value yourself), and defaults when you create a collection. |
 | `NewCreateIndex` | `Where` (use `Filter`), `Using`, `Include`, `Concurrently()` and expression keys. |
 | Dropping | `Cascade()` on a table, column or index, and `Concurrently()` on an index. |
 | `NewAlterTable` | `SetNotNull`, `DropNotNull`, `SetDefault`, `SetDefaultExpr`, `DropDefault`, `SetType`, adding or dropping constraints, `RenameTo`, and a `DefaultExpr` on `AddColumn`. |
