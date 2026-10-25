@@ -11,10 +11,14 @@ import (
 )
 
 func init() {
-	migrate.RegisterExecutor("clickhouse", func(drv any) migrate.Executor {
+	migrate.RegisterExecutor(driverName, func(drv any) migrate.Executor {
 		return New(drv.(driver.Driver))
 	})
 }
+
+// driverName is what the executor answers to, so a builder error names the same
+// driver a caller registered.
+const driverName = "clickhouse"
 
 const (
 	migrationTableName = "grove_migrations"
@@ -26,12 +30,20 @@ type Executor struct {
 	drv driver.Driver
 }
 
-var _ migrate.Executor = (*Executor)(nil)
+var (
+	_ migrate.Executor    = (*Executor)(nil)
+	_ migrate.DriverNamer = (*Executor)(nil)
+)
 
 // New creates a new ClickHouse migration executor.
 func New(drv driver.Driver) *Executor {
 	return &Executor{drv: drv}
 }
+
+// DriverName reports the driver this executor runs on. Builders use it to look
+// up a schema renderer, and find none for ClickHouse, so they return
+// migrate.ErrSchemaUnsupported naming it.
+func (e *Executor) DriverName() string { return driverName }
 
 // Exec executes a SQL statement that does not return rows.
 func (e *Executor) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {

@@ -11,10 +11,14 @@ import (
 )
 
 func init() {
-	migrate.RegisterExecutor("mysql", func(drv any) migrate.Executor {
+	migrate.RegisterExecutor(driverName, func(drv any) migrate.Executor {
 		return New(drv.(driver.Driver))
 	})
 }
+
+// driverName is what the executor answers to, so a builder error names the same
+// driver a caller registered.
+const driverName = "mysql"
 
 const (
 	migrationTableName = "grove_migrations"
@@ -35,12 +39,20 @@ type Executor struct {
 	dedicated driver.DedicatedConn // non-nil while migration lock is held
 }
 
-var _ migrate.Executor = (*Executor)(nil)
+var (
+	_ migrate.Executor    = (*Executor)(nil)
+	_ migrate.DriverNamer = (*Executor)(nil)
+)
 
 // New creates a new MySQL migration executor.
 func New(drv driver.Driver) *Executor {
 	return &Executor{drv: drv}
 }
+
+// DriverName reports the driver this executor runs on. Builders use it to look
+// up a schema renderer, and find none for MySQL, so they return
+// migrate.ErrSchemaUnsupported naming it.
+func (e *Executor) DriverName() string { return driverName }
 
 // --- routing helpers: prefer dedicated conn when available ---
 

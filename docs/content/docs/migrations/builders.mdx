@@ -372,8 +372,8 @@ Some edge cases:
 | Error | When you get it |
 |---|---|
 | `migrate.ErrInvalidOperation` | You misused a builder: an empty name, a column after a table constraint, `OnDelete` before `References`, a model that doesn't match the table. A driver also returns it for an operation it can't render as written. |
-| `migrate.ErrSchemaUnsupported` | The driver can't do what you asked. The message names the driver and the feature. You also get it when no renderer is registered for the driver, which means you haven't imported its migrate package. |
-| `migrate.ErrUnknownDriver` | The executor doesn't name a driver and has no `Unwrap`. See [Executor wrappers](#executor-wrappers). |
+| `migrate.ErrSchemaUnsupported` | The driver can't do what you asked, or has no builders yet (MySQL, SQLite, Turso and ClickHouse today). The message names the driver, and the feature when there is one. |
+| `migrate.ErrUnknownDriver` | An executor wrapper has no `Unwrap`, or a custom executor has no `DriverName`. See [Executor Wrappers](#executor-wrappers). |
 
 All three work with `errors.Is`. Here's the MongoDB case from earlier, with a primary key on the table:
 
