@@ -18,6 +18,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/xraph/grove/drivers/mongodriver"
 	"github.com/xraph/grove/migrate"
@@ -595,4 +596,549 @@ func TestLive_unsupportedFailsTheMigration(t *testing.T) {
 
 	require.ErrorIs(t, err, migrate.ErrSchemaUnsupported)
 	assert.Nil(t, collectionInfo(t, mdb, "widgets"), "an unsupported operation leaves nothing behind")
+}
+
+// liveSchema is the part of a $jsonSchema validator the alter tests read.
+type liveSchema struct {
+	Properties bson.M   `bson:"properties"`
+	Required   []string `bson:"required"`
+}
+
+// schemaOf returns the collection's $jsonSchema validator, or nil when it has
+// none.
+func schemaOf(t *testing.T, mdb *mongodriver.MongoDB, collection string) *liveSchema {
+	t.Helper()
+	info := collectionInfo(t, mdb, collection)
+	require.NotNil(t, info, "collection %q is missing", collection)
+	if len(info.Options.Validator) == 0 {
+		return nil
+	}
+	var validator struct {
+		Schema *liveSchema `bson:"$jsonSchema"`
+	}
+	require.NoError(t, bson.Unmarshal(info.Options.Validator, &validator))
+	return validator.Schema
+}
+
+// docsOf returns every document in the collection, ordered by _id.
+func docsOf(t *testing.T, mdb *mongodriver.MongoDB, collection string) []bson.M {
+	t.Helper()
+	ctx := context.Background()
+	cursor, err := mdb.Collection(collection).Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "_id", Value: 1}}))
+	require.NoError(t, err)
+	var docs []bson.M
+	require.NoError(t, cursor.All(ctx, &docs))
+	return docs
+}
+
+func insertDocs(t *testing.T, mdb *mongodriver.MongoDB, collection string, docs ...any) {
+	t.Helper()
+	_, err := mdb.Collection(collection).InsertMany(context.Background(), docs)
+	require.NoError(t, err)
+}
+
+// createUsers makes the "users" collection the alter tests start from: email
+// is required and bio is optional.
+func createUsers(t *testing.T, db *migrate.DB) {
+	t.Helper()
+	err := db.NewCreateTable("users").
+		Column("email", migrate.Text, migrate.NotNull()).
+		Column("bio", migrate.Text).
+		Exec(context.Background())
+	require.NoError(t, err)
+}
+
+func TestLive_addFieldBackfills(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+	db := migrate.NewDB(New(mdb))
+	createUsers(t, db)
+	insertDocs(t, mdb, "users",
+		bson.M{"_id": 1, "email": "a@example.com"},
+		bson.M{"_id": 2, "email": "b@example.com"},
+	)
+
+	err := db.NewAlterTable("users").
+		AddColumn("status", migrate.Text, migrate.NotNull(), migrate.Default("active")).
+		Exec(ctx)
+	require.NoError(t, err)
+
+	docs := docsOf(t, mdb, "users")
+	require.Len(t, docs, 2)
+	for _, doc := range docs {
+		assert.Equal(t, "active", doc["status"], "every existing document gets the default")
+	}
+
+	schema := schemaOf(t, mdb, "users")
+	require.NotNil(t, schema)
+	assert.Contains(t, schema.Properties, "status")
+	assert.Equal(t, []string{"email", "status"}, schema.Required)
+
+	users := mdb.Collection("users")
+	_, err = users.InsertOne(ctx, bson.M{"email": "c@example.com"})
+	assert.True(t, failsValidation(err), "a new document without status must fail validation, got %v", err)
+	_, err = users.InsertOne(ctx, bson.M{"email": "c@example.com", "status": "pending"})
+	require.NoError(t, err)
+	_, err = users.InsertOne(ctx, bson.M{"email": "d@example.com", "status": 5})
+	assert.True(t, failsValidation(err), "status keeps the type the column declared, got %v", err)
+}
+
+func TestLive_addFieldBackfillSkipsExistingValues(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+	db := migrate.NewDB(New(mdb))
+	createUsers(t, db)
+	// note and tag are not in the validator yet, so the documents can carry them.
+	insertDocs(t, mdb, "users",
+		bson.M{"_id": 1, "email": "a@example.com"},
+		bson.M{"_id": 2, "email": "b@example.com", "note": "keep", "tag": "x"},
+		bson.M{"_id": 3, "email": "c@example.com", "note": nil, "tag": nil},
+	)
+
+	t.Run("an optional field fills only where it is missing", func(t *testing.T) {
+		err := db.NewAlterTable("users").AddColumn("note", migrate.Text, migrate.Default("n/a")).Exec(ctx)
+		require.NoError(t, err)
+
+		docs := docsOf(t, mdb, "users")
+		assert.Equal(t, "n/a", docs[0]["note"])
+		assert.Equal(t, "keep", docs[1]["note"])
+		assert.Nil(t, docs[2]["note"], "an explicit null is a value the column accepts")
+		assert.Contains(t, docs[2], "note")
+	})
+
+	t.Run("a required field fills nulls too", func(t *testing.T) {
+		// The property will not accept null, so a null left behind would fail
+		// the document's next write.
+		err := db.NewAlterTable("users").AddColumn("tag", migrate.Text, migrate.NotNull(), migrate.Default("none")).Exec(ctx)
+		require.NoError(t, err)
+
+		docs := docsOf(t, mdb, "users")
+		assert.Equal(t, "none", docs[0]["tag"])
+		assert.Equal(t, "x", docs[1]["tag"])
+		assert.Equal(t, "none", docs[2]["tag"])
+	})
+}
+
+func TestLive_addFieldBackfillBypassesValidation(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+	db := migrate.NewDB(New(mdb))
+
+	// With additionalProperties off, the validator refuses the new field until
+	// it lists it, and it can't list it until the documents hold it.
+	err := db.NewCreateTable("strict_things").
+		Column("_id", migrate.Integer, migrate.NotNull()).
+		Column("name", migrate.Text, migrate.NotNull()).
+		With(WithAdditionalProperties(false)).
+		Exec(ctx)
+	require.NoError(t, err)
+	insertDocs(t, mdb, "strict_things", bson.M{"_id": 1, "name": "a"})
+
+	err = db.NewAlterTable("strict_things").
+		AddColumn("status", migrate.Text, migrate.NotNull(), migrate.Default("active")).
+		Exec(ctx)
+	require.NoError(t, err)
+
+	assert.Equal(t, "active", docsOf(t, mdb, "strict_things")[0]["status"])
+	_, err = mdb.Collection("strict_things").InsertOne(ctx, bson.M{"_id": 2, "name": "b"})
+	assert.True(t, failsValidation(err), "status is required now, got %v", err)
+}
+
+func TestLive_addRequiredFieldWithoutDefaultFails(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+	db := migrate.NewDB(New(mdb))
+	createUsers(t, db)
+	insertDocs(t, mdb, "users",
+		bson.M{"_id": 1, "email": "a@example.com"},
+		bson.M{"_id": 2, "email": "b@example.com", "status": nil},
+		bson.M{"_id": 3, "email": "c@example.com", "status": "x"},
+	)
+
+	t.Run("names the count and changes nothing", func(t *testing.T) {
+		err := db.NewAlterTable("users").AddColumn("status", migrate.Text, migrate.NotNull()).Exec(ctx)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `cannot add required field "status" to "users": 2 documents lack it`)
+		assert.ErrorContains(t, err, `alter table "users": action 1 (add column "status")`)
+
+		schema := schemaOf(t, mdb, "users")
+		require.NotNil(t, schema)
+		assert.NotContains(t, schema.Properties, "status")
+		assert.Equal(t, []string{"email"}, schema.Required)
+	})
+
+	t.Run("a null default is no default", func(t *testing.T) {
+		err := db.NewAlterTable("users").AddColumn("status", migrate.Text, migrate.NotNull(), migrate.Default(nil)).Exec(ctx)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "2 documents lack it")
+	})
+
+	t.Run("an empty collection takes the field", func(t *testing.T) {
+		require.NoError(t, db.NewCreateTable("fresh").Column("email", migrate.Text, migrate.NotNull()).Exec(ctx))
+
+		err := db.NewAlterTable("fresh").AddColumn("status", migrate.Text, migrate.NotNull()).Exec(ctx)
+		require.NoError(t, err)
+
+		schema := schemaOf(t, mdb, "fresh")
+		require.NotNil(t, schema)
+		assert.Equal(t, []string{"email", "status"}, schema.Required)
+	})
+
+	t.Run("an optional field needs no default", func(t *testing.T) {
+		err := db.NewAlterTable("users").AddColumn("nickname", migrate.Text).Exec(ctx)
+		require.NoError(t, err)
+
+		schema := schemaOf(t, mdb, "users")
+		require.NotNil(t, schema)
+		assert.Contains(t, schema.Properties, "nickname")
+		assert.Equal(t, []string{"email"}, schema.Required)
+	})
+}
+
+func TestLive_dropAndRenameField(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+	db := migrate.NewDB(New(mdb))
+	err := db.NewCreateTable("people").
+		Column("name", migrate.Text, migrate.NotNull()).
+		Column("nick", migrate.Text).
+		Column("age", migrate.Integer).
+		Exec(ctx)
+	require.NoError(t, err)
+	insertDocs(t, mdb, "people",
+		bson.M{"_id": 1, "name": "ann", "nick": "a", "age": 3},
+		bson.M{"_id": 2, "name": "bob", "nick": "b"},
+	)
+
+	t.Run("drop an optional field", func(t *testing.T) {
+		require.NoError(t, db.NewAlterTable("people").DropColumn("nick").Exec(ctx))
+
+		for _, doc := range docsOf(t, mdb, "people") {
+			assert.NotContains(t, doc, "nick")
+		}
+		schema := schemaOf(t, mdb, "people")
+		require.NotNil(t, schema)
+		assert.NotContains(t, schema.Properties, "nick")
+		assert.Contains(t, schema.Properties, "name")
+		assert.Contains(t, schema.Properties, "age")
+	})
+
+	t.Run("rename a required field", func(t *testing.T) {
+		require.NoError(t, db.NewAlterTable("people").RenameColumn("name", "full_name").Exec(ctx))
+
+		docs := docsOf(t, mdb, "people")
+		assert.Equal(t, "ann", docs[0]["full_name"], "a renamed field carries its values")
+		assert.Equal(t, "bob", docs[1]["full_name"])
+		for _, doc := range docs {
+			assert.NotContains(t, doc, "name")
+		}
+
+		schema := schemaOf(t, mdb, "people")
+		require.NotNil(t, schema)
+		assert.Contains(t, schema.Properties, "full_name")
+		assert.NotContains(t, schema.Properties, "name")
+		assert.Equal(t, []string{"full_name"}, schema.Required)
+
+		people := mdb.Collection("people")
+		_, err := people.InsertOne(ctx, bson.M{"age": 1})
+		assert.True(t, failsValidation(err), "the renamed field is still required, got %v", err)
+		_, err = people.InsertOne(ctx, bson.M{"full_name": "cy"})
+		require.NoError(t, err)
+	})
+
+	t.Run("drop a required field", func(t *testing.T) {
+		// Under a strict validator the $unset would be refused, so this also
+		// shows the data step doesn't trip over the validator it is retiring.
+		require.NoError(t, db.NewAlterTable("people").DropColumn("full_name").Exec(ctx))
+
+		for _, doc := range docsOf(t, mdb, "people") {
+			assert.NotContains(t, doc, "full_name")
+		}
+		schema := schemaOf(t, mdb, "people")
+		require.NotNil(t, schema)
+		assert.NotContains(t, schema.Properties, "full_name")
+		assert.Empty(t, schema.Required)
+
+		_, err := mdb.Collection("people").InsertOne(ctx, bson.M{"age": 9})
+		require.NoError(t, err, "nothing is required any more")
+	})
+}
+
+func TestLive_alterWithoutValidator(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+	db := migrate.NewDB(New(mdb))
+	require.NoError(t, mdb.Database().CreateCollection(ctx, "plain"))
+	insertDocs(t, mdb, "plain",
+		bson.M{"_id": 1, "name": "a"},
+		bson.M{"_id": 2, "name": "b", "legacy": "x"},
+	)
+
+	noValidator := func(t *testing.T) {
+		t.Helper()
+		info := collectionInfo(t, mdb, "plain")
+		require.NotNil(t, info)
+		assert.Empty(t, info.Options.Validator, "an alter never makes a validator")
+	}
+
+	t.Run("add a field with a default", func(t *testing.T) {
+		err := db.NewAlterTable("plain").
+			AddColumn("status", migrate.Text, migrate.NotNull(), migrate.Default("active")).
+			Exec(ctx)
+		require.NoError(t, err)
+
+		for _, doc := range docsOf(t, mdb, "plain") {
+			assert.Equal(t, "active", doc["status"])
+		}
+		noValidator(t)
+	})
+
+	t.Run("a required field with no default still checks the documents", func(t *testing.T) {
+		err := db.NewAlterTable("plain").AddColumn("owner", migrate.Text, migrate.NotNull()).Exec(ctx)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `cannot add required field "owner" to "plain": 2 documents lack it`)
+		noValidator(t)
+	})
+
+	t.Run("rename and drop work on the data alone", func(t *testing.T) {
+		require.NoError(t, db.NewAlterTable("plain").RenameColumn("legacy", "old").DropColumn("name").Exec(ctx))
+
+		docs := docsOf(t, mdb, "plain")
+		assert.NotContains(t, docs[0], "old")
+		assert.Equal(t, "x", docs[1]["old"])
+		for _, doc := range docs {
+			assert.NotContains(t, doc, "name")
+			assert.NotContains(t, doc, "legacy")
+		}
+		noValidator(t)
+	})
+
+	t.Run("with no schema a field no document has is not an error", func(t *testing.T) {
+		require.NoError(t, db.NewAlterTable("plain").DropColumn("never_there").Exec(ctx))
+		noValidator(t)
+	})
+}
+
+func TestLive_alterMissingCollection(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+	db := migrate.NewDB(New(mdb))
+
+	// An update on a missing collection would just match nothing, and a collMod
+	// would fail late, so the check has to be ours and has to hold for every
+	// modifier.
+	builds := map[string]func() *migrate.AlterTableQuery{
+		"add": func() *migrate.AlterTableQuery { return db.NewAlterTable("ghost").AddColumn("a", migrate.Text) },
+		"add if not exists": func() *migrate.AlterTableQuery {
+			return db.NewAlterTable("ghost").AddColumn("a", migrate.Text).IfNotExists()
+		},
+		"drop":           func() *migrate.AlterTableQuery { return db.NewAlterTable("ghost").DropColumn("a") },
+		"drop if exists": func() *migrate.AlterTableQuery { return db.NewAlterTable("ghost").DropColumn("a").IfExists() },
+		"rename":         func() *migrate.AlterTableQuery { return db.NewAlterTable("ghost").RenameColumn("a", "b") },
+		"add with a default": func() *migrate.AlterTableQuery {
+			return db.NewAlterTable("ghost").AddColumn("a", migrate.Text, migrate.Default("x"))
+		},
+	}
+	for name, build := range builds {
+		t.Run(name, func(t *testing.T) {
+			err := build().Exec(ctx)
+
+			require.Error(t, err)
+			assert.ErrorContains(t, err, `alter table "ghost": collection does not exist`)
+			assert.Nil(t, collectionInfo(t, mdb, "ghost"), "no collection is made as a side effect")
+		})
+	}
+}
+
+func TestLive_addFieldExistence(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+	db := migrate.NewDB(New(mdb))
+	createUsers(t, db)
+	insertDocs(t, mdb, "users", bson.M{"_id": 1, "email": "a@example.com"})
+
+	t.Run("a listed field without IfNotExists is an error", func(t *testing.T) {
+		err := db.NewAlterTable("users").AddColumn("bio", migrate.Text, migrate.Default("x")).Exec(ctx)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `field "bio" already exists in the validator`)
+		assert.NotContains(t, docsOf(t, mdb, "users")[0], "bio", "a refused action backfills nothing")
+	})
+
+	t.Run("a listed field with IfNotExists is a no-op", func(t *testing.T) {
+		err := db.NewAlterTable("users").
+			AddColumn("bio", migrate.Text, migrate.NotNull(), migrate.Default("x")).
+			IfNotExists().
+			Exec(ctx)
+		require.NoError(t, err)
+
+		assert.NotContains(t, docsOf(t, mdb, "users")[0], "bio", "a skipped action backfills nothing")
+		schema := schemaOf(t, mdb, "users")
+		require.NotNil(t, schema)
+		assert.Equal(t, []string{"email"}, schema.Required, "the existing definition stays")
+	})
+
+	t.Run("an unlisted field with IfNotExists is added", func(t *testing.T) {
+		err := db.NewAlterTable("users").AddColumn("age", migrate.Integer).IfNotExists().Exec(ctx)
+		require.NoError(t, err)
+
+		schema := schemaOf(t, mdb, "users")
+		require.NotNil(t, schema)
+		assert.Contains(t, schema.Properties, "age")
+	})
+}
+
+func TestLive_dropFieldExistence(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+	db := migrate.NewDB(New(mdb))
+	createUsers(t, db)
+	// extra is in the document and not in the validator.
+	insertDocs(t, mdb, "users", bson.M{"_id": 1, "email": "a@example.com", "extra": "x"})
+
+	t.Run("an unlisted field without IfExists is an error", func(t *testing.T) {
+		err := db.NewAlterTable("users").DropColumn("extra").Exec(ctx)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `field "extra" does not exist in the validator`)
+		assert.Equal(t, "x", docsOf(t, mdb, "users")[0]["extra"])
+	})
+
+	t.Run("an unlisted field with IfExists is a no-op", func(t *testing.T) {
+		require.NoError(t, db.NewAlterTable("users").DropColumn("extra").IfExists().Exec(ctx))
+
+		assert.Equal(t, "x", docsOf(t, mdb, "users")[0]["extra"], "a skipped drop leaves the data alone")
+	})
+
+	t.Run("a listed field with IfExists is dropped", func(t *testing.T) {
+		require.NoError(t, db.NewAlterTable("users").DropColumn("bio").IfExists().Exec(ctx))
+
+		schema := schemaOf(t, mdb, "users")
+		require.NotNil(t, schema)
+		assert.NotContains(t, schema.Properties, "bio")
+	})
+}
+
+func TestLive_renameFieldExistence(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+	db := migrate.NewDB(New(mdb))
+	createUsers(t, db)
+	insertDocs(t, mdb, "users", bson.M{"_id": 1, "email": "a@example.com", "bio": "hi", "extra": "x"})
+
+	t.Run("an unlisted source is an error", func(t *testing.T) {
+		err := db.NewAlterTable("users").RenameColumn("extra", "other").Exec(ctx)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `field "extra" does not exist in the validator`)
+		doc := docsOf(t, mdb, "users")[0]
+		assert.Equal(t, "x", doc["extra"])
+		assert.NotContains(t, doc, "other")
+	})
+
+	t.Run("a listed destination is an error", func(t *testing.T) {
+		err := db.NewAlterTable("users").RenameColumn("bio", "email").Exec(ctx)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `field "email" already exists in the validator`)
+		doc := docsOf(t, mdb, "users")[0]
+		assert.Equal(t, "hi", doc["bio"])
+		assert.Equal(t, "a@example.com", doc["email"])
+	})
+
+	t.Run("without a validator a clash would lose data", func(t *testing.T) {
+		// $rename onto a field a document already has throws that value away.
+		require.NoError(t, mdb.Database().CreateCollection(ctx, "plain"))
+		insertDocs(t, mdb, "plain",
+			bson.M{"_id": 1, "a": "keep a", "b": "old b"},
+			bson.M{"_id": 2, "a": "only a"},
+		)
+
+		err := db.NewAlterTable("plain").RenameColumn("a", "b").Exec(ctx)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `cannot rename field "a" to "b": 1 documents already have both`)
+		docs := docsOf(t, mdb, "plain")
+		assert.Equal(t, "keep a", docs[0]["a"])
+		assert.Equal(t, "old b", docs[0]["b"])
+		assert.Equal(t, "only a", docs[1]["a"])
+	})
+}
+
+func TestLive_alterActionsRunInOrder(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+	db := migrate.NewDB(New(mdb))
+	createUsers(t, db)
+
+	err := db.NewAlterTable("users").
+		AddColumn("a", migrate.Text).
+		AddColumn("b", migrate.Text).
+		DropColumn("nope").
+		AddColumn("c", migrate.Text).
+		Exec(ctx)
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, `alter table "users": action 3 (drop column "nope")`)
+
+	// Mongo can't undo the first two, and the fourth never runs.
+	schema := schemaOf(t, mdb, "users")
+	require.NotNil(t, schema)
+	assert.Contains(t, schema.Properties, "a")
+	assert.Contains(t, schema.Properties, "b")
+	assert.NotContains(t, schema.Properties, "c")
+}
+
+func TestLive_alterUnsupportedRunsNothing(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+	db := migrate.NewDB(New(mdb))
+	createUsers(t, db)
+
+	err := db.NewAlterTable("users").AddColumn("a", migrate.Text).SetNotNull("bio").Exec(ctx)
+
+	require.ErrorIs(t, err, migrate.ErrSchemaUnsupported)
+	schema := schemaOf(t, mdb, "users")
+	require.NotNil(t, schema)
+	assert.NotContains(t, schema.Properties, "a", "an unsupported action is found before the first one runs")
+}
+
+func TestLive_alterInMigration(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+
+	create := migrate.Define("20260101000000", "create_users",
+		func(ctx context.Context, db *migrate.DB) error {
+			return db.NewCreateTable("users").Column("email", migrate.Text, migrate.NotNull()).Exec(ctx)
+		},
+		func(ctx context.Context, db *migrate.DB) error {
+			return db.NewDropTable("users").Exec(ctx)
+		},
+	)
+	addStatus := migrate.Define("20260101000001", "add_status",
+		func(ctx context.Context, db *migrate.DB) error {
+			return db.NewAlterTable("users").
+				AddColumn("status", migrate.Text, migrate.NotNull(), migrate.Default("active")).
+				Exec(ctx)
+		},
+		func(ctx context.Context, db *migrate.DB) error {
+			return db.NewAlterTable("users").DropColumn("status").Exec(ctx)
+		},
+	)
+
+	require.NoError(t, migrateLive(ctx, mdb, create))
+	insertDocs(t, mdb, "users", bson.M{"_id": 1, "email": "a@example.com"})
+
+	require.NoError(t, migrateLive(ctx, mdb, create, addStatus))
+	assert.Equal(t, "active", docsOf(t, mdb, "users")[0]["status"])
+
+	require.NoError(t, rollbackLive(ctx, mdb, create, addStatus))
+	assert.NotContains(t, docsOf(t, mdb, "users")[0], "status")
+	schema := schemaOf(t, mdb, "users")
+	require.NotNil(t, schema)
+	assert.NotContains(t, schema.Properties, "status")
+	assert.Equal(t, []string{"email"}, schema.Required)
 }

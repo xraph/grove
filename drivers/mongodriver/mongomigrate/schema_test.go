@@ -35,6 +35,13 @@ func createTable(t *testing.T, table string, build func(*migrate.CreateTableQuer
 	return op
 }
 
+func alterTable(t *testing.T, build func(*migrate.AlterTableQuery) *migrate.AlterTableQuery) *migrate.AlterTable {
+	t.Helper()
+	op, err := build(migrate.NewDB(nil).NewAlterTable("c")).Operation()
+	require.NoError(t, err)
+	return op
+}
+
 func createIndex(t *testing.T, build func(*migrate.CreateIndexQuery) *migrate.CreateIndexQuery) *migrate.CreateIndex {
 	t.Helper()
 	op, err := build(migrate.NewDB(nil).NewCreateIndex("idx")).Operation()
@@ -302,7 +309,68 @@ func TestRender_unsupported(t *testing.T) {
 		{"index expression key", createIndex(t, func(q *migrate.CreateIndexQuery) *migrate.CreateIndexQuery {
 			return q.On("c").Columns("a").ColumnExpr("lower(b)")
 		}), "expression index keys"},
-		{"alter table", &migrate.AlterTable{Table: "c"}, "operation *migrate.AlterTable"},
+		{"alter set not null", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.SetNotNull("a")
+		}), `set not null on column "a"`},
+		{"alter drop not null", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.DropNotNull("a")
+		}), `drop not null on column "a"`},
+		{"alter set default", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.SetDefault("a", 1)
+		}), `set default on column "a"`},
+		{"alter set default expression", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.SetDefaultExpr("a", "now()")
+		}), `set default on column "a"`},
+		{"alter drop default", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.DropDefault("a")
+		}), `drop default on column "a"`},
+		{"alter set type", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.SetType("a", migrate.BigInt)
+		}), `set type on column "a"`},
+		{"alter add primary key", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.AddPrimaryKey("a")
+		}), "primary key constraints"},
+		{"alter add unique", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.AddUnique("a")
+		}), "unique constraints"},
+		{"alter add check", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.AddCheck("a > 0")
+		}), "check constraints"},
+		{"alter add foreign key", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.AddForeignKey("a").References("other", "id")
+		}), "foreign key constraints"},
+		{"alter drop constraint", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.DropConstraint("c_pkey")
+		}), `drop constraint "c_pkey"`},
+		{"alter rename table", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.RenameTo("d")
+		}), `rename table to "d"`},
+		{"alter drop column cascade", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.DropColumn("a").Cascade()
+		}), "CASCADE on drop column"},
+		{"alter add column default expression", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.AddColumn("a", migrate.Timestamp, migrate.DefaultExpr("now()"))
+		}), `default expressions on column "a"`},
+		{"alter add column primary key", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.AddColumn("a", migrate.Text, migrate.PrimaryKey())
+		}), `primary keys on column "a"`},
+		{"alter add column unique", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.AddColumn("a", migrate.Text, migrate.Unique())
+		}), `unique constraints on column "a"`},
+		{"alter add column references", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.AddColumn("a", migrate.Text, migrate.References("other", "id"))
+		}), `foreign keys on column "a"`},
+		{"alter add column identity", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			return q.AddColumn("a", migrate.BigInt, migrate.Identity())
+		}), `identity column "a"`},
+		{"alter unsupported action after supported ones", alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+			// Settled before anything runs, so the first action is never applied.
+			return q.AddColumn("a", migrate.Text).SetNotNull("a")
+		}), `set not null on column "a"`},
+		{"alter unknown action", &migrate.AlterTable{
+			Table:   "c",
+			Actions: []migrate.AlterAction{{Kind: migrate.AlterKind(99), Name: "a"}},
+		}, "alter action (kind 99)"},
 	}
 
 	exec := offlineExecutor()
@@ -385,6 +453,48 @@ func TestRender_invalid(t *testing.T) {
 		},
 		{"drop index without a collection", &migrate.DropIndex{Name: "i"}, `drop index "i" needs On with a collection`},
 		{"drop table without a name", &migrate.DropTable{}, "drop table needs a name"},
+		{"alter table without a name", &migrate.AlterTable{
+			Actions: []migrate.AlterAction{{Kind: migrate.AlterDropColumn, Name: "a"}},
+		}, "alter table needs a name"},
+		{"alter table without actions", &migrate.AlterTable{Table: "c"}, `alter table "c" has no actions`},
+		{
+			"rename a column to itself",
+			alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery { return q.RenameColumn("a", "a") }),
+			`rename column "a" to itself`,
+		},
+		{
+			"add a column with a dotted name",
+			alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+				return q.AddColumn("a.b", migrate.Text)
+			}),
+			`column name "a.b" must not contain "." or start with "$"`,
+		},
+		{
+			"drop a column with a dollar name",
+			alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery { return q.DropColumn("$a") }),
+			`column name "$a" must not contain "." or start with "$"`,
+		},
+		{
+			"rename onto a dotted name",
+			alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery { return q.RenameColumn("a", "b.c") }),
+			`column name "b.c" must not contain "." or start with "$"`,
+		},
+		{
+			"add a column without a type",
+			&migrate.AlterTable{
+				Table:   "c",
+				Actions: []migrate.AlterAction{{Kind: migrate.AlterAddColumn, Column: migrate.Column{Name: "a"}}},
+			},
+			`column "a": column type is not set`,
+		},
+		{
+			"add a column without a name",
+			&migrate.AlterTable{
+				Table:   "c",
+				Actions: []migrate.AlterAction{{Kind: migrate.AlterAddColumn, Column: migrate.Column{Type: migrate.Text}}},
+			},
+			"column name is empty",
+		},
 	}
 
 	exec := offlineExecutor()
@@ -532,5 +642,301 @@ func TestRegisteredFactory(t *testing.T) {
 		_, err = migrate.NewOrchestrator(exec).Migrate(context.Background())
 		require.Error(t, err)
 		assert.ErrorContains(t, err, "mongomigrate: mongomigrate.notADriver is not a *mongodriver.MongoDB")
+	})
+}
+
+func TestValidatorEdits(t *testing.T) {
+	// before is a function so each case gets two copies: one to edit and one to
+	// prove the edit left its input alone.
+	tests := []struct {
+		name   string
+		before func() bson.M
+		edit   func(bson.M) bson.M
+		want   bson.M
+	}{
+		{
+			name: "add an optional property",
+			before: func() bson.M {
+				return bson.M{
+					"bsonType":   "object",
+					"properties": bson.M{"email": bson.M{"bsonType": "string"}},
+					"required":   []string{"email"},
+				}
+			},
+			edit: func(s bson.M) bson.M {
+				return addProperty(s, "bio", bson.M{"bsonType": bson.A{"string", "null"}}, false)
+			},
+			want: bson.M{
+				"bsonType": "object",
+				"properties": bson.M{
+					"email": bson.M{"bsonType": "string"},
+					"bio":   bson.M{"bsonType": bson.A{"string", "null"}},
+				},
+				"required": []string{"email"},
+			},
+		},
+		{
+			name: "add a required property after the others",
+			before: func() bson.M {
+				return bson.M{
+					"bsonType":   "object",
+					"properties": bson.M{"email": bson.M{"bsonType": "string"}},
+					"required":   bson.A{"email"}, // the shape the server reports
+				}
+			},
+			edit: func(s bson.M) bson.M {
+				return addProperty(s, "status", bson.M{"bsonType": "string"}, true)
+			},
+			want: bson.M{
+				"bsonType": "object",
+				"properties": bson.M{
+					"email":  bson.M{"bsonType": "string"},
+					"status": bson.M{"bsonType": "string"},
+				},
+				"required": []string{"email", "status"},
+			},
+		},
+		{
+			name: "add a required property to a schema that requires nothing yet",
+			before: func() bson.M {
+				return bson.M{"bsonType": "object", "properties": bson.M{"a": bson.M{"bsonType": "int"}}}
+			},
+			edit: func(s bson.M) bson.M {
+				return addProperty(s, "b", bson.M{"bsonType": "int"}, true)
+			},
+			want: bson.M{
+				"bsonType": "object",
+				"properties": bson.M{
+					"a": bson.M{"bsonType": "int"},
+					"b": bson.M{"bsonType": "int"},
+				},
+				"required": []string{"b"},
+			},
+		},
+		{
+			name:   "add a property to a schema with no properties",
+			before: func() bson.M { return bson.M{"bsonType": "object"} },
+			edit: func(s bson.M) bson.M {
+				return addProperty(s, "a", bson.M{"bsonType": "int"}, false)
+			},
+			want: bson.M{
+				"bsonType":   "object",
+				"properties": bson.M{"a": bson.M{"bsonType": "int"}},
+			},
+		},
+		{
+			name: "add a required property that is already required",
+			before: func() bson.M {
+				return bson.M{"properties": bson.M{}, "required": []string{"a"}}
+			},
+			edit: func(s bson.M) bson.M {
+				return addProperty(s, "a", bson.M{"bsonType": "int"}, true)
+			},
+			want: bson.M{
+				"properties": bson.M{"a": bson.M{"bsonType": "int"}},
+				"required":   []string{"a"},
+			},
+		},
+		{
+			name: "add keeps the other keywords",
+			before: func() bson.M {
+				return bson.M{"bsonType": "object", "properties": bson.M{}, "additionalProperties": false}
+			},
+			edit: func(s bson.M) bson.M {
+				return addProperty(s, "a", bson.M{"bsonType": "int"}, false)
+			},
+			want: bson.M{
+				"bsonType":             "object",
+				"properties":           bson.M{"a": bson.M{"bsonType": "int"}},
+				"additionalProperties": false,
+			},
+		},
+		{
+			name: "drop an optional property",
+			before: func() bson.M {
+				return bson.M{
+					"properties": bson.M{"a": bson.M{"bsonType": "int"}, "b": bson.M{"bsonType": "int"}},
+					"required":   []string{"a"},
+				}
+			},
+			edit: func(s bson.M) bson.M { return dropProperty(s, "b") },
+			want: bson.M{
+				"properties": bson.M{"a": bson.M{"bsonType": "int"}},
+				"required":   []string{"a"},
+			},
+		},
+		{
+			name: "drop a required property that others share the list with",
+			before: func() bson.M {
+				return bson.M{
+					"properties": bson.M{"a": bson.M{"bsonType": "int"}, "b": bson.M{"bsonType": "int"}},
+					"required":   bson.A{"a", "b"},
+				}
+			},
+			edit: func(s bson.M) bson.M { return dropProperty(s, "a") },
+			want: bson.M{
+				"properties": bson.M{"b": bson.M{"bsonType": "int"}},
+				"required":   []string{"b"},
+			},
+		},
+		{
+			name: "drop the last required property removes the list",
+			before: func() bson.M {
+				// An empty required list is itself a validator error.
+				return bson.M{
+					"properties": bson.M{"a": bson.M{"bsonType": "int"}},
+					"required":   []string{"a"},
+				}
+			},
+			edit: func(s bson.M) bson.M { return dropProperty(s, "a") },
+			want: bson.M{"properties": bson.M{}},
+		},
+		{
+			name: "drop a property the schema does not list",
+			before: func() bson.M {
+				return bson.M{"properties": bson.M{"a": bson.M{"bsonType": "int"}}}
+			},
+			edit: func(s bson.M) bson.M { return dropProperty(s, "zzz") },
+			want: bson.M{"properties": bson.M{"a": bson.M{"bsonType": "int"}}},
+		},
+		{
+			name:   "drop from a schema with no properties",
+			before: func() bson.M { return bson.M{"bsonType": "object"} },
+			edit:   func(s bson.M) bson.M { return dropProperty(s, "a") },
+			want:   bson.M{"bsonType": "object"},
+		},
+		{
+			name: "rename an optional property",
+			before: func() bson.M {
+				return bson.M{
+					"properties": bson.M{"a": bson.M{"bsonType": "int"}, "b": bson.M{"bsonType": "string"}},
+					"required":   []string{"b"},
+				}
+			},
+			edit: func(s bson.M) bson.M { return renameProperty(s, "a", "c") },
+			want: bson.M{
+				"properties": bson.M{"c": bson.M{"bsonType": "int"}, "b": bson.M{"bsonType": "string"}},
+				"required":   []string{"b"},
+			},
+		},
+		{
+			name: "rename a required property in place",
+			before: func() bson.M {
+				return bson.M{
+					"properties": bson.M{"a": bson.M{"bsonType": "int"}, "b": bson.M{"bsonType": "string"}},
+					"required":   bson.A{"a", "b"},
+				}
+			},
+			edit: func(s bson.M) bson.M { return renameProperty(s, "a", "c") },
+			want: bson.M{
+				"properties": bson.M{"c": bson.M{"bsonType": "int"}, "b": bson.M{"bsonType": "string"}},
+				"required":   []string{"c", "b"},
+			},
+		},
+		{
+			name: "rename onto a name that is already required",
+			before: func() bson.M {
+				return bson.M{
+					"properties": bson.M{"a": bson.M{"bsonType": "int"}},
+					"required":   []string{"a", "c"},
+				}
+			},
+			edit: func(s bson.M) bson.M { return renameProperty(s, "a", "c") },
+			want: bson.M{
+				"properties": bson.M{"c": bson.M{"bsonType": "int"}},
+				"required":   []string{"c"},
+			},
+		},
+		{
+			name: "rename a property the schema does not list",
+			before: func() bson.M {
+				return bson.M{"properties": bson.M{"a": bson.M{"bsonType": "int"}}, "required": []string{"a"}}
+			},
+			edit: func(s bson.M) bson.M { return renameProperty(s, "zzz", "c") },
+			want: bson.M{"properties": bson.M{"a": bson.M{"bsonType": "int"}}, "required": []string{"a"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := tt.before()
+
+			got := tt.edit(input)
+
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.before(), input, "the edit must not touch its input")
+		})
+	}
+}
+
+func TestValidatorEdits_nilSchema(t *testing.T) {
+	// A validator can be read back with nothing in it. The helpers still have to
+	// hand back something a collMod can carry.
+	got := addProperty(nil, "a", bson.M{"bsonType": "int"}, true)
+
+	assert.Equal(t, bson.M{
+		"properties": bson.M{"a": bson.M{"bsonType": "int"}},
+		"required":   []string{"a"},
+	}, got)
+}
+
+func TestHasProperty(t *testing.T) {
+	schema := bson.M{"properties": bson.M{"a": bson.M{"bsonType": "int"}}, "required": []string{"b"}}
+
+	assert.True(t, hasProperty(schema, "a"))
+	assert.False(t, hasProperty(schema, "b"), "a required name with no property is not a property")
+	assert.False(t, hasProperty(bson.M{"bsonType": "object"}, "a"))
+	assert.False(t, hasProperty(nil, "a"))
+}
+
+func TestDecodeValidator(t *testing.T) {
+	collectionOptions := func(t *testing.T, doc bson.M) bson.Raw {
+		t.Helper()
+		raw, err := bson.Marshal(doc)
+		require.NoError(t, err)
+		return raw
+	}
+
+	t.Run("a collection with no options", func(t *testing.T) {
+		got, err := decodeValidator(nil)
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+
+	t.Run("options without a validator", func(t *testing.T) {
+		got, err := decodeValidator(collectionOptions(t, bson.M{"capped": true}))
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+
+	t.Run("nested documents come back as maps and lists as arrays", func(t *testing.T) {
+		got, err := decodeValidator(collectionOptions(t, bson.M{
+			"validator": bson.M{"$jsonSchema": bson.M{
+				"bsonType":   "object",
+				"properties": bson.M{"a": bson.M{"bsonType": bson.A{"string", "null"}}},
+				"required":   bson.A{"a"},
+			}},
+		}))
+		require.NoError(t, err)
+
+		schema := jsonSchemaOf(got)
+		require.NotNil(t, schema)
+		assert.True(t, hasProperty(schema, "a"), "properties must decode as a bson.M, got %T", schema["properties"])
+		assert.Equal(t, []string{"a"}, requiredOf(schema))
+	})
+
+	t.Run("a validator that is not a json schema", func(t *testing.T) {
+		got, err := decodeValidator(collectionOptions(t, bson.M{
+			"validator": bson.M{"a": bson.M{"$gt": 1}},
+		}))
+		require.NoError(t, err)
+
+		require.NotNil(t, got)
+		assert.Nil(t, jsonSchemaOf(got), "only a $jsonSchema validator is edited")
+	})
+
+	t.Run("a validator that is not a document", func(t *testing.T) {
+		_, err := decodeValidator(collectionOptions(t, bson.M{"validator": "nope"}))
+		require.Error(t, err)
 	})
 }
