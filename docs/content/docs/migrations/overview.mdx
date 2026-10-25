@@ -13,7 +13,7 @@ Grove migrations are Go code, not SQL files. Any Go module can register migratio
 - Groups: migrations belong to named groups (for example `"core"` or `"forge.billing"`).
 - Dependencies: a group declares the groups it depends on with `migrate.DependsOn`.
 - Ordering: the orchestrator sorts groups by dependency, then migrations by version.
-- Transactions: on PostgreSQL, a migration and the row that records it run in one transaction, unless you opt out with `migrate.NoTransaction()`.
+- Transactions: on PostgreSQL, a migration registered with `Add` or `Define` and the row that records it run in one transaction, unless you opt out with `migrate.NoTransaction()`. Struct migrations run without one unless they set `Transactional: true`.
 - Locking: a lock stops two processes from migrating at once (an advisory lock on PostgreSQL and MySQL, a row in `grove_migration_locks` on SQLite and the others).
 
 ## Defining Migrations
@@ -54,7 +54,7 @@ The `*migrate.DB` your functions receive has schema builders, plus `Exec` and `Q
 A file whose name ends in `_test`, or in a GOOS or GOARCH name such as `_linux`, `_arm64` or `_js`, is left out of the build by the Go toolchain. A migration in one of those files never registers, and nothing tells you.
 </Callout>
 
-If you'd rather spell out the version yourself, or you need the raw executor, register a struct. It receives a `migrate.Executor`, doesn't run in a transaction by default, and writes its statements by hand:
+If you'd rather spell out the version yourself, or you need the raw executor, register a struct. It receives a `migrate.Executor` and doesn't run in a transaction unless you set `Transactional: true`. You can write its statements by hand, as below, or wrap the executor with `migrate.NewDB(exec)` to use the builders (see [Struct Migrations](/docs/migrations/builders#struct-migrations)):
 
 ```go
 func init() {
@@ -81,7 +81,7 @@ func init() {
 
 ## Running Migrations
 
-The orchestrator runs your migrations through a `migrate.Executor`, which has `Exec` and `Query` for raw SQL (plus the tracking and lock methods it uses itself). Migrations written with `Add` or `Define` get that executor wrapped in a `*migrate.DB`, which puts the schema builders on top. Struct migrations get the executor as it is, so they write SQL by hand, or BSON commands for MongoDB.
+The orchestrator runs your migrations through a `migrate.Executor`, which has `Exec` and `Query` for raw SQL (plus the tracking and lock methods it uses itself). Migrations written with `Add` or `Define` get that executor wrapped in a `*migrate.DB`, which puts the schema builders on top. Struct migrations get the executor as it is. They can write SQL by hand (or BSON commands for MongoDB), or wrap it with `migrate.NewDB(exec)` to reach the builders.
 
 ```go
 import "github.com/xraph/grove/drivers/pgdriver/pgmigrate"

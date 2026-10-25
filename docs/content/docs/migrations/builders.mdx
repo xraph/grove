@@ -208,7 +208,7 @@ The referential actions are `migrate.NoAction`, `migrate.Restrict`, `migrate.Cas
 | `migrate.SmallInt` | `SMALLINT` | `int` |
 | `migrate.Integer` | `INTEGER` | `int` |
 | `migrate.BigInt` | `BIGINT` | `long` |
-| `migrate.BigSerial` | `BIGSERIAL` | `long` |
+| `migrate.BigSerial` | `BIGSERIAL` | not supported, use `migrate.BigInt` |
 | `migrate.Boolean` | `BOOLEAN` | `bool` |
 | `migrate.Timestamp` | `TIMESTAMPTZ` | `date` |
 | `migrate.Date` | `DATE` | `date` |
@@ -219,6 +219,8 @@ The referential actions are `migrate.NoAction`, `migrate.Restrict`, `migrate.Cas
 | `migrate.Numeric(p, s)` | `NUMERIC(p, s)` | `decimal` |
 | `migrate.ArrayOf(t)` | the element type followed by `[]` | `array`, with `items` from `t` |
 | `migrate.Type("...")` | passed through as written | passed through as the `bsonType` |
+
+MongoDB has no auto-increment, so a `migrate.BigSerial` column, or an array of it, fails there with `migrate.ErrSchemaUnsupported`. Use `migrate.BigInt` and assign the value yourself.
 
 `migrate.Numeric(0, 0)` renders a bare `NUMERIC` with no limits. For anything the table doesn't name, `migrate.Type` hands the string to the driver untouched:
 
@@ -285,7 +287,7 @@ err := db.NewCreateIndex("projects_slug_lower_idx").
 | `Include(cols...)` | Adds non-key columns stored in the index. |
 | `Where(sql)` | Makes the index partial, with a SQL predicate. |
 | `Filter(doc)` | The document form of `Where`, for MongoDB's `partialFilterExpression`. |
-| `With(opts...)` | Passes driver-specific options. |
+| `With(opts...)` | Reserved for driver-specific index options. No driver accepts any today, so PostgreSQL and MongoDB both reject them. |
 
 `NewDropIndex(name)` takes `On(table)`, `IfExists()`, `Concurrently()` and `Cascade()`. PostgreSQL names indexes in the schema, so it doesn't need `On`. MongoDB scopes an index to its collection and does.
 
@@ -412,21 +414,7 @@ orch := migrate.NewOrchestrator(counting, Migrations)
 
 Embedding `migrate.Executor` only promotes the methods in that interface, and `DriverName` is not one of them. Without `Unwrap`, every builder fails with an error that wraps `migrate.ErrUnknownDriver` and names the wrapper's type. `Unwrap` is used just to find the driver. The statements still go through your wrapper, so the counter above sees all of them.
 
-Embedding does not promote `migrate.TxExecutor` either. An orchestrator built on a wrapper like this one runs every migration without a transaction, so a failed migration leaves its earlier statements behind. If you want the transaction back, forward the three methods to the executor inside:
-
-```go
-func (c *countingExecutor) BeginTx(ctx context.Context) error {
-    return c.Executor.(migrate.TxExecutor).BeginTx(ctx)
-}
-
-func (c *countingExecutor) CommitTx(ctx context.Context) error {
-    return c.Executor.(migrate.TxExecutor).CommitTx(ctx)
-}
-
-func (c *countingExecutor) RollbackTx(ctx context.Context) error {
-    return c.Executor.(migrate.TxExecutor).RollbackTx(ctx)
-}
-```
+The same `Unwrap` keeps your transactions. The orchestrator looks for `migrate.TxExecutor` through the wrapper chain, so a migration registered with `Add` or `Define` still runs in one transaction on PostgreSQL. Its statements and its applied record still pass through your wrapper, which hands them to the executor inside. You don't forward `BeginTx`, `CommitTx` or `RollbackTx` yourself. A wrapper with no `Unwrap` hides the transactions along with the driver, and the orchestrator runs every migration without one.
 
 ## Driver Details
 
