@@ -23,10 +23,19 @@ import (
 )
 
 func init() {
-	migrate.RegisterExecutor("mongo", func(drv any) migrate.Executor {
-		return New(drv.(*mongodriver.MongoDB))
+	migrate.RegisterExecutor(driverName, func(drv any) migrate.Executor {
+		db, ok := drv.(*mongodriver.MongoDB)
+		if !ok {
+			return unusableExecutor{err: fmt.Errorf("mongomigrate: %T is not a *mongodriver.MongoDB", drv)}
+		}
+		return New(db)
 	})
+	migrate.RegisterRenderer(driverName, Renderer{})
 }
+
+// driverName is what migrate.Unsupported reports and what the executor
+// answers to, so an error names the same driver a caller registered.
+const driverName = "mongo"
 
 const (
 	migrationCollectionName = "grove_migrations"
@@ -39,7 +48,10 @@ type Executor struct {
 	db *mongodriver.MongoDB
 }
 
-var _ migrate.Executor = (*Executor)(nil)
+var (
+	_ migrate.Executor    = (*Executor)(nil)
+	_ migrate.DriverNamer = (*Executor)(nil)
+)
 
 // New creates a new MongoDB migration executor.
 func New(db *mongodriver.MongoDB) *Executor {
@@ -49,14 +61,14 @@ func New(db *mongodriver.MongoDB) *Executor {
 // Exec is not supported for MongoDB migrations. MongoDB migrations should
 // use the mongodriver API directly within their Up/Down functions instead
 // of raw SQL. This method returns ErrNotSupported.
-func (e *Executor) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
+func (e *Executor) Exec(_ context.Context, _ string, _ ...any) (driver.Result, error) {
 	return nil, mongodriver.ErrNotSupported
 }
 
 // Query is not supported for MongoDB migrations. MongoDB migrations should
 // use the mongodriver API directly within their Up/Down functions instead
 // of raw SQL. This method returns ErrNotSupported.
-func (e *Executor) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+func (e *Executor) Query(_ context.Context, _ string, _ ...any) (driver.Rows, error) {
 	return nil, mongodriver.ErrNotSupported
 }
 
@@ -65,6 +77,10 @@ func (e *Executor) Query(ctx context.Context, query string, args ...any) (driver
 func (e *Executor) DB() *mongodriver.MongoDB {
 	return e.db
 }
+
+// DriverName reports the driver this executor runs on. The schema builders
+// use it to find this package's renderer.
+func (e *Executor) DriverName() string { return driverName }
 
 // EnsureMigrationTable creates the grove_migrations collection if it
 // doesn't exist and ensures the necessary indexes.
@@ -261,3 +277,32 @@ type migrationDoc struct {
 	Group      string        `bson:"group"`
 	MigratedAt time.Time     `bson:"migrated_at"`
 }
+
+// unusableExecutor is what the factory returns for a driver that isn't a
+// *mongodriver.MongoDB. The factory has no error to return: a nil Executor
+// comes back from migrate.NewExecutorFor with a nil error, and the
+// orchestrator would dereference it on its first call. Failing every method
+// with the reason surfaces the mistake from the orchestrator's first step.
+type unusableExecutor struct{ err error }
+
+var _ migrate.Executor = unusableExecutor{}
+
+func (u unusableExecutor) Exec(context.Context, string, ...any) (driver.Result, error) {
+	return nil, u.err
+}
+
+func (u unusableExecutor) Query(context.Context, string, ...any) (driver.Rows, error) {
+	return nil, u.err
+}
+
+func (u unusableExecutor) EnsureMigrationTable(context.Context) error { return u.err }
+func (u unusableExecutor) EnsureLockTable(context.Context) error      { return u.err }
+func (u unusableExecutor) AcquireLock(context.Context, string) error  { return u.err }
+func (u unusableExecutor) ReleaseLock(context.Context) error          { return u.err }
+
+func (u unusableExecutor) ListApplied(context.Context) ([]*migrate.AppliedMigration, error) {
+	return nil, u.err
+}
+
+func (u unusableExecutor) RecordApplied(context.Context, *migrate.Migration) error { return u.err }
+func (u unusableExecutor) RemoveApplied(context.Context, *migrate.Migration) error { return u.err }
