@@ -17,9 +17,14 @@ import (
 )
 
 func init() {
-	migrate.RegisterExecutor("pg", func(drv any) migrate.Executor {
-		return New(drv.(driver.Driver))
+	migrate.RegisterExecutor(driverName, func(drv any) migrate.Executor {
+		d, ok := drv.(driver.Driver)
+		if !ok {
+			return unusableExecutor{err: fmt.Errorf("pgmigrate: %T does not implement driver.Driver", drv)}
+		}
+		return New(d)
 	})
+	migrate.RegisterRenderer(driverName, Renderer{})
 }
 
 const (
@@ -34,13 +39,22 @@ const (
 // operations through it until [ReleaseLock]. This guarantees that the
 // session-level pg_try_advisory_lock is acquired and released on the same
 // connection, preventing advisory-lock leaks in pooled environments.
+//
+// That same connection carries the transaction a migration runs in (see
+// [Executor.BeginTx]), which is why the transaction lives here and not with
+// the caller: every statement has to land on the session that holds the lock.
 type Executor struct {
 	drv       driver.Driver
 	dedicated driver.DedicatedConn // non-nil while migration lock is held
+	inTx      bool                 // a BEGIN on dedicated has not been committed or rolled back
 }
 
-var _ migrate.Executor = (*Executor)(nil)
-var _ migrate.LockInspector = (*Executor)(nil)
+var (
+	_ migrate.Executor      = (*Executor)(nil)
+	_ migrate.LockInspector = (*Executor)(nil)
+	_ migrate.TxExecutor    = (*Executor)(nil)
+	_ migrate.DriverNamer   = (*Executor)(nil)
+)
 
 // New creates a new PostgreSQL migration executor.
 func New(drv driver.Driver) *Executor {
@@ -71,6 +85,7 @@ func (e *Executor) queryRow(ctx context.Context, query string, args ...any) driv
 }
 
 func (e *Executor) releaseDedicated() {
+	e.inTx = false
 	if e.dedicated != nil {
 		// Safety net: release ALL advisory locks held on this session before
 		// returning the connection to the pool. This prevents lock leaks if
@@ -79,6 +94,60 @@ func (e *Executor) releaseDedicated() {
 		e.dedicated.Release()
 		e.dedicated = nil
 	}
+}
+
+// DriverName reports the driver this executor runs on. The builders use it to
+// pick the schema renderer registered for Postgres.
+func (e *Executor) DriverName() string { return driverName }
+
+// BeginTx opens a transaction on the connection that holds the migration lock.
+// Exec, Query, RecordApplied and RemoveApplied all prefer that connection, so
+// until CommitTx or RollbackTx they run inside the transaction.
+//
+// Without a dedicated connection the transaction and the lock can't share a
+// session, so BeginTx returns [migrate.ErrTxUnsupported] and the migration
+// runs without one.
+func (e *Executor) BeginTx(ctx context.Context) error {
+	if e.dedicated == nil {
+		return migrate.ErrTxUnsupported
+	}
+	if e.inTx {
+		return errors.New("pgmigrate: begin: a transaction is already open")
+	}
+	if _, err := e.dedicated.Exec(ctx, "BEGIN"); err != nil {
+		return fmt.Errorf("pgmigrate: begin: %w", err)
+	}
+	e.inTx = true
+	return nil
+}
+
+// CommitTx commits the transaction BeginTx opened.
+func (e *Executor) CommitTx(ctx context.Context) error {
+	if !e.inTx || e.dedicated == nil {
+		return errors.New("pgmigrate: commit: no transaction is open")
+	}
+	if _, err := e.dedicated.Exec(ctx, "COMMIT"); err != nil {
+		// The transaction may still be open (a dropped connection) or already
+		// over (a deferred constraint failed at commit). Leave it marked open
+		// so RollbackTx, which the orchestrator calls next, settles it either way.
+		return fmt.Errorf("pgmigrate: commit: %w", err)
+	}
+	e.inTx = false
+	return nil
+}
+
+// RollbackTx abandons the transaction BeginTx opened. It does nothing when
+// none is open: the orchestrator calls it after a failed CommitTx, and by then
+// Postgres may have ended the transaction itself.
+func (e *Executor) RollbackTx(ctx context.Context) error {
+	if !e.inTx || e.dedicated == nil {
+		return nil
+	}
+	if _, err := e.dedicated.Exec(ctx, "ROLLBACK"); err != nil {
+		return fmt.Errorf("pgmigrate: rollback: %w", err)
+	}
+	e.inTx = false
+	return nil
 }
 
 // Exec executes a SQL statement that does not return rows.
@@ -199,6 +268,11 @@ func (e *Executor) ReleaseLock(ctx context.Context) error {
 	// even if the caller's context was cancelled mid-migration.
 	cleanCtx := context.WithoutCancel(ctx)
 
+	// A transaction nobody settled would swallow the record update below and
+	// hand a dirty connection back to the pool. The orchestrator always ends
+	// its own, so this only catches a caller driving the executor by hand.
+	_ = e.RollbackTx(cleanCtx) //nolint:errcheck // best-effort, the connection goes back to the pool next
+
 	// Clear the lock record.
 	query := fmt.Sprintf(`UPDATE %s SET locked_at = NULL, locked_by = NULL WHERE id = 1`,
 		lockTableName)
@@ -282,3 +356,32 @@ func (e *Executor) RemoveApplied(ctx context.Context, m *migrate.Migration) erro
 	_, err := e.exec(ctx, query, m.Version, m.Group)
 	return err
 }
+
+// unusableExecutor is what the factory returns for a driver that isn't a
+// driver.Driver. The factory has no error to return: a nil Executor comes back
+// from migrate.NewExecutorFor with a nil error, and the orchestrator would
+// dereference it on its first call. Failing every method with the reason
+// surfaces the mistake from the orchestrator's first step instead.
+type unusableExecutor struct{ err error }
+
+var _ migrate.Executor = unusableExecutor{}
+
+func (u unusableExecutor) Exec(context.Context, string, ...any) (driver.Result, error) {
+	return nil, u.err
+}
+
+func (u unusableExecutor) Query(context.Context, string, ...any) (driver.Rows, error) {
+	return nil, u.err
+}
+
+func (u unusableExecutor) EnsureMigrationTable(context.Context) error { return u.err }
+func (u unusableExecutor) EnsureLockTable(context.Context) error      { return u.err }
+func (u unusableExecutor) AcquireLock(context.Context, string) error  { return u.err }
+func (u unusableExecutor) ReleaseLock(context.Context) error          { return u.err }
+
+func (u unusableExecutor) ListApplied(context.Context) ([]*migrate.AppliedMigration, error) {
+	return nil, u.err
+}
+
+func (u unusableExecutor) RecordApplied(context.Context, *migrate.Migration) error { return u.err }
+func (u unusableExecutor) RemoveApplied(context.Context, *migrate.Migration) error { return u.err }
