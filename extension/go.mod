@@ -7,7 +7,7 @@ replace github.com/xraph/grove => ../
 require (
 	github.com/xraph/forge v1.12.10
 	github.com/xraph/go-utils v1.4.1
-	github.com/xraph/grove v1.9.0
+	github.com/xraph/grove v1.10.0
 	github.com/xraph/vessel v1.0.4
 	go.opentelemetry.io/otel v1.45.0
 	go.opentelemetry.io/otel/sdk v1.45.0
