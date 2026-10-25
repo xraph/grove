@@ -200,7 +200,7 @@ func (e *Executor) createFromModel(ctx context.Context, op *migrate.CreateTable,
 	}
 
 	if execErr := q.Exec(ctx); execErr != nil {
-		return fmt.Errorf("mongomigrate: create table %s: %w", op.Table, execErr)
+		return fmt.Errorf("mongomigrate: create table %q: %w", op.Table, execErr)
 	}
 	return nil
 }
@@ -225,7 +225,7 @@ func (e *Executor) createFromColumns(ctx context.Context, op *migrate.CreateTabl
 	}
 
 	if createErr := e.db.Database().CreateCollection(ctx, op.Table, create); createErr != nil {
-		return fmt.Errorf("mongomigrate: create table %s: %w", op.Table, createErr)
+		return fmt.Errorf("mongomigrate: create table %q: %w", op.Table, createErr)
 	}
 	return nil
 }
@@ -236,17 +236,26 @@ func (e *Executor) createFromColumns(ctx context.Context, op *migrate.CreateTabl
 // IfNotExists quietly pass or fail depending on whether the validator
 // happened to match. Checking first makes it fail every time.
 func (e *Executor) skipExisting(ctx context.Context, op *migrate.CreateTable) (bool, error) {
-	names, err := e.db.Database().ListCollectionNames(ctx, bson.M{"name": op.Table})
+	exists, err := e.collectionExists(ctx, op.Table)
 	if err != nil {
-		return false, fmt.Errorf("mongomigrate: create table %s: list collections: %w", op.Table, err)
+		return false, fmt.Errorf("mongomigrate: create table %q: %w", op.Table, err)
 	}
-	if len(names) == 0 {
+	if !exists {
 		return false, nil
 	}
 	if op.IfNotExists {
 		return true, nil
 	}
-	return false, fmt.Errorf("mongomigrate: create table %s: collection already exists", op.Table)
+	return false, fmt.Errorf("mongomigrate: create table %q: collection already exists", op.Table)
+}
+
+// collectionExists asks the server whether the collection is there.
+func (e *Executor) collectionExists(ctx context.Context, name string) (bool, error) {
+	names, err := e.db.Database().ListCollectionNames(ctx, bson.M{"name": name})
+	if err != nil {
+		return false, fmt.Errorf("list collections: %w", err)
+	}
+	return len(names) > 0, nil
 }
 
 // jsonSchema builds the $jsonSchema validator for a table declared with
@@ -371,10 +380,22 @@ func (e *Executor) dropCollection(ctx context.Context, op *migrate.DropTable) er
 		return invalid("drop table needs a name")
 	}
 
-	// Dropping a collection that isn't there succeeds on Mongo, so IfExists
-	// has nothing left to guard and there is no error to tell apart.
-	if err := e.db.Collection(op.Table).Drop(ctx); err != nil {
-		return fmt.Errorf("mongomigrate: drop table %s: %w", op.Table, err)
+	// Mongo 7 drops a missing collection without complaint, so the check is
+	// ours: without IfExists a collection that isn't there is an error, as
+	// DROP TABLE is on Postgres.
+	exists, err := e.collectionExists(ctx, op.Table)
+	if err != nil {
+		return fmt.Errorf("mongomigrate: drop table %q: %w", op.Table, err)
+	}
+	if !exists {
+		if op.IfExists {
+			return nil
+		}
+		return fmt.Errorf("mongomigrate: drop table %q: collection does not exist", op.Table)
+	}
+
+	if dropErr := e.db.Collection(op.Table).Drop(ctx); dropErr != nil {
+		return fmt.Errorf("mongomigrate: drop table %q: %w", op.Table, dropErr)
 	}
 	return nil
 }
@@ -385,27 +406,39 @@ func (e *Executor) createIndex(ctx context.Context, op *migrate.CreateIndex) err
 		return err
 	}
 
-	// Mongo already treats creating an identical index as a no-op, but one
-	// with the same name and another definition is an error. IfNotExists
-	// skips by name alone, as it does on Postgres.
-	if op.IfNotExists {
-		exists, existsErr := e.indexExists(ctx, op.Table, op.Name)
-		if existsErr != nil {
-			return fmt.Errorf("mongomigrate: create index %s on %s: %w", op.Name, op.Table, existsErr)
-		}
-		if exists {
+	// createIndexes would make the collection for an index on one that isn't
+	// there, with no validator, so a typo in On would succeed while the real
+	// collection never got its index. Postgres refuses an index on a missing
+	// table, and so does this.
+	collExists, err := e.collectionExists(ctx, op.Table)
+	if err != nil {
+		return fmt.Errorf("mongomigrate: create index %q on %q: %w", op.Name, op.Table, err)
+	}
+	if !collExists {
+		return fmt.Errorf("mongomigrate: create index %q on %q: collection does not exist", op.Name, op.Table)
+	}
+
+	// Mongo treats creating an identical index as a no-op, so the server
+	// can't be left to fail it. A same-name index counts whatever its
+	// definition, as it does on Postgres.
+	idxExists, err := e.indexExists(ctx, op.Table, op.Name)
+	if err != nil {
+		return fmt.Errorf("mongomigrate: create index %q on %q: %w", op.Name, op.Table, err)
+	}
+	if idxExists {
+		if op.IfNotExists {
 			return nil
 		}
+		return fmt.Errorf("mongomigrate: create index %q on %q: index already exists", op.Name, op.Table)
 	}
 
 	if _, createErr := e.db.Collection(op.Table).Indexes().CreateOne(ctx, model); createErr != nil {
-		return fmt.Errorf("mongomigrate: create index %s on %s: %w", op.Name, op.Table, createErr)
+		return fmt.Errorf("mongomigrate: create index %q on %q: %w", op.Name, op.Table, createErr)
 	}
 	return nil
 }
 
 func (e *Executor) indexExists(ctx context.Context, collection, name string) (bool, error) {
-	// A collection that doesn't exist yet lists no indexes rather than failing.
 	specs, err := e.db.Collection(collection).Indexes().ListSpecifications(ctx)
 	if err != nil {
 		return false, err
@@ -489,7 +522,7 @@ func (e *Executor) dropIndex(ctx context.Context, op *migrate.DropIndex) error {
 		if op.IfExists && (hasCode(err, codeIndexNotFound) || hasCode(err, codeNamespaceNotFound)) {
 			return nil
 		}
-		return fmt.Errorf("mongomigrate: drop index %s on %s: %w", op.Name, op.Table, err)
+		return fmt.Errorf("mongomigrate: drop index %q on %q: %w", op.Name, op.Table, err)
 	}
 	return nil
 }

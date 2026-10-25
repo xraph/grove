@@ -344,7 +344,7 @@ func TestLive_createCollectionIfNotExists(t *testing.T) {
 			return db.NewCreateTable("things").Column("other", migrate.Text).Exec(ctx)
 		}))
 		require.Error(t, err)
-		assert.ErrorContains(t, err, "create table things")
+		assert.ErrorContains(t, err, `create table "things"`)
 	})
 
 	t.Run("without IfNotExists an identical collection is an error too", func(t *testing.T) {
@@ -354,7 +354,7 @@ func TestLive_createCollectionIfNotExists(t *testing.T) {
 			return db.NewCreateTable("things").Column("name", migrate.Text, migrate.NotNull()).Exec(ctx)
 		}))
 		require.Error(t, err)
-		assert.ErrorContains(t, err, "create table things: collection already exists")
+		assert.ErrorContains(t, err, `create table "things": collection already exists`)
 	})
 
 	t.Run("with IfNotExists it is skipped and the validator stays", func(t *testing.T) {
@@ -379,7 +379,7 @@ func TestLive_createCollectionFromModelIfNotExists(t *testing.T) {
 
 	err := db.NewCreateTable("model_users").Model((*modelUser)(nil)).Exec(ctx)
 	require.Error(t, err)
-	assert.ErrorContains(t, err, "create table model_users: collection already exists")
+	assert.ErrorContains(t, err, `create table "model_users": collection already exists`)
 
 	require.NoError(t, db.NewCreateTable("model_users").IfNotExists().Model((*modelUser)(nil)).Exec(ctx))
 }
@@ -398,13 +398,20 @@ func TestLive_dropTable(t *testing.T) {
 	require.NoError(t, db.NewDropTable("gone").Exec(ctx))
 	assert.Nil(t, collectionInfo(t, mdb, "gone"))
 
-	// Mongo drops a missing collection without complaint, so IfExists changes
-	// nothing and neither form fails.
+	// Mongo 7 drops a missing collection without complaint, so the error
+	// without IfExists has to come from the renderer.
 	t.Run("a missing collection with IfExists", func(t *testing.T) {
 		require.NoError(t, db.NewDropTable("gone").IfExists().Exec(ctx))
 	})
 	t.Run("a missing collection without IfExists", func(t *testing.T) {
-		require.NoError(t, db.NewDropTable("gone").Exec(ctx))
+		err := db.NewDropTable("gone").Exec(ctx)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `drop table "gone": collection does not exist`)
+	})
+	t.Run("an existing collection with IfExists", func(t *testing.T) {
+		require.NoError(t, db.NewCreateTable("gone").Column("a", migrate.Text).Exec(ctx))
+		require.NoError(t, db.NewDropTable("gone").IfExists().Exec(ctx))
+		assert.Nil(t, collectionInfo(t, mdb, "gone"))
 	})
 }
 
@@ -473,7 +480,7 @@ func TestLive_indexes(t *testing.T) {
 	})
 }
 
-func TestLive_createIndexIfNotExists(t *testing.T) {
+func TestLive_createIndexExistence(t *testing.T) {
 	ctx := context.Background()
 	mdb := openLive(t)
 	db := migrate.NewDB(New(mdb))
@@ -481,7 +488,7 @@ func TestLive_createIndexIfNotExists(t *testing.T) {
 	require.NoError(t, db.NewCreateTable("things").Column("a", migrate.Text).Column("b", migrate.Text).Exec(ctx))
 	require.NoError(t, db.NewCreateIndex("things_a").On("things").Columns("a").Exec(ctx))
 
-	t.Run("an index of that name is skipped even when it differs", func(t *testing.T) {
+	t.Run("an index of that name is skipped under IfNotExists even when it differs", func(t *testing.T) {
 		err := db.NewCreateIndex("things_a").IfNotExists().On("things").Columns("b").Unique().Exec(ctx)
 		require.NoError(t, err)
 
@@ -490,15 +497,36 @@ func TestLive_createIndexIfNotExists(t *testing.T) {
 		assert.Equal(t, "a", key[0].Key, "the existing index is untouched")
 	})
 
+	t.Run("an identical index is skipped under IfNotExists", func(t *testing.T) {
+		require.NoError(t, db.NewCreateIndex("things_a").IfNotExists().On("things").Columns("a").Exec(ctx))
+	})
+
+	t.Run("without IfNotExists an identical index is an error", func(t *testing.T) {
+		// Mongo would accept this as a no-op, so the failure has to come from
+		// the renderer.
+		err := db.NewCreateIndex("things_a").On("things").Columns("a").Exec(ctx)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `create index "things_a" on "things": index already exists`)
+	})
+
 	t.Run("without IfNotExists a clashing definition is an error", func(t *testing.T) {
 		err := db.NewCreateIndex("things_a").On("things").Columns("b").Unique().Exec(ctx)
 		require.Error(t, err)
-		assert.ErrorContains(t, err, "create index things_a")
+		assert.ErrorContains(t, err, `create index "things_a" on "things": index already exists`)
 	})
 
-	t.Run("a missing collection is created by the first index", func(t *testing.T) {
-		require.NoError(t, db.NewCreateIndex("fresh_a").IfNotExists().On("fresh").Columns("a").Exec(ctx))
-		assert.Contains(t, indexDocs(t, mdb, "fresh"), "fresh_a")
+	t.Run("a missing collection is an error with or without IfNotExists", func(t *testing.T) {
+		// createIndexes would otherwise make the collection, with no validator,
+		// and a typo in On would pass while the real collection kept no index.
+		for name, build := range map[string]func() *migrate.CreateIndexQuery{
+			"plain":       func() *migrate.CreateIndexQuery { return db.NewCreateIndex("typo_a") },
+			"IfNotExists": func() *migrate.CreateIndexQuery { return db.NewCreateIndex("typo_a").IfNotExists() },
+		} {
+			err := build().On("thngs").Columns("a").Exec(ctx)
+			require.Error(t, err, name)
+			assert.ErrorContains(t, err, `create index "typo_a" on "thngs": collection does not exist`, name)
+		}
+		assert.Nil(t, collectionInfo(t, mdb, "thngs"), "no collection is made as a side effect")
 	})
 }
 
@@ -516,7 +544,7 @@ func TestLive_dropIndexIfExists(t *testing.T) {
 	t.Run("a missing index without IfExists", func(t *testing.T) {
 		err := db.NewDropIndex("nope").On("things").Exec(ctx)
 		require.Error(t, err)
-		assert.ErrorContains(t, err, "drop index nope")
+		assert.ErrorContains(t, err, `drop index "nope"`)
 	})
 	t.Run("an index on a missing collection with IfExists", func(t *testing.T) {
 		require.NoError(t, db.NewDropIndex("nope").On("no_such_collection").IfExists().Exec(ctx))
