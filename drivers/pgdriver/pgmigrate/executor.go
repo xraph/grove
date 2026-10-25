@@ -136,9 +136,10 @@ func (e *Executor) CommitTx(ctx context.Context) error {
 	return nil
 }
 
-// RollbackTx abandons the transaction BeginTx opened. It does nothing when
-// none is open: the orchestrator calls it after a failed CommitTx, and by then
-// Postgres may have ended the transaction itself.
+// RollbackTx abandons the transaction BeginTx opened. It returns nil when none
+// is open. After a failed CommitTx the transaction still counts as open, so it
+// sends ROLLBACK anyway, which Postgres answers with a warning, not an error,
+// when the server has already ended the transaction.
 func (e *Executor) RollbackTx(ctx context.Context) error {
 	if !e.inTx || e.dedicated == nil {
 		return nil
