@@ -595,9 +595,14 @@ func TestRender_dropIndex(t *testing.T) {
 		{"concurrently", &migrate.DropIndex{Name: "i", Concurrently: true}, `DROP INDEX CONCURRENTLY "i"`},
 		{"cascade", &migrate.DropIndex{Name: "i", Cascade: true}, `DROP INDEX "i" CASCADE`},
 		{
-			"every clause",
-			&migrate.DropIndex{Name: "i", IfExists: true, Concurrently: true, Cascade: true},
-			`DROP INDEX CONCURRENTLY IF EXISTS "i" CASCADE`,
+			"concurrently if exists",
+			&migrate.DropIndex{Name: "i", IfExists: true, Concurrently: true},
+			`DROP INDEX CONCURRENTLY IF EXISTS "i"`,
+		},
+		{
+			"if exists cascade",
+			&migrate.DropIndex{Name: "i", IfExists: true, Cascade: true},
+			`DROP INDEX IF EXISTS "i" CASCADE`,
 		},
 		{"table is not needed", &migrate.DropIndex{Name: "i", Table: "t"}, `DROP INDEX "i"`},
 		{"reserved word", &migrate.DropIndex{Name: "order"}, `DROP INDEX "order"`},
@@ -611,9 +616,43 @@ func TestRender_dropIndex(t *testing.T) {
 }
 
 func TestRender_dropIndex_fromBuilder(t *testing.T) {
-	op, err := migrate.NewDB(nil).NewDropIndex("i").On("t").IfExists().Concurrently().Cascade().Operation()
+	op, err := migrate.NewDB(nil).NewDropIndex("i").On("t").IfExists().Concurrently().Operation()
 	require.NoError(t, err)
-	assert.Equal(t, `DROP INDEX CONCURRENTLY IF EXISTS "i" CASCADE`, renderOne(t, op))
+	assert.Equal(t, `DROP INDEX CONCURRENTLY IF EXISTS "i"`, renderOne(t, op))
+}
+
+// Postgres refuses CASCADE together with CONCURRENTLY, so the pair is caught
+// here instead of failing partway through a migration.
+func TestRender_dropIndex_rejectsConcurrentlyWithCascade(t *testing.T) {
+	built, err := migrate.NewDB(nil).NewDropIndex("i").IfExists().Concurrently().Cascade().Operation()
+	require.NoError(t, err)
+
+	tests := []struct {
+		name string
+		op   *migrate.DropIndex
+	}{
+		{"hand-built", &migrate.DropIndex{Name: "i", Concurrently: true, Cascade: true}},
+		{"with if exists", &migrate.DropIndex{Name: "i", IfExists: true, Concurrently: true, Cascade: true}},
+		{"from the builder", built},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stmts, err := Render(tt.op)
+			require.Error(t, err)
+			assert.Nil(t, stmts)
+			assert.ErrorIs(t, err, migrate.ErrInvalidOperation)
+			assert.True(t, strings.HasPrefix(err.Error(), "pgmigrate: "), err.Error())
+			assert.Contains(t, err.Error(), "CASCADE with CONCURRENTLY")
+		})
+	}
+}
+
+func TestRenderer_Apply_concurrentlyWithCascadeDoesNotExecute(t *testing.T) {
+	exec := &recordingExec{}
+	err := Renderer{}.Apply(context.Background(), exec, &migrate.DropIndex{Name: "i", Concurrently: true, Cascade: true})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, migrate.ErrInvalidOperation)
+	assert.Empty(t, exec.stmts)
 }
 
 func TestRender_dropIndex_needsAName(t *testing.T) {

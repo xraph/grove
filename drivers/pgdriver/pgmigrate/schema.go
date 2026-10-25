@@ -402,6 +402,9 @@ func renderDropIndex(op *migrate.DropIndex) (string, error) {
 	if op.Name == "" {
 		return "", invalid("drop index needs a name")
 	}
+	if op.Concurrently && op.Cascade {
+		return "", invalidf("drop index %q: postgres does not allow CASCADE with CONCURRENTLY", op.Name)
+	}
 	// Table is for drivers that scope an index to a table. Postgres names
 	// indexes in the schema, so it plays no part here.
 	return "DROP INDEX " + optional(op.Concurrently, "CONCURRENTLY ") + optional(op.IfExists, "IF EXISTS ") +
