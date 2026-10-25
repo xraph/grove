@@ -538,25 +538,6 @@ func TestRender_rejectsMalformedOperations(t *testing.T) {
 	}
 }
 
-func TestRender_otherOperationsAreNotYetSupported(t *testing.T) {
-	tests := []struct {
-		name string
-		op   migrate.Operation
-	}{
-		{"alter table", &migrate.AlterTable{Table: "t"}},
-		{"create index", &migrate.CreateIndex{Name: "i", Table: "t"}},
-		{"drop index", &migrate.DropIndex{Name: "i"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := Render(tt.op)
-			require.Error(t, err)
-			assert.ErrorIs(t, err, migrate.ErrSchemaUnsupported)
-			assert.Contains(t, err.Error(), "pg")
-		})
-	}
-}
-
 // recordingExec is a migrate.Executor that only knows Exec. The embedded
 // interface is nil, so a call to any other method is a bug in the code under
 // test.

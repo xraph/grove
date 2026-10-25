@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -52,8 +53,13 @@ func (Renderer) Apply(ctx context.Context, exec migrate.Executor, op migrate.Ope
 	if err != nil {
 		return err
 	}
-	for _, stmt := range stmts {
+	for i, stmt := range stmts {
 		if _, execErr := exec.Exec(ctx, stmt); execErr != nil {
+			// The earlier statements already ran, so a caller has to know how
+			// far an operation got before it stopped.
+			if len(stmts) > 1 {
+				return fmt.Errorf("pgmigrate: %s (statement %d of %d): %w", describe(op), i+1, len(stmts), execErr)
+			}
 			return fmt.Errorf("pgmigrate: %s: %w", describe(op), execErr)
 		}
 	}
@@ -69,11 +75,19 @@ func Render(op migrate.Operation) ([]string, error) {
 	case *migrate.DropTable:
 		return []string{renderDropTable(o)}, nil
 	case *migrate.AlterTable:
-		return nil, migrate.Unsupported(driverName, "alter table (not yet)")
+		return renderAlterTable(o)
 	case *migrate.CreateIndex:
-		return nil, migrate.Unsupported(driverName, "create index (not yet)")
+		stmt, err := renderCreateIndex(o)
+		if err != nil {
+			return nil, err
+		}
+		return []string{stmt}, nil
 	case *migrate.DropIndex:
-		return nil, migrate.Unsupported(driverName, "drop index (not yet)")
+		stmt, err := renderDropIndex(o)
+		if err != nil {
+			return nil, err
+		}
+		return []string{stmt}, nil
 	default:
 		return nil, migrate.Unsupported(driverName, fmt.Sprintf("operation %T", op))
 	}
@@ -86,6 +100,12 @@ func describe(op migrate.Operation) string {
 		return "create table " + o.Table
 	case *migrate.DropTable:
 		return "drop table " + o.Table
+	case *migrate.AlterTable:
+		return "alter table " + o.Table
+	case *migrate.CreateIndex:
+		return "create index " + o.Name
+	case *migrate.DropIndex:
+		return "drop index " + o.Name
 	default:
 		return fmt.Sprintf("%T", op)
 	}
@@ -179,6 +199,240 @@ func renderDropTable(op *migrate.DropTable) string {
 		b.WriteString(" CASCADE")
 	}
 	return b.String()
+}
+
+// renderAlterTable joins neighbouring actions into one ALTER TABLE so
+// Postgres applies them together. A rename gets a statement of its own because
+// RENAME can't share one with other subcommands, and it ends the run before it
+// so everything still executes in the order written.
+func renderAlterTable(op *migrate.AlterTable) ([]string, error) {
+	if len(op.Actions) == 0 {
+		return nil, invalidf("alter table %q has no actions", op.Table)
+	}
+
+	stmts := make([]string, 0, len(op.Actions))
+	clauses := make([]string, 0, len(op.Actions))
+	// Follows RenameTo: every statement after it has to name the table as it
+	// is now, or Postgres can't find the relation.
+	table := op.Table
+	flush := func() {
+		if len(clauses) == 0 {
+			return
+		}
+		stmts = append(stmts, "ALTER TABLE "+quoteIdent(table)+" "+strings.Join(clauses, ", "))
+		clauses = clauses[:0]
+	}
+
+	for i := range op.Actions {
+		a := &op.Actions[i]
+		if err := checkAlterNames(a); err != nil {
+			return nil, invalidf("alter table %q action %d: %v", op.Table, i+1, err)
+		}
+
+		switch a.Kind {
+		case migrate.AlterRenameColumn:
+			flush()
+			stmts = append(stmts, "ALTER TABLE "+quoteIdent(table)+
+				" RENAME COLUMN "+quoteIdent(a.Name)+" TO "+quoteIdent(a.NewName))
+		case migrate.AlterRenameTo:
+			flush()
+			stmts = append(stmts, "ALTER TABLE "+quoteIdent(table)+" RENAME TO "+quoteIdent(a.NewName))
+			table = a.NewName
+		default:
+			clause, err := alterClause(a)
+			if errors.Is(err, migrate.ErrInvalidOperation) {
+				// Column and constraint rendering already explain themselves.
+				return nil, err
+			}
+			if err != nil {
+				return nil, invalidf("alter table %q action %d: %v", op.Table, i+1, err)
+			}
+			clauses = append(clauses, clause)
+		}
+	}
+	flush()
+	return stmts, nil
+}
+
+// checkAlterNames catches an action built by hand without the name it can't
+// do without. The builders never leave one out, but Render is public and an
+// empty identifier would only fail later, inside Postgres.
+func checkAlterNames(a *migrate.AlterAction) error {
+	switch a.Kind {
+	case migrate.AlterDropColumn, migrate.AlterSetNotNull, migrate.AlterDropNotNull,
+		migrate.AlterSetDefault, migrate.AlterDropDefault, migrate.AlterSetType,
+		migrate.AlterDropConstraint, migrate.AlterRenameColumn:
+		if a.Name == "" {
+			return errors.New("the action has no column or constraint name")
+		}
+	}
+	if (a.Kind == migrate.AlterRenameColumn || a.Kind == migrate.AlterRenameTo) && a.NewName == "" {
+		return errors.New("a rename has no new name")
+	}
+	return nil
+}
+
+// alterClause renders one action as it sits inside an ALTER TABLE. Renames
+// are not here because they can't be joined with other clauses.
+func alterClause(a *migrate.AlterAction) (string, error) {
+	switch a.Kind {
+	case migrate.AlterAddColumn:
+		def, err := columnDef(&a.Column)
+		if err != nil {
+			return "", err
+		}
+		return "ADD COLUMN " + optional(a.IfNotExists, "IF NOT EXISTS ") + def, nil
+	case migrate.AlterDropColumn:
+		return "DROP COLUMN " + optional(a.IfExists, "IF EXISTS ") + quoteIdent(a.Name) + optional(a.Cascade, " CASCADE"), nil
+	case migrate.AlterSetNotNull:
+		return "ALTER COLUMN " + quoteIdent(a.Name) + " SET NOT NULL", nil
+	case migrate.AlterDropNotNull:
+		return "ALTER COLUMN " + quoteIdent(a.Name) + " DROP NOT NULL", nil
+	case migrate.AlterSetDefault:
+		if a.Default == nil {
+			return "", fmt.Errorf("column %q has no default to set", a.Name)
+		}
+		def, err := defaultSQL(a.Default)
+		if err != nil {
+			return "", fmt.Errorf("column %q default: %w", a.Name, err)
+		}
+		return "ALTER COLUMN " + quoteIdent(a.Name) + " SET DEFAULT " + def, nil
+	case migrate.AlterDropDefault:
+		return "ALTER COLUMN " + quoteIdent(a.Name) + " DROP DEFAULT", nil
+	case migrate.AlterSetType:
+		typ, err := typeSQL(a.Type)
+		if err != nil {
+			return "", fmt.Errorf("column %q: %w", a.Name, err)
+		}
+		clause := "ALTER COLUMN " + quoteIdent(a.Name) + " TYPE " + typ
+		if a.Using != "" {
+			clause += " USING " + a.Using
+		}
+		return clause, nil
+	case migrate.AlterAddConstraint:
+		def, err := constraintDef(&a.Constraint)
+		if err != nil {
+			return "", err
+		}
+		return "ADD " + def, nil
+	case migrate.AlterDropConstraint:
+		return "DROP CONSTRAINT " + optional(a.IfExists, "IF EXISTS ") + quoteIdent(a.Name) + optional(a.Cascade, " CASCADE"), nil
+	default:
+		return "", fmt.Errorf("unknown alter action kind %d", a.Kind)
+	}
+}
+
+func renderCreateIndex(op *migrate.CreateIndex) (string, error) {
+	if op.Filter != nil {
+		return "", migrate.Unsupported(driverName, "index filter documents")
+	}
+	if len(op.Options) > 0 {
+		return "", invalid("postgres takes no driver options")
+	}
+	if op.Name == "" {
+		return "", invalid("create index needs a name")
+	}
+	if op.Table == "" {
+		return "", invalidf("create index %q needs a table", op.Name)
+	}
+	if op.Using != "" && !isBareWord(op.Using) {
+		return "", invalidf("create index %q: access method %q is not a plain name", op.Name, op.Using)
+	}
+
+	keys, err := indexKeys(op)
+	if err != nil {
+		return "", err
+	}
+	if slices.Contains(op.Include, "") {
+		return "", invalidf("create index %q has an empty included column name", op.Name)
+	}
+
+	var b strings.Builder
+	b.WriteString("CREATE ")
+	b.WriteString(optional(op.Unique, "UNIQUE "))
+	b.WriteString("INDEX ")
+	b.WriteString(optional(op.Concurrently, "CONCURRENTLY "))
+	b.WriteString(optional(op.IfNotExists, "IF NOT EXISTS "))
+	b.WriteString(quoteIdent(op.Name))
+	b.WriteString(" ON ")
+	b.WriteString(quoteIdent(op.Table))
+	if op.Using != "" {
+		b.WriteString(" USING ")
+		b.WriteString(op.Using)
+	}
+	b.WriteString(" (")
+	b.WriteString(strings.Join(keys, ", "))
+	b.WriteByte(')')
+	if len(op.Include) > 0 {
+		b.WriteString(" INCLUDE (")
+		b.WriteString(quoteList(op.Include))
+		b.WriteByte(')')
+	}
+	if op.Where != "" {
+		b.WriteString(" WHERE ")
+		b.WriteString(op.Where)
+	}
+	return b.String(), nil
+}
+
+// indexKeys renders each key of the index: a column is quoted, an expression
+// goes in as written inside its own parentheses, which Postgres requires.
+func indexKeys(op *migrate.CreateIndex) ([]string, error) {
+	if len(op.Columns) == 0 {
+		return nil, invalidf("create index %q has no columns", op.Name)
+	}
+	keys := make([]string, len(op.Columns))
+	for i, c := range op.Columns {
+		switch {
+		case c.Name != "" && c.Expr != "":
+			return nil, invalidf("create index %q key %d has both a column name and an expression", op.Name, i+1)
+		case c.Name != "":
+			keys[i] = quoteIdent(c.Name)
+		case c.Expr != "":
+			keys[i] = "(" + c.Expr + ")"
+		default:
+			return nil, invalidf("create index %q key %d has neither a column name nor an expression", op.Name, i+1)
+		}
+		keys[i] += optional(c.Desc, " DESC")
+	}
+	return keys, nil
+}
+
+func renderDropIndex(op *migrate.DropIndex) (string, error) {
+	if op.Name == "" {
+		return "", invalid("drop index needs a name")
+	}
+	// Table is for drivers that scope an index to a table. Postgres names
+	// indexes in the schema, so it plays no part here.
+	return "DROP INDEX " + optional(op.Concurrently, "CONCURRENTLY ") + optional(op.IfExists, "IF EXISTS ") +
+		quoteIdent(op.Name) + optional(op.Cascade, " CASCADE"), nil
+}
+
+// optional returns clause when on is set and nothing otherwise, so a statement
+// reads as its template with the optional words switched on.
+func optional(on bool, clause string) string {
+	if on {
+		return clause
+	}
+	return ""
+}
+
+// isBareWord reports whether s is a plain unquoted name. An index access
+// method goes into the statement as written, so anything that could change
+// the statement's shape is refused.
+func isBareWord(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		letter := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_'
+		digit := c >= '0' && c <= '9'
+		if !letter && (!digit || i == 0) {
+			return false
+		}
+	}
+	return true
 }
 
 // columnDef renders one column the way CREATE TABLE and ALTER TABLE ADD
