@@ -8,13 +8,15 @@ import (
 
 // TxExecutor is an optional interface an [Executor] implements so the
 // orchestrator can run a migration and its applied record in one transaction.
-// The orchestrator finds it with a type assertion, so executors that don't
-// implement it keep working without one.
+// The orchestrator finds it with [ExecutorAs], so a wrapper that has an Unwrap
+// method keeps the transactions of the executor inside it, and executors that
+// don't implement it keep working without one.
 //
-// The transaction belongs to the executor, not to the caller. After BeginTx,
-// every statement the migration runs through the executor, and the
+// The orchestrator owns the transaction, and the executor holds its state on
+// the connection that has the migration lock. BeginTx returns no handle:
+// after it, every statement the migration runs through the executor, and the
 // RecordApplied or RemoveApplied call that follows, must go through that
-// transaction on the connection that holds the migration lock.
+// transaction on that connection until CommitTx or RollbackTx.
 type TxExecutor interface {
 	// BeginTx opens the transaction. It returns [ErrTxUnsupported] when this
 	// executor can't hold one for the migration, and the orchestrator then runs
@@ -41,7 +43,7 @@ var ErrTxUnsupported = errors.New("migrate: executor cannot run this migration i
 // the step's changes behind. Otherwise work runs as is, which is what struct
 // migrations and executors without transactions have always done.
 func (o *Orchestrator) runStep(ctx context.Context, m *Migration, work func(context.Context) error) error {
-	tx, ok := o.executor.(TxExecutor)
+	tx, ok := ExecutorAs[TxExecutor](o.executor)
 	if !m.Transactional || !ok {
 		return work(ctx)
 	}

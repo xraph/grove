@@ -281,6 +281,89 @@ func TestMigrate_executorWithoutTx(t *testing.T) {
 	require.Len(t, res.Applied, 1)
 }
 
+// countingWrapper is a statement counter in front of a txFake. It embeds
+// Executor, so it promotes none of the TxExecutor methods, and it sees every
+// statement and applied record on the way to the executor inside.
+type countingWrapper struct {
+	Executor
+	seen []string
+}
+
+func (w *countingWrapper) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
+	w.seen = append(w.seen, "exec:"+query)
+	return w.Executor.Exec(ctx, query, args...)
+}
+
+func (w *countingWrapper) RecordApplied(ctx context.Context, m *Migration) error {
+	w.seen = append(w.seen, "record:"+m.Version)
+	return w.Executor.RecordApplied(ctx, m)
+}
+
+func (w *countingWrapper) RemoveApplied(ctx context.Context, m *Migration) error {
+	w.seen = append(w.seen, "remove:"+m.Version)
+	return w.Executor.RemoveApplied(ctx, m)
+}
+
+// unwrappingCounter adds Unwrap to countingWrapper, which is all a wrapper
+// needs to keep the transactions of the executor it wraps.
+type unwrappingCounter struct {
+	countingWrapper
+}
+
+func (w *unwrappingCounter) Unwrap() Executor { return w.Executor }
+
+func TestMigrate_wrapperWithUnwrapKeepsTransactions(t *testing.T) {
+	fake := &txFake{}
+	wrapper := &unwrappingCounter{countingWrapper{Executor: fake}}
+	g := txGroup(t, Define("v1", "create_x", execFunc("X"), nil))
+
+	res, err := NewOrchestrator(wrapper, g).Migrate(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"BEGIN", "exec:X", "record:v1", "COMMIT"}, fake.calls())
+	assert.Equal(t, []string{"exec:X", "record:v1"}, wrapper.seen,
+		"the step and its record still go through the wrapper")
+	require.Len(t, res.Applied, 1)
+}
+
+func TestMigrate_wrapperWithUnwrapRollsBackOnError(t *testing.T) {
+	boom := errors.New("boom")
+	fake := &txFake{}
+	wrapper := &unwrappingCounter{countingWrapper{Executor: fake}}
+	g := txGroup(t, Define("v1", "create_x", func(context.Context, *DB) error { return boom }, nil))
+
+	res, err := NewOrchestrator(wrapper, g).Migrate(context.Background())
+
+	require.ErrorIs(t, err, boom)
+	assert.Equal(t, []string{"BEGIN", "ROLLBACK"}, fake.calls())
+	assert.Empty(t, res.Applied)
+}
+
+func TestMigrate_wrapperWithoutUnwrapRunsPlain(t *testing.T) {
+	fake := &txFake{}
+	wrapper := &countingWrapper{Executor: fake}
+	g := txGroup(t, Define("v1", "create_x", execFunc("X"), nil))
+
+	res, err := NewOrchestrator(wrapper, g).Migrate(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"exec:X", "record:v1"}, fake.calls(), "no BEGIN or COMMIT without Unwrap")
+	require.Len(t, res.Applied, 1)
+}
+
+func TestRollback_wrapperWithUnwrapKeepsTransactions(t *testing.T) {
+	fake := &txFake{applied: []*AppliedMigration{{Group: "app", Version: "v1", Name: "create_x"}}}
+	wrapper := &unwrappingCounter{countingWrapper{Executor: fake}}
+	g := txGroup(t, Define("v1", "create_x", execFunc("U"), execFunc("D")))
+
+	res, err := NewOrchestrator(wrapper, g).Rollback(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"BEGIN", "exec:D", "remove:v1", "COMMIT"}, fake.calls())
+	assert.Equal(t, []string{"exec:D", "remove:v1"}, wrapper.seen)
+	require.Len(t, res.Rollback, 1)
+}
+
 func TestMigrate_transactionalMissingUpIsReportedBeforeBegin(t *testing.T) {
 	fake := &txFake{}
 	g := txGroup(t, Define("v1", "create_x", nil, nil))
