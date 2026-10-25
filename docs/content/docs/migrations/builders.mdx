@@ -1,0 +1,435 @@
+---
+title: Migration Builders
+description: Write schema migrations in Go and let the driver turn them into SQL or MongoDB commands.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Migration builders describe a schema change in Go. The driver behind your executor turns that description into SQL on PostgreSQL or into commands on MongoDB, so you don't write the statements yourself. Here's a migration that creates a `projects` table on PostgreSQL, in a file called `20260115093000_create_projects.go`:
+
+```go
+package migrations
+
+import (
+    "context"
+
+    "github.com/xraph/grove/migrate"
+)
+
+func init() {
+    Migrations.Add(
+        func(ctx context.Context, db *migrate.DB) error {
+            err := db.NewCreateTable("projects").
+                Column("id", migrate.UUID, migrate.PrimaryKey(), migrate.DefaultExpr("gen_random_uuid()")).
+                Column("owner_id", migrate.BigInt, migrate.NotNull()).
+                Column("name", migrate.Text, migrate.NotNull()).
+                Column("slug", migrate.Text, migrate.NotNull()).
+                Column("archived", migrate.Boolean, migrate.NotNull(), migrate.Default(false)).
+                Column("created_at", migrate.Timestamp, migrate.NotNull(), migrate.DefaultExpr("now()")).
+                Unique("owner_id", "slug").Named("projects_owner_slug_key").
+                ForeignKey("owner_id").References("users", "id").OnDelete(migrate.Cascade).Named("projects_owner_fk").
+                Exec(ctx)
+            if err != nil {
+                return err
+            }
+
+            return db.NewCreateIndex("projects_created_at_idx").
+                On("projects").
+                ColumnDesc("created_at").
+                Exec(ctx)
+        },
+        func(ctx context.Context, db *migrate.DB) error {
+            return db.NewDropTable("projects").Exec(ctx)
+        },
+    )
+}
+```
+
+`Migrations` is the `*migrate.Group` for your package (`var Migrations = migrate.NewGroup("app")`), and the [Migrations Overview](/docs/migrations/overview) shows how a group reaches an orchestrator. The file name carries the version and the name: `Group.Add` reads `20260115093000` and `create_projects` from it, so you never write them down a second time. The up function builds the table with a named unique constraint and a named foreign key, then adds an index. The down function drops the table, and the index goes with it.
+
+On PostgreSQL the whole migration runs in one transaction, together with the row that records it as applied. If any step fails, nothing is left behind.
+
+## The Same Table on MongoDB
+
+A collection has no columns, so the driver builds a `$jsonSchema` validator from yours. Put this in a file of its own, in the package that holds your Mongo migrations:
+
+```go
+package migrations
+
+import (
+    "context"
+
+    "github.com/xraph/grove/migrate"
+)
+
+func init() {
+    Migrations.Add(
+        func(ctx context.Context, db *migrate.DB) error {
+            err := db.NewCreateTable("projects").
+                Column("owner_id", migrate.Type("objectId"), migrate.NotNull()).
+                Column("name", migrate.Text, migrate.NotNull()).
+                Column("slug", migrate.Text, migrate.NotNull()).
+                Column("archived", migrate.Boolean, migrate.NotNull()).
+                Column("created_at", migrate.Timestamp, migrate.NotNull()).
+                Exec(ctx)
+            if err != nil {
+                return err
+            }
+
+            return db.NewCreateIndex("projects_owner_slug_idx").
+                On("projects").
+                Columns("owner_id", "slug").
+                Unique().
+                Exec(ctx)
+        },
+        func(ctx context.Context, db *migrate.DB) error {
+            return db.NewDropTable("projects").Exec(ctx)
+        },
+    )
+}
+```
+
+This version leaves several things out, and that's deliberate. Every document has an `_id`, so there's no primary key to declare. There are no foreign keys, a unique constraint becomes a unique index, and a column can't carry a default when you create the collection. If you ask for any of those, the builder returns an error that wraps `migrate.ErrSchemaUnsupported` and names the feature, instead of dropping it quietly (see [Errors](#errors)). MongoDB migrations also run without a transaction, so if the index step fails the collection stays. Reach for `IfNotExists()` on the steps you'd want to rerun.
+
+The [MongoDB page](/docs/drivers/mongodb#migrations) has the rest of what differs.
+
+## Registering Migrations
+
+### Add
+
+`Group.Add(up, down, opts...)` is the form you'll use most. Both functions take a `*migrate.DB`, which holds the builders and also has `Exec` and `Query` for raw statements. Call it from an `init` function in a file named `<14 digit version>_<name>.go`, as in the examples above.
+
+`Add` panics at startup when the file name does not fit that shape, or when the group already holds the version. That's on purpose: an `init` that failed to register would leave a migration missing from the plan with no sign of it.
+
+<Callout type="warn">
+Go leaves some files out of the build, and a migration in one of them never registers. Nothing reports it, because the file simply isn't compiled. A file name ending in `_test`, or in a GOOS or GOARCH name (`_linux`, `_darwin`, `_windows`, `_arm64`, `_amd64`, `_js`, `_wasm` and so on), is excluded by the Go toolchain. A migration called `20260301000000_backfill_js.go` is one of them. Keep those endings out of migration names.
+</Callout>
+
+### Define
+
+When one file holds several migrations, or the version comes from somewhere else, build the migration with `Define` and register it yourself:
+
+```go
+up := func(ctx context.Context, db *migrate.DB) error {
+    return db.NewDropTable("projects").IfExists().Exec(ctx)
+}
+down := func(ctx context.Context, db *migrate.DB) error {
+    return nil
+}
+
+Migrations.MustRegister(
+    migrate.Define("20260301000000", "drop_projects", up, down,
+        migrate.Comment("Projects moved to the billing service."),
+    ),
+)
+```
+
+`Define(version, name, up, down, opts...)` takes the same options as `Add`: `migrate.NoTransaction()` and `migrate.Comment(text)`. Pass `nil` for `down` when a migration cannot be undone. Rolling it back then removes its applied record and runs nothing else.
+
+### Struct Migrations
+
+`MustRegister(&migrate.Migration{...})` still works. It gives your functions the raw `migrate.Executor` instead of a `*migrate.DB`, and it does not run in a transaction unless you set `Transactional: true` on the struct yourself. To use the builders inside one, wrap the executor with `migrate.NewDB`:
+
+```go
+Migrations.MustRegister(&migrate.Migration{
+    Name:    "create_tags",
+    Version: "20260302000000",
+    Up: func(ctx context.Context, exec migrate.Executor) error {
+        return migrate.NewDB(exec).NewCreateTable("tags").
+            Column("id", migrate.BigSerial, migrate.PrimaryKey()).
+            Column("label", migrate.Text, migrate.NotNull(), migrate.Unique()).
+            Exec(ctx)
+    },
+    Down: func(ctx context.Context, exec migrate.Executor) error {
+        _, err := exec.Exec(ctx, `DROP TABLE IF EXISTS tags`)
+        return err
+    },
+})
+```
+
+## Builder Reference
+
+Every builder starts on the `*migrate.DB` and ends in `Exec(ctx) error`. A chain never panics when you misuse it. It remembers the first mistake and returns it from `Exec`, before anything touches the database. Each builder also has an `Operation()` method that returns the operation it describes without running it, which is handy in tests (`migrate.NewDB(nil)` gives you a handle with no executor).
+
+### Tables
+
+| Builder | What it does |
+|---|---|
+| `db.NewCreateTable(name)` | Starts a `CREATE TABLE`, or creates a collection on MongoDB. |
+| `db.NewDropTable(name)` | Drops a table or collection. |
+| `db.NewAlterTable(name)` | Starts an `ALTER TABLE`. See [Altering tables](#altering-tables). |
+
+`NewCreateTable` takes these calls:
+
+| Method | What it does |
+|---|---|
+| `Column(name, type, opts...)` | Adds a column. |
+| `PrimaryKey(cols...)` | Adds a table-level primary key. |
+| `Unique(cols...)` | Adds a table-level `UNIQUE` constraint. |
+| `Check(sql)` | Adds a table-level `CHECK` constraint. |
+| `ForeignKey(cols...)` | Starts a foreign key. Follow it with `References` and optionally `OnDelete`. |
+| `References(table, cols...)` | Sets the target of the foreign key you just started. |
+| `OnDelete(action)` | Sets the referential action. It has to follow `References`. |
+| `Named(name)` | Names the constraint you just added. |
+| `IfNotExists()` | Skips the statement when the table is already there. |
+| `Model(model)` | Takes the columns from a grove model, such as `Model((*Project)(nil))`. |
+| `With(opts...)` | Passes driver-specific options. A driver rejects any it doesn't recognise. |
+
+`NewDropTable` takes `IfExists()` and `Cascade()`.
+
+Declare every column before the first table constraint. A `Column` call after `PrimaryKey`, `Unique`, `Check` or `ForeignKey` is an error, because `Named`, `References` and `OnDelete` attach to the constraint before them, and the order you write has to be the order the driver sees. Constraints render exactly as you wrote them. That matters for the ones you don't name: PostgreSQL derives a name from the columns and adds a suffix when two collide, in creation order. If a later migration needs to drop a constraint, `Named` saves you from guessing what PostgreSQL picked.
+
+With `Model`, the name you pass to `NewCreateTable` has to equal the model's own table (PostgreSQL) or collection (MongoDB), or you get an error. You cannot mix a model with `Column` or constraint calls. On MongoDB, `mongomigrate.WithCollection` passed through `With` is rejected as well, so name the collection in `NewCreateTable`.
+
+### Columns
+
+A column takes any number of options after its type, applied in the order you write them (so `OnDelete` has to come after `References`):
+
+| Option | What it does |
+|---|---|
+| `NotNull()` | Forbids NULL. |
+| `Default(value)` | Sets a literal default. A `nil` value means `DEFAULT NULL`. |
+| `DefaultExpr(sql)` | Sets a default from a SQL expression such as `now()`, spliced in as written. |
+| `PrimaryKey()` | Makes the column the primary key. Use the table-level `PrimaryKey` for a composite one. |
+| `Unique()` | Adds a `UNIQUE` constraint on this column alone. |
+| `Check(sql)` | Adds a column-level `CHECK`. A column takes one, so combine conditions with `AND`. |
+| `References(table, column)` | Makes the column a foreign key. It names exactly one column. |
+| `OnDelete(action)` | Sets the referential action of the reference before it. |
+| `Identity()` | Makes the column `GENERATED ALWAYS AS IDENTITY`. |
+| `GeneratedAs(sql)` | Makes the column a stored generated column. |
+
+The referential actions are `migrate.NoAction`, `migrate.Restrict`, `migrate.Cascade`, `migrate.SetNull` and `migrate.SetDefault`.
+
+### Types
+
+| Builder type | PostgreSQL | MongoDB `bsonType` |
+|---|---|---|
+| `migrate.Text` | `TEXT` | `string` |
+| `migrate.SmallInt` | `SMALLINT` | `int` |
+| `migrate.Integer` | `INTEGER` | `int` |
+| `migrate.BigInt` | `BIGINT` | `long` |
+| `migrate.BigSerial` | `BIGSERIAL` | `long` |
+| `migrate.Boolean` | `BOOLEAN` | `bool` |
+| `migrate.Timestamp` | `TIMESTAMPTZ` | `date` |
+| `migrate.Date` | `DATE` | `date` |
+| `migrate.JSON` | `JSONB` | `object` |
+| `migrate.UUID` | `UUID` | `string` |
+| `migrate.Bytes` | `BYTEA` | `binData` |
+| `migrate.Float` | `DOUBLE PRECISION` | `double` |
+| `migrate.Numeric(p, s)` | `NUMERIC(p, s)` | `decimal` |
+| `migrate.ArrayOf(t)` | the element type followed by `[]` | `array`, with `items` from `t` |
+| `migrate.Type("...")` | passed through as written | passed through as the `bsonType` |
+
+`migrate.Numeric(0, 0)` renders a bare `NUMERIC` with no limits. For anything the table doesn't name, `migrate.Type` hands the string to the driver untouched:
+
+```go
+err := db.NewCreateTable("labels").
+    Column("name", migrate.Type(`TEXT COLLATE "C"`), migrate.PrimaryKey()).
+    Column("tags", migrate.ArrayOf(migrate.Text)).
+    Exec(ctx)
+```
+
+### Altering Tables
+
+Each call on `NewAlterTable` adds one action, and actions run in the order you write them. A modifier such as `IfExists` or `Using` applies to the action right before it.
+
+```go
+err := db.NewAlterTable("projects").
+    AddColumn("description", migrate.Text, migrate.NotNull(), migrate.Default("")).
+    AddColumn("budget", migrate.Numeric(12, 2)).
+    AddCheck("budget >= 0").Named("projects_budget_check").
+    RenameColumn("name", "title").
+    Exec(ctx)
+```
+
+| Method | What it does |
+|---|---|
+| `AddColumn(name, type, opts...)` | Adds a column. Follow with `IfNotExists()` to skip one that's already there. |
+| `DropColumn(name)` | Drops a column. Follow with `IfExists()` or `Cascade()`. |
+| `SetNotNull(col)` and `DropNotNull(col)` | Toggles `NOT NULL`. |
+| `SetDefault(col, value)` and `SetDefaultExpr(col, sql)` | Sets a default from a literal or an expression. |
+| `DropDefault(col)` | Removes the default. |
+| `SetType(col, type)` | Changes the type. Follow with `Using(sql)` when existing values need converting. |
+| `AddPrimaryKey(cols...)`, `AddUnique(cols...)`, `AddCheck(sql)` | Adds a constraint. |
+| `AddForeignKey(cols...)` | Starts a foreign key. Follow with `References` and optionally `OnDelete`. |
+| `Named(name)` | Names the constraint you just added. |
+| `DropConstraint(name)` | Drops a constraint. Follow with `IfExists()` or `Cascade()`. |
+| `RenameColumn(from, to)` | Renames a column. |
+| `RenameTo(name)` | Renames the table. |
+
+On PostgreSQL, neighbouring actions are joined into one `ALTER TABLE`. A rename gets a statement of its own, because `RENAME` can't share one with other subcommands, so the example above runs as two statements and the rename comes last, as written. The same goes for a `RenameTo`: every action after it names the table as it is by then.
+
+Inside one joined `ALTER TABLE`, PostgreSQL applies the subcommands in its own pass order, which is not strictly the order you wrote. Contradictory actions on one column in one statement, such as `SetNotNull` followed by `DropNotNull`, do not behave as written. Put them in separate `NewAlterTable` calls.
+
+### Indexes
+
+```go
+err := db.NewCreateIndex("projects_slug_lower_idx").
+    On("projects").
+    ColumnExpr("lower(slug)").
+    Where("NOT archived").
+    Unique().
+    Exec(ctx)
+```
+
+| Method | What it does |
+|---|---|
+| `On(table)` | Sets the table or collection. `NewCreateIndex` needs it. |
+| `Columns(names...)` | Adds plain columns as keys, in order. |
+| `ColumnDesc(name)` | Adds a column sorted in descending order. |
+| `ColumnExpr(sql)` | Adds an expression such as `lower(slug)` as a key. |
+| `Unique()` | Makes the index enforce uniqueness. |
+| `IfNotExists()` | Skips the statement when the index is already there. |
+| `Concurrently()` | Builds without blocking writes, on PostgreSQL. |
+| `Using(method)` | Picks the access method, such as `gin`. |
+| `Include(cols...)` | Adds non-key columns stored in the index. |
+| `Where(sql)` | Makes the index partial, with a SQL predicate. |
+| `Filter(doc)` | The document form of `Where`, for MongoDB's `partialFilterExpression`. |
+| `With(opts...)` | Passes driver-specific options. |
+
+`NewDropIndex(name)` takes `On(table)`, `IfExists()`, `Concurrently()` and `Cascade()`. PostgreSQL names indexes in the schema, so it doesn't need `On`. MongoDB scopes an index to its collection and does.
+
+## Raw Statements
+
+The `*migrate.DB` in your migration also has `Exec` and `Query`, which go straight to the executor. Use them for what no builder covers. A trigger function is the usual case:
+
+```go
+Migrations.Add(
+    func(ctx context.Context, db *migrate.DB) error {
+        err := db.NewAlterTable("projects").
+            AddColumn("updated_at", migrate.Timestamp, migrate.NotNull(), migrate.DefaultExpr("now()")).
+            Exec(ctx)
+        if err != nil {
+            return err
+        }
+
+        // No builder covers a trigger function, so this goes through Exec as SQL.
+        _, err = db.Exec(ctx, `CREATE FUNCTION set_updated_at() RETURNS trigger AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql`)
+        if err != nil {
+            return err
+        }
+
+        _, err = db.Exec(ctx, `CREATE TRIGGER projects_set_updated_at
+BEFORE UPDATE ON projects
+FOR EACH ROW EXECUTE FUNCTION set_updated_at()`)
+        return err
+    },
+    func(ctx context.Context, db *migrate.DB) error {
+        if _, err := db.Exec(ctx, `DROP TRIGGER projects_set_updated_at ON projects`); err != nil {
+            return err
+        }
+        if _, err := db.Exec(ctx, `DROP FUNCTION set_updated_at()`); err != nil {
+            return err
+        }
+        return db.NewAlterTable("projects").DropColumn("updated_at").Exec(ctx)
+    },
+)
+```
+
+Raw statements share the migration's transaction with the builders, so a failure in the trigger rolls back the column as well. On MongoDB, `db.Exec` and `db.Query` return `mongodriver.ErrNotSupported`. Use `mongomigrate.Native(db)` there, which hands you the `*mongodriver.MongoDB` for data migrations (see the [MongoDB page](/docs/drivers/mongodb#migrations)).
+
+## Transactions
+
+On PostgreSQL, a migration registered with `Add` or `Define` and the row that records it run in one transaction, on the connection that holds the migration lock. A returned error or a panic rolls the lot back and leaves no applied record. You don't call anything to get this. If the driver can't give the migration a dedicated connection, it runs without a transaction instead of failing.
+
+Some statements refuse to run inside a transaction. `CREATE INDEX CONCURRENTLY` and `DROP INDEX CONCURRENTLY` are the usual ones, and PostgreSQL raises its own error if you try. Opt out with `migrate.NoTransaction()`:
+
+```go
+Migrations.Add(
+    func(ctx context.Context, db *migrate.DB) error {
+        return db.NewCreateIndex("projects_owner_idx").
+            On("projects").
+            Columns("owner_id").
+            Concurrently().
+            Exec(ctx)
+    },
+    func(ctx context.Context, db *migrate.DB) error {
+        return db.NewDropIndex("projects_owner_idx").
+            Concurrently().
+            IfExists().
+            Exec(ctx)
+    },
+    migrate.NoTransaction(),
+)
+```
+
+Without a transaction, a failure partway leaves whatever already ran in place and no applied record, so write those migrations to survive a rerun. A concurrent build that fails also leaves an invalid index behind, which you drop by hand before trying again.
+
+Some edge cases:
+
+- `DropIndex` with both `Concurrently()` and `Cascade()` is rejected, because PostgreSQL does not allow the combination.
+- Calling `step.Up` or `step.Down` yourself, as a test would, runs with no transaction at all. Statements that one operation renders separately, such as an `ALTER TABLE` split around a rename, are not atomic then. Only the orchestrator opens the transaction.
+- Struct migrations registered with `MustRegister` run without one unless you set `Transactional: true`.
+- MongoDB migrations run without a transaction.
+
+## Errors
+
+| Error | When you get it |
+|---|---|
+| `migrate.ErrInvalidOperation` | You misused a builder: an empty name, a column after a table constraint, `OnDelete` before `References`, a model that doesn't match the table. A driver also returns it for an operation it can't render as written. |
+| `migrate.ErrSchemaUnsupported` | The driver can't do what you asked. The message names the driver and the feature. You also get it when no renderer is registered for the driver, which means you haven't imported its migrate package. |
+| `migrate.ErrUnknownDriver` | The executor doesn't name a driver and has no `Unwrap`. See [Executor wrappers](#executor-wrappers). |
+
+All three work with `errors.Is`. Here's the MongoDB case from earlier, with a primary key on the table:
+
+```go
+err := db.NewCreateTable("projects").
+    Column("id", migrate.UUID, migrate.PrimaryKey()).
+    Exec(ctx)
+if errors.Is(err, migrate.ErrSchemaUnsupported) {
+    // migrate: schema operation not supported: mongo does not support primary keys on column "id"
+    fmt.Println(err)
+}
+```
+
+## Executor Wrappers
+
+A builder finds its driver by asking the executor it was given for a `DriverName`. When the executor cannot answer, it follows `Unwrap() migrate.Executor` to the next one down. A test double that counts statements is the usual wrapper:
+
+```go
+type countingExecutor struct {
+    migrate.Executor
+
+    statements int
+}
+
+func (c *countingExecutor) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
+    c.statements++
+    return c.Executor.Exec(ctx, query, args...)
+}
+
+// Unwrap lets the builders find the driver behind the wrapper.
+func (c *countingExecutor) Unwrap() migrate.Executor { return c.Executor }
+
+counting := &countingExecutor{Executor: pgmigrate.New(pgdriver.Unwrap(db))}
+orch := migrate.NewOrchestrator(counting, Migrations)
+```
+
+Embedding `migrate.Executor` only promotes the methods in that interface, and `DriverName` is not one of them. Without `Unwrap`, every builder fails with an error that wraps `migrate.ErrUnknownDriver` and names the wrapper's type. `Unwrap` is used just to find the driver. The statements still go through your wrapper, so the counter above sees all of them.
+
+Embedding does not promote `migrate.TxExecutor` either. An orchestrator built on a wrapper like this one runs every migration without a transaction, so a failed migration leaves its earlier statements behind. If you want the transaction back, forward the three methods to the executor inside:
+
+```go
+func (c *countingExecutor) BeginTx(ctx context.Context) error {
+    return c.Executor.(migrate.TxExecutor).BeginTx(ctx)
+}
+
+func (c *countingExecutor) CommitTx(ctx context.Context) error {
+    return c.Executor.(migrate.TxExecutor).CommitTx(ctx)
+}
+
+func (c *countingExecutor) RollbackTx(ctx context.Context) error {
+    return c.Executor.(migrate.TxExecutor).RollbackTx(ctx)
+}
+```
+
+## Driver Details
+
+PostgreSQL and MongoDB are the drivers with builders today. On any other driver a builder returns an error that wraps `migrate.ErrSchemaUnsupported`, so write those migrations with `Exec` and raw SQL.
+
+Each driver adds rules of its own. The [PostgreSQL page](/docs/drivers/postgres#migrations) covers literal defaults, identifier quoting and how transactions are held. The [MongoDB page](/docs/drivers/mongodb#migrations) covers validators, indexes, field changes and everything MongoDB can't do.

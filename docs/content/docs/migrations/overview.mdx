@@ -13,15 +13,50 @@ Grove migrations are Go code, not SQL files. Any Go module can register migratio
 - Groups: migrations belong to named groups (for example `"core"` or `"forge.billing"`).
 - Dependencies: a group declares the groups it depends on with `migrate.DependsOn`.
 - Ordering: the orchestrator sorts groups by dependency, then migrations by version.
+- Transactions: on PostgreSQL, a migration and the row that records it run in one transaction, unless you opt out with `migrate.NoTransaction()`.
 - Locking: a lock stops two processes from migrating at once (an advisory lock on PostgreSQL and MySQL, a row in `grove_migration_locks` on SQLite and the others).
 
 ## Defining Migrations
 
+The quickest way to write a migration is `Group.Add`, in a file whose name carries the version. Declare the group once (`var Migrations = migrate.NewGroup("core")`), then put each migration in its own file. This one is `20240101000000_create_users.go`:
+
 ```go
-import "github.com/xraph/grove/migrate"
+package core
 
-var Migrations = migrate.NewGroup("core")
+import (
+    "context"
 
+    "github.com/xraph/grove/migrate"
+)
+
+func init() {
+    Migrations.Add(
+        func(ctx context.Context, db *migrate.DB) error {
+            return db.NewCreateTable("users").
+                IfNotExists().
+                Column("id", migrate.BigSerial, migrate.PrimaryKey()).
+                Column("name", migrate.Text, migrate.NotNull()).
+                Column("email", migrate.Text, migrate.NotNull(), migrate.Unique()).
+                Exec(ctx)
+        },
+        func(ctx context.Context, db *migrate.DB) error {
+            return db.NewDropTable("users").IfExists().Exec(ctx)
+        },
+    )
+}
+```
+
+The `*migrate.DB` your functions receive has schema builders, plus `Exec` and `Query` for raw SQL. The builders work on PostgreSQL and MongoDB, with each driver doing what its database can, and on PostgreSQL the migration runs in a transaction. [Migration Builders](/docs/migrations/builders) covers all of it.
+
+`Add` takes the version and the name from the file name, `<14 digit version>_<name>.go`, and panics at startup when the name doesn't fit.
+
+<Callout type="warn">
+A file whose name ends in `_test`, or in a GOOS or GOARCH name such as `_linux`, `_arm64` or `_js`, is left out of the build by the Go toolchain. A migration in one of those files never registers, and nothing tells you.
+</Callout>
+
+If you'd rather spell out the version yourself, or you need the raw executor, register a struct. It receives a `migrate.Executor`, doesn't run in a transaction by default, and writes its statements by hand:
+
+```go
 func init() {
     Migrations.MustRegister(&migrate.Migration{
         Name:    "create_users",
@@ -42,9 +77,11 @@ func init() {
 }
 ```
 
+`migrate.Define(version, name, up, down, opts...)` sits in between. It takes the same `*migrate.DB` functions as `Add`, with the version and name passed in.
+
 ## Running Migrations
 
-The executor inside a migration is a `migrate.Executor`, which has `Exec` and `Query` for raw SQL (plus the tracking and lock methods the orchestrator uses). It has no query builder, so migrations are written in SQL, or in BSON commands for MongoDB.
+The orchestrator runs your migrations through a `migrate.Executor`, which has `Exec` and `Query` for raw SQL (plus the tracking and lock methods it uses itself). Migrations written with `Add` or `Define` get that executor wrapped in a `*migrate.DB`, which puts the schema builders on top. Struct migrations get the executor as it is, so they write SQL by hand, or BSON commands for MongoDB.
 
 ```go
 import "github.com/xraph/grove/drivers/pgdriver/pgmigrate"

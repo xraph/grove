@@ -133,6 +133,58 @@ pgdb.Open(ctx, dsn,
 db, err := grove.Open(pgdb)
 ```
 
+## Migrations
+
+The `pgmigrate` package is the PostgreSQL migration executor. Build one from the driver and hand it to an orchestrator:
+
+```go
+import (
+    "github.com/xraph/grove/drivers/pgdriver"
+    "github.com/xraph/grove/drivers/pgdriver/pgmigrate"
+    "github.com/xraph/grove/migrate"
+)
+
+executor := pgmigrate.New(pgdriver.Unwrap(db))
+orchestrator := migrate.NewOrchestrator(executor, Migrations)
+
+result, err := orchestrator.Migrate(ctx)
+```
+
+Migrations written with `Group.Add` get the schema builders from [Migration Builders](/docs/migrations/builders), and `db.Exec` is there for anything they don't cover. This section is about what PostgreSQL does with them.
+
+### Transactions
+
+Each `Add` or `Define` migration and the row that records it run in one transaction, on the connection that holds the migration lock. The lock is a session advisory lock, which is why the executor keeps one dedicated connection for the whole run. A failure or a panic rolls everything back and leaves no applied record.
+
+Opt out with `migrate.NoTransaction()`. You need it for `CREATE INDEX CONCURRENTLY` and `DROP INDEX CONCURRENTLY`, because PostgreSQL refuses both inside a transaction, and `DROP INDEX CONCURRENTLY` can't be combined with `Cascade()`. The [Transactions](/docs/migrations/builders#transactions) section of Migration Builders has a full example.
+
+Calling a migration's `Up` or `Down` yourself, as a test would, runs it with no transaction. An operation that renders as several statements, such as an `ALTER TABLE` split around a rename, isn't atomic then. If the driver can't give the migration a dedicated connection, the orchestrator runs it without a transaction rather than failing.
+
+### Types
+
+The type table in [Migration Builders](/docs/migrations/builders#types) lists the PostgreSQL name of each builder type. A few are worth knowing by heart: `migrate.Timestamp` is `TIMESTAMPTZ`, `migrate.JSON` is `JSONB`, `migrate.Float` is `DOUBLE PRECISION` and `migrate.Bytes` is `BYTEA`. `migrate.Numeric(10, 2)` becomes `NUMERIC(10, 2)`, and `migrate.ArrayOf(migrate.Text)` becomes `TEXT[]`.
+
+Anything else goes through `migrate.Type`, which passes its string to PostgreSQL untouched:
+
+```go
+Column("name", migrate.Type(`TEXT COLLATE "C"`))
+Column("addr", migrate.Type("INET"))
+```
+
+### Defaults and Quoting
+
+`migrate.Default(value)` renders a literal. Strings are single-quoted with embedded quotes doubled, which assumes `standard_conforming_strings` is on (it is by default). Booleans become `TRUE` or `FALSE`, integers print as they are, and floats print in their shortest form, so `Default(1.0)` renders as `1`. Use `migrate.DefaultExpr` when you need an exact decimal, or anything else that isn't a plain string, boolean, integer or float:
+
+```go
+Column("rate", migrate.Numeric(6, 4), migrate.NotNull(), migrate.DefaultExpr("0.0250"))
+```
+
+Every identifier is quoted, so reserved words work as table and column names. A column called `group` or a table called `order` needs nothing special.
+
+### Joined ALTER TABLE
+
+Neighbouring actions in one `NewAlterTable` become a single `ALTER TABLE`, and a rename gets a statement of its own. Inside the joined statement PostgreSQL runs the subcommands in its own pass order, not strictly the order you wrote. Contradictory actions on one column, such as `SetNotNull` and then `DropNotNull`, don't behave as written, so put them in separate `NewAlterTable` calls.
+
 ## Compatible Databases
 
 ### CockroachDB

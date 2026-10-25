@@ -562,7 +562,128 @@ The executor stores migration state in two collections:
 
 ### Writing Migrations
 
-MongoDB migrations use the driver API directly rather than SQL. The executor's `Exec` and `Query` methods return `ErrNotSupported` -- use the `DB()` method to access the `*mongodriver.MongoDB` instance within migration functions:
+Migrations written with `Group.Add` get the schema builders from [Migration Builders](/docs/migrations/builders). On MongoDB a table is a collection, a column is a field, and the collection's validator is a `$jsonSchema` the builders keep in step with your columns. This one lives in `20260301100000_create_events.go`:
+
+```go
+func init() {
+    Migrations.Add(
+        func(ctx context.Context, db *migrate.DB) error {
+            err := db.NewCreateTable("events").
+                Column("_id", migrate.Type("objectId"), migrate.NotNull()).
+                Column("kind", migrate.Text, migrate.NotNull()).
+                Column("payload", migrate.JSON).
+                With(
+                    mongomigrate.WithAdditionalProperties(false),
+                    mongomigrate.WithValidationLevel("moderate"),
+                ).
+                Exec(ctx)
+            if err != nil {
+                return err
+            }
+
+            return db.NewCreateIndex("events_kind_idx").
+                On("events").
+                Columns("kind").
+                Exec(ctx)
+        },
+        func(ctx context.Context, db *migrate.DB) error {
+            return db.NewDropTable("events").Exec(ctx)
+        },
+    )
+}
+```
+
+MongoDB migrations run without a transaction. If a step fails, the steps before it stay applied and no record is written, so lean on `IfNotExists()` and `IfExists()` to make a rerun safe.
+
+### Validators
+
+Columns become `$jsonSchema` properties. A column without `NotNull()` accepts its type or null (`bsonType: [type, "null"]`), because a Go `nil` encodes as BSON null and a validator that refused it would reject documents your models write. Columns with `NotNull()` go into `required`. The [type table](/docs/migrations/builders#types) gives the `bsonType` of each builder type. `migrate.Type("objectId")` passes a name straight through, and `migrate.ArrayOf(t)` gives an `array` with `items`.
+
+`With` accepts `mongomigrate.WithAdditionalProperties`, `WithValidationLevel` and `WithValidationAction`. Use `IfNotExists()` on the builder instead of `WithIfNotExists`, and name the collection in `NewCreateTable` instead of passing `WithCollection`, which is rejected.
+
+`WithAdditionalProperties(false)` on a collection built from columns rejects every insert unless you declare `_id` as a column, which is why the example above does. The validator would otherwise refuse the `_id` MongoDB adds to each document.
+
+### Existence Checks
+
+The builders follow PostgreSQL here. Creating a collection or an index that already exists is an error unless you add `IfNotExists()`. Dropping one that's missing is an error unless you add `IfExists()`. With the flag, the statement does nothing instead. Creating an index on a collection that doesn't exist is an error too, because MongoDB would otherwise create the collection for you, with no validator.
+
+Each check is an extra read of the collection or index list. Inside an orchestrator run its lock covers the gap between the check and the write. Called anywhere else, the gap is open.
+
+### Indexes
+
+```go
+err := db.NewCreateIndex("projects_active_slug_idx").
+    On("projects").
+    Columns("slug").
+    Unique().
+    Filter(bson.M{"archived": false}).
+    Exec(ctx)
+```
+
+`Filter` is the document form of `Where`, and becomes the `partialFilterExpression`. Three things differ from PostgreSQL. A unique index treats a missing field as null, so it allows only one document without the field. Index names are per collection, so `NewDropIndex` needs `On(collection)`. And the same keys under a different name is a server error, where PostgreSQL would build a second index.
+
+### Changing Fields
+
+`AddColumn`, `DropColumn` and `RenameColumn` change the documents as well as the validator. Adding a column with a literal default backfills it with `$set`, dropping one runs `$unset`, and renaming one runs `$rename`:
+
+```go
+err := db.NewAlterTable("projects").
+    AddColumn("visibility", migrate.Text, migrate.NotNull(), migrate.Default("private")).
+    RenameColumn("name", "title").
+    DropColumn("archived").IfExists().
+    Exec(ctx)
+```
+
+Altering a collection that doesn't exist is an error. When the collection has a `$jsonSchema` validator, a field exists if the validator lists it, and `IfExists()` and `IfNotExists()` behave as they do on PostgreSQL. Without a validator only the data changes run, and none is created. If the validator has no top-level `$jsonSchema`, field actions fail with "alter it by hand".
+
+The data writes that go with a validator edit use `bypassDocumentValidation`, so the user running migrations needs that privilege (the `dbAdmin` role has it).
+
+### Defaults
+
+A literal default is coerced to the property's `bsonType` where that loses nothing: a Go integer becomes an int32 for `int` (with a range check) and an int64 for `long`, and a Go integer or float becomes a float64 for `double`. Anything else must already encode as the property's type. A typed nil pointer is an error, and so is `Default(0)` on a `migrate.Numeric` column. Pass a `bson.Decimal128` there instead (`bson.ParseDecimal128("0")` builds one).
+
+If existing documents hold a value for the new field that doesn't fit its type, the action fails and tells you how many, even when the collection has no validator.
+
+### What MongoDB Can't Do
+
+The builders return an error wrapping `migrate.ErrSchemaUnsupported`, naming the feature, for each of these:
+
+| Where | Not supported |
+|---|---|
+| Columns and tables | Primary keys, unique constraints (create a unique index instead), check constraints, foreign keys, identity and generated columns, and defaults when you create a collection. |
+| `NewCreateIndex` | `Where` (use `Filter`), `Using`, `Include`, `Concurrently()` and expression keys. |
+| Dropping | `Cascade()` on a table, column or index, and `Concurrently()` on an index. |
+| `NewAlterTable` | `SetNotNull`, `DropNotNull`, `SetDefault`, `SetDefaultExpr`, `DropDefault`, `SetType`, adding or dropping constraints, `RenameTo`, and a `DefaultExpr` on `AddColumn`. |
+
+Unsupported actions in an `ALTER` are all caught before the first one runs, so a migration that asks for one stops before any action has changed data.
+
+### Data Migrations
+
+`db.Exec` and `db.Query` return `mongodriver.ErrNotSupported` here. For data migrations that no builder covers, `mongomigrate.Native(db)` returns the `*mongodriver.MongoDB`. It follows executor wrappers the way the builders do. This one lowercases every slug, in `20260301120000_lowercase_slugs.go`:
+
+```go
+func init() {
+    Migrations.Add(
+        func(ctx context.Context, db *migrate.DB) error {
+            mdb, err := mongomigrate.Native(db)
+            if err != nil {
+                return err
+            }
+
+            // An update pipeline lets the new value read the old one, which no builder does.
+            _, err = mdb.Collection("projects").UpdateMany(ctx,
+                bson.M{},
+                bson.A{bson.M{"$set": bson.M{"slug": bson.M{"$toLower": "$slug"}}}},
+            )
+            return err
+        },
+        // The original casing is gone, so there is nothing to put back.
+        nil,
+    )
+}
+```
+
+A struct migration gets the raw executor instead. Its `DB()` method returns the same `*mongodriver.MongoDB`:
 
 ```go
 migrations := []*migrate.Migration{
@@ -576,7 +697,7 @@ migrations := []*migrate.Migration{
             // Create indexes using the MongoDB driver directly
             _, err := mdb.Collection("users").Indexes().CreateOne(ctx,
                 mongo.IndexModel{
-                    Keys:    bson.D{{"email", 1}},
+                    Keys:    bson.D{{Key: "email", Value: 1}},
                     Options: options.Index().SetUnique(true),
                 },
             )
@@ -584,12 +705,13 @@ migrations := []*migrate.Migration{
         },
         Down: func(ctx context.Context, exec migrate.Executor) error {
             mdb := exec.(*mongomigrate.Executor).DB()
-            _, err := mdb.Collection("users").Indexes().DropOne(ctx, "email_1")
-            return err
+            return mdb.Collection("users").Indexes().DropOne(ctx, "email_1")
         },
     },
 }
 ```
+
+That type assertion breaks as soon as something wraps the executor. Pass `migrate.NewDB(exec)` to `mongomigrate.Native` instead if a wrapper is possible.
 
 ### Running Migrations
 
