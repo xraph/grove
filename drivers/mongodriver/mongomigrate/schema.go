@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -573,6 +575,17 @@ func (e *Executor) alterCollection(ctx context.Context, op *migrate.AlterTable) 
 		return fmt.Errorf("mongomigrate: alter table %q: collection does not exist", op.Table)
 	}
 
+	// A validator that isn't a top-level $jsonSchema can't be edited here, and
+	// writing around it would leave documents it rejects. Settled before the
+	// first write so nothing is half done.
+	validator, err := e.loadValidator(ctx, op.Table)
+	if err != nil {
+		return fmt.Errorf("mongomigrate: alter table %q: %w", op.Table, err)
+	}
+	if len(validator) > 0 && jsonSchemaOf(validator) == nil {
+		return invalidf("alter table %q: validator has no top-level $jsonSchema; alter it by hand", op.Table)
+	}
+
 	// Mongo can't roll an earlier action back, so a failure stops here with the
 	// actions before it applied. Each action orders its own steps to keep that
 	// as tidy as it can: the validator is written last because it is what a
@@ -654,8 +667,11 @@ func checkAddColumn(c *migrate.Column) error {
 	if err := checkColumnFeatures(c); err != nil {
 		return err
 	}
-	// Only to learn whether the type has a property schema.
-	_, err := columnProperty(c)
+	// Only to learn whether the type has a property schema and the default fits.
+	if _, err := columnProperty(c); err != nil {
+		return err
+	}
+	_, err := columnDefault(c)
 	return err
 }
 
@@ -703,12 +719,14 @@ func (e *Executor) alterField(ctx context.Context, table string, a *migrate.Alte
 
 // addField backfills the documents, then lists the field in the validator. The
 // order matters when the field is required: the validator would otherwise
-// refuse the next write to every document that lacks it.
+// refuse the next write to every document that lacks it. Everything that can
+// fail on what the documents hold is checked before the first write, so a
+// refused action changes nothing.
 //
 // Where the collection has no validator there is no schema to consult or to
-// extend, so the existence rules don't apply and none is created. The check
-// that a required field has a value in every document still does, because a
-// validator added later would find the same documents.
+// extend, so the existence rules don't apply and none is created. The checks
+// on what the documents hold still do, because a validator added later would
+// find the same documents.
 func (e *Executor) addField(ctx context.Context, table string, a *migrate.AlterAction) error {
 	c := &a.Column
 
@@ -728,23 +746,31 @@ func (e *Executor) addField(ctx context.Context, table string, a *migrate.AlterA
 	if err != nil {
 		return err
 	}
+	def, err := columnDefault(c)
+	if err != nil {
+		return err
+	}
 
 	// A required property doesn't accept null, so for one a null counts as
 	// missing. An optional one accepts it, and a null there is a real value.
 	missing := missingValue(c.Name, c.NotNull)
-	switch {
-	case hasLiteralDefault(c):
-		update := bson.M{"$set": bson.M{c.Name: c.Default.Value}}
-		if setErr := e.updateDocuments(ctx, table, missing, update); setErr != nil {
-			return setErr
-		}
-	case c.NotNull:
+	if def == nil && c.NotNull {
 		n, countErr := e.countDocuments(ctx, table, missing)
 		if countErr != nil {
 			return countErr
 		}
 		if n > 0 {
 			return fmt.Errorf("cannot add required field %q to %q: %d documents lack it", c.Name, table, n)
+		}
+	}
+	if checkErr := e.checkFieldValues(ctx, table, c, prop); checkErr != nil {
+		return checkErr
+	}
+
+	if def != nil {
+		update := bson.M{"$set": bson.M{c.Name: def}}
+		if setErr := e.updateDocuments(ctx, table, missing, update, schema != nil); setErr != nil {
+			return setErr
 		}
 	}
 
@@ -754,11 +780,225 @@ func (e *Executor) addField(ctx context.Context, table string, a *migrate.AlterA
 	return e.setSchema(ctx, table, validator, addProperty(schema, c.Name, prop, c.NotNull))
 }
 
-// hasLiteralDefault reports whether the column has a value to write. A nil
-// literal is DEFAULT NULL, which is the same as having no default, so it
-// leaves the documents alone.
-func hasLiteralDefault(c *migrate.Column) bool {
-	return c.Default != nil && c.Default.Value != nil
+// checkFieldValues fails when a document already holds a value for the new
+// field that its property would reject. The backfill skips validation and
+// collMod doesn't revalidate, so without this a document of the wrong type
+// would pass the migration and fail its next ordinary write.
+func (e *Executor) checkFieldValues(ctx context.Context, table string, c *migrate.Column, prop bson.M) error {
+	present := bson.M{"$exists": true}
+	if c.NotNull {
+		// A null is either about to be filled by the default or has already been
+		// counted as a missing value.
+		present["$ne"] = nil
+	}
+	filter := bson.M{
+		c.Name: present,
+		"$nor": bson.A{bson.M{"$jsonSchema": bson.M{"properties": bson.M{c.Name: prop}}}},
+	}
+
+	n, err := e.countDocuments(ctx, table, filter)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return fmt.Errorf("cannot add field %q to %q: %d documents hold a value that is not bsonType %s",
+			c.Name, table, n, quotedList(bsonTypeNames(prop)))
+	}
+	return nil
+}
+
+func quotedList(names []string) string {
+	quoted := make([]string, len(names))
+	for i, name := range names {
+		quoted[i] = fmt.Sprintf("%q", name)
+	}
+	return strings.Join(quoted, " or ")
+}
+
+// bsonTypeNames lists the types a property accepts. A nullable one names two.
+func bsonTypeNames(prop bson.M) []string {
+	switch b := prop["bsonType"].(type) {
+	case string:
+		return []string{b}
+	case bson.A:
+		return stringsIn(b)
+	default:
+		return nil
+	}
+}
+
+// bsonAliases names the BSON types the way $jsonSchema's bsonType does.
+var bsonAliases = map[bson.Type]string{
+	bson.TypeDouble:           "double",
+	bson.TypeString:           "string",
+	bson.TypeEmbeddedDocument: "object",
+	bson.TypeArray:            "array",
+	bson.TypeBinary:           "binData",
+	bson.TypeUndefined:        "undefined",
+	bson.TypeObjectID:         "objectId",
+	bson.TypeBoolean:          "bool",
+	bson.TypeDateTime:         "date",
+	bson.TypeNull:             "null",
+	bson.TypeRegex:            "regex",
+	bson.TypeDBPointer:        "dbPointer",
+	bson.TypeJavaScript:       "javascript",
+	bson.TypeSymbol:           "symbol",
+	bson.TypeCodeWithScope:    "javascriptWithScope",
+	bson.TypeInt32:            "int",
+	bson.TypeTimestamp:        "timestamp",
+	bson.TypeInt64:            "long",
+	bson.TypeDecimal128:       "decimal",
+	bson.TypeMinKey:           "minKey",
+	bson.TypeMaxKey:           "maxKey",
+}
+
+// maxExactFloatInt is the largest integer a double holds without rounding.
+const maxExactFloatInt = 1 << 53
+
+// columnDefault returns the literal default of an added column as the value to
+// write, or nil when there is nothing to backfill. The backfill skips
+// validation and collMod doesn't revalidate, so a default of the wrong type
+// would be written and then fail every later update to the document. The value
+// is therefore made to fit the property or refused here. A nil literal is
+// DEFAULT NULL, which is the same as having no default.
+func columnDefault(c *migrate.Column) (any, error) {
+	if c.Default == nil || c.Default.Value == nil {
+		return nil, nil
+	}
+	value, err := coerceDefault(c.Type, c.Default.Value)
+	if err != nil {
+		return nil, invalidf("column %q: %v", c.Name, err)
+	}
+	return value, nil
+}
+
+// coerceDefault fits v to the type t. A Go integer takes the width the
+// property names, because the driver would encode a Go int as an int32
+// whatever the column holds, and a Go integer or float becomes a double. These
+// are the only conversions, so a float is never turned into an integer. Any
+// other value has to encode as the property's type already. A raw type is the
+// driver's own name, so it gets no conversion at all.
+func coerceDefault(t migrate.ColumnType, v any) (any, error) {
+	prop, err := propertySchema(t)
+	if err != nil {
+		return nil, err
+	}
+	var want string
+	if names := bsonTypeNames(prop); len(names) > 0 {
+		want = names[0]
+	}
+
+	if v == nil {
+		return nil, defaultMismatch(v, want)
+	}
+	if t.Kind != migrate.KindRaw {
+		if n, handled, numErr := coerceNumber(v, want); handled {
+			return n, numErr
+		}
+	}
+
+	encoded, _, err := bson.MarshalValue(v)
+	if err != nil {
+		return nil, fmt.Errorf("default %v (%T) cannot be encoded: %w", v, v, err)
+	}
+	if !acceptsType(want, encoded) {
+		return nil, defaultMismatch(v, want)
+	}
+
+	if want == "array" && t.Kind == migrate.KindArray && t.Elem != nil {
+		return coerceElements(*t.Elem, v)
+	}
+	return v, nil
+}
+
+func defaultMismatch(v any, want string) error {
+	return fmt.Errorf("default %v (%T) does not match bsonType %q", v, v, want)
+}
+
+// acceptsType reports whether a value that encodes as got fits want. The
+// "number" alias is the one that covers more than one BSON type.
+func acceptsType(want string, got bson.Type) bool {
+	if want == "number" {
+		return got == bson.TypeDouble || got == bson.TypeInt32 || got == bson.TypeInt64 || got == bson.TypeDecimal128
+	}
+	return bsonAliases[got] == want
+}
+
+// coerceNumber converts a Go integer to the width of want, and a Go integer or
+// float to a double. handled is false for anything else, which then has to
+// match want as it is.
+func coerceNumber(v any, want string) (value any, handled bool, err error) {
+	rv := reflect.ValueOf(v)
+
+	var n int64
+	switch rv.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		n = rv.Int()
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		u := rv.Uint()
+		if u > math.MaxInt64 {
+			// Too big for any of the three widths, so there is nothing to convert.
+			if wantsNumber(want) {
+				return nil, true, outOfRange(v, want)
+			}
+			return nil, false, nil
+		}
+		n = int64(u)
+	case reflect.Float32, reflect.Float64:
+		if want == "double" {
+			return rv.Float(), true, nil
+		}
+		return nil, false, nil
+	default:
+		return nil, false, nil
+	}
+
+	switch want {
+	case "int":
+		if n < math.MinInt32 || n > math.MaxInt32 {
+			return nil, true, outOfRange(v, want)
+		}
+		return int32(n), true, nil
+	case "long":
+		return n, true, nil
+	case "double":
+		if n < -maxExactFloatInt || n > maxExactFloatInt {
+			return nil, true, outOfRange(v, want)
+		}
+		return float64(n), true, nil
+	default:
+		return nil, false, nil
+	}
+}
+
+func wantsNumber(want string) bool {
+	return want == "int" || want == "long" || want == "double"
+}
+
+func outOfRange(v any, want string) error {
+	return fmt.Errorf("default %v (%T) is out of range for bsonType %q", v, v, want)
+}
+
+// coerceElements fits each element of a slice default to the array's element
+// type, so a []int on an array of bigint is written as longs.
+func coerceElements(elem migrate.ColumnType, v any) (any, error) {
+	rv := reflect.ValueOf(v)
+	isList := rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array
+	// A byte slice only encodes as an array when it is a bson.RawArray, which
+	// already holds encoded elements.
+	if !isList || rv.Type().Elem().Kind() == reflect.Uint8 {
+		return v, nil
+	}
+
+	out := make(bson.A, 0, rv.Len())
+	for i := range rv.Len() {
+		item, err := coerceDefault(elem, rv.Index(i).Interface())
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, nil
 }
 
 // missingValue matches the documents that hold no value for field.
@@ -784,7 +1024,8 @@ func (e *Executor) dropField(ctx context.Context, table string, a *migrate.Alter
 	}
 
 	present := bson.M{a.Name: bson.M{"$exists": true}}
-	if unsetErr := e.updateDocuments(ctx, table, present, bson.M{"$unset": bson.M{a.Name: ""}}); unsetErr != nil {
+	unset := bson.M{"$unset": bson.M{a.Name: ""}}
+	if unsetErr := e.updateDocuments(ctx, table, present, unset, schema != nil); unsetErr != nil {
 		return unsetErr
 	}
 
@@ -823,7 +1064,7 @@ func (e *Executor) renameField(ctx context.Context, table string, a *migrate.Alt
 
 	present := bson.M{a.Name: bson.M{"$exists": true}}
 	update := bson.M{"$rename": bson.M{a.Name: a.NewName}}
-	if renameErr := e.updateDocuments(ctx, table, present, update); renameErr != nil {
+	if renameErr := e.updateDocuments(ctx, table, present, update, schema != nil); renameErr != nil {
 		return renameErr
 	}
 
@@ -833,17 +1074,28 @@ func (e *Executor) renameField(ctx context.Context, table string, a *migrate.Alt
 	return e.setSchema(ctx, table, validator, renameProperty(schema, a.Name, a.NewName))
 }
 
-// updateDocuments writes to every document that matches filter. Validation is
-// bypassed because the data and the validator change in two steps, and the
-// first one would trip over the validator the second is about to retire: a
-// field being dropped is still required, and one being added is not yet
-// allowed under additionalProperties false.
-func (e *Executor) updateDocuments(ctx context.Context, table string, filter, update bson.M) error {
-	opts := options.UpdateMany().SetBypassDocumentValidation(true)
-	if _, err := e.db.Collection(table).UpdateMany(ctx, filter, update, opts); err != nil {
+// updateDocuments writes to every document that matches filter.
+// editsValidator says whether the action goes on to edit a $jsonSchema
+// validator.
+func (e *Executor) updateDocuments(ctx context.Context, table string, filter, update bson.M, editsValidator bool) error {
+	if _, err := e.db.Collection(table).UpdateMany(ctx, filter, update, updateOptions(editsValidator)); err != nil {
 		return fmt.Errorf("update documents: %w", err)
 	}
 	return nil
+}
+
+// updateOptions skips validation only when the action edits the validator. The
+// data and the validator change in two steps, and the first would trip over
+// the validator the second is about to retire: a field being dropped is still
+// required, and one being added is not yet allowed under additionalProperties
+// false. With no validator to edit there is nothing to retire, and bypassing
+// would ask for a privilege readWrite doesn't have.
+func updateOptions(editsValidator bool) *options.UpdateManyOptionsBuilder {
+	opts := options.UpdateMany()
+	if editsValidator {
+		opts.SetBypassDocumentValidation(true)
+	}
+	return opts
 }
 
 func (e *Executor) countDocuments(ctx context.Context, table string, filter bson.M) (int64, error) {

@@ -3,7 +3,9 @@ package mongomigrate
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -488,6 +490,27 @@ func TestRender_invalid(t *testing.T) {
 			`column "a": column type is not set`,
 		},
 		{
+			"add a column whose default is a typed nil",
+			alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+				return q.AddColumn("a", migrate.Text, migrate.NotNull(), migrate.Default((*string)(nil)))
+			}),
+			`column "a": default <nil> (*string) does not match bsonType "string"`,
+		},
+		{
+			"add a column whose default has the wrong type",
+			alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+				return q.AddColumn("a", migrate.Text, migrate.Default(5))
+			}),
+			`column "a": default 5 (int) does not match bsonType "string"`,
+		},
+		{
+			"add a column whose default is out of range",
+			alterTable(t, func(q *migrate.AlterTableQuery) *migrate.AlterTableQuery {
+				return q.AddColumn("a", migrate.Integer, migrate.Default(int64(3_000_000_000)))
+			}),
+			`column "a": default 3000000000 (int64) is out of range for bsonType "int"`,
+		},
+		{
 			"add a column without a name",
 			&migrate.AlterTable{
 				Table:   "c",
@@ -939,4 +962,164 @@ func TestDecodeValidator(t *testing.T) {
 		_, err := decodeValidator(collectionOptions(t, bson.M{"validator": "nope"}))
 		require.Error(t, err)
 	})
+}
+
+// namedString has a string kind but not the string type, the way an enum does.
+type namedString string
+
+func TestColumnDefault(t *testing.T) {
+	dec, err := bson.ParseDecimal128("1.5")
+	require.NoError(t, err)
+	oid := bson.NewObjectID()
+	when := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	tests := []struct {
+		name    string
+		typ     migrate.ColumnType
+		value   any
+		want    any
+		wantErr string
+	}{
+		// Go integers take the width the property names.
+		{name: "int on integer", typ: migrate.Integer, value: 0, want: int32(0)},
+		{name: "int64 on integer", typ: migrate.Integer, value: int64(1), want: int32(1)},
+		{name: "uint8 on integer", typ: migrate.Integer, value: uint8(7), want: int32(7)},
+		{name: "int on smallint", typ: migrate.SmallInt, value: -3, want: int32(-3)},
+		{name: "largest int32 on integer", typ: migrate.Integer, value: int64(math.MaxInt32), want: int32(math.MaxInt32)},
+		{name: "int on bigint", typ: migrate.BigInt, value: 0, want: int64(0)},
+		{name: "int32 on bigint", typ: migrate.BigInt, value: int32(5), want: int64(5)},
+		{name: "int on bigserial", typ: migrate.BigSerial, value: 9, want: int64(9)},
+		{name: "int on float", typ: migrate.Float, value: 0, want: float64(0)},
+		{name: "float32 on float", typ: migrate.Float, value: float32(1.5), want: 1.5},
+		{name: "float64 on float", typ: migrate.Float, value: 2.5, want: 2.5},
+		{name: "largest exact int on float", typ: migrate.Float, value: int64(1 << 53), want: float64(1 << 53)},
+
+		// Out of range or not exact is an error and not a silent change.
+		{name: "int32 overflow", typ: migrate.Integer, value: int64(math.MaxInt32) + 1, wantErr: `is out of range for bsonType "int"`},
+		{name: "int32 underflow", typ: migrate.Integer, value: int64(math.MinInt32) - 1, wantErr: `is out of range for bsonType "int"`},
+		{name: "uint64 overflow on bigint", typ: migrate.BigInt, value: uint64(math.MaxUint64), wantErr: `is out of range for bsonType "long"`},
+		{name: "int64 too big to be exact on float", typ: migrate.Float, value: int64(1<<53) + 1, wantErr: `is out of range for bsonType "double"`},
+
+		// A float is not turned into an integer, even a whole one.
+		{name: "float on integer", typ: migrate.Integer, value: 2.0, wantErr: `does not match bsonType "int"`},
+		{name: "float on bigint", typ: migrate.BigInt, value: 2.0, wantErr: `does not match bsonType "long"`},
+		{name: "string on integer", typ: migrate.Integer, value: "5", wantErr: `does not match bsonType "int"`},
+		{name: "bool on float", typ: migrate.Float, value: true, wantErr: `does not match bsonType "double"`},
+
+		// These pass as they are when the value already encodes as the type.
+		{name: "string on text", typ: migrate.Text, value: "x", want: "x"},
+		{name: "named string on text", typ: migrate.Text, value: namedString("x"), want: namedString("x")},
+		{name: "string on uuid", typ: migrate.UUID, value: "6ba7b810-9dad-11d1-80b4-00c04fd430c8", want: "6ba7b810-9dad-11d1-80b4-00c04fd430c8"},
+		{name: "bool on boolean", typ: migrate.Boolean, value: true, want: true},
+		{name: "time on timestamp", typ: migrate.Timestamp, value: when, want: when},
+		{name: "time on date", typ: migrate.Date, value: when, want: when},
+		{name: "bytes on bytes", typ: migrate.Bytes, value: []byte{1, 2}, want: []byte{1, 2}},
+		{name: "decimal on numeric", typ: migrate.Numeric(10, 2), value: dec, want: dec},
+		{name: "map on json", typ: migrate.JSON, value: bson.M{"a": 1}, want: bson.M{"a": 1}},
+		{name: "int on text", typ: migrate.Text, value: 5, wantErr: `default 5 (int) does not match bsonType "string"`},
+		{name: "string on boolean", typ: migrate.Boolean, value: "true", wantErr: `does not match bsonType "bool"`},
+		{name: "string on timestamp", typ: migrate.Timestamp, value: "2026-01-02", wantErr: `does not match bsonType "date"`},
+		{name: "string on bytes", typ: migrate.Bytes, value: "ab", wantErr: `does not match bsonType "binData"`},
+		{name: "int on numeric", typ: migrate.Numeric(10, 2), value: 5, wantErr: `does not match bsonType "decimal"`},
+		{name: "string on json", typ: migrate.JSON, value: "{}", wantErr: `does not match bsonType "object"`},
+
+		// A pointer that is nil encodes as null, which no property accepts a
+		// default of, nullable or not.
+		{name: "typed nil pointer on text", typ: migrate.Text, value: (*string)(nil), wantErr: `does not match bsonType "string"`},
+		{name: "typed nil pointer on integer", typ: migrate.Integer, value: (*int)(nil), wantErr: `does not match bsonType "int"`},
+		{name: "non-nil pointer on text", typ: migrate.Text, value: ptr("x"), want: ptr("x")},
+
+		// An array takes its elements in the element type's width.
+		{name: "ints on array of integer", typ: migrate.ArrayOf(migrate.Integer), value: []int{1, 2}, want: bson.A{int32(1), int32(2)}},
+		{name: "ints on array of bigint", typ: migrate.ArrayOf(migrate.BigInt), value: []int{1}, want: bson.A{int64(1)}},
+		{name: "strings on array of text", typ: migrate.ArrayOf(migrate.Text), value: []string{"a"}, want: bson.A{"a"}},
+		{name: "empty slice on array", typ: migrate.ArrayOf(migrate.Text), value: []string{}, want: bson.A{}},
+		{name: "any slice on array", typ: migrate.ArrayOf(migrate.BigInt), value: []any{1, int8(2)}, want: bson.A{int64(1), int64(2)}},
+		{name: "array of arrays", typ: migrate.ArrayOf(migrate.ArrayOf(migrate.BigInt)), value: [][]int{{1}, {2}}, want: bson.A{bson.A{int64(1)}, bson.A{int64(2)}}},
+		{name: "ints on array of text", typ: migrate.ArrayOf(migrate.Text), value: []int{1}, wantErr: `does not match bsonType "string"`},
+		{name: "nil slice on array", typ: migrate.ArrayOf(migrate.Text), value: []string(nil), wantErr: `does not match bsonType "array"`},
+		{name: "string on array", typ: migrate.ArrayOf(migrate.Text), value: "a", wantErr: `does not match bsonType "array"`},
+		{name: "bytes on array", typ: migrate.ArrayOf(migrate.Integer), value: []byte{1}, wantErr: `does not match bsonType "array"`},
+		{name: "a nil element", typ: migrate.ArrayOf(migrate.Text), value: []any{"a", nil}, wantErr: `does not match bsonType "string"`},
+
+		// A raw type is the driver's, so the value has to encode as exactly it.
+		{name: "object id on raw objectId", typ: migrate.Type("objectId"), value: oid, want: oid},
+		{name: "string on raw objectId", typ: migrate.Type("objectId"), value: "abc", wantErr: `does not match bsonType "objectId"`},
+		{name: "int on raw int", typ: migrate.Type("int"), value: 5, want: 5},
+		{name: "int64 on raw int", typ: migrate.Type("int"), value: int64(5), wantErr: `does not match bsonType "int"`},
+		{name: "int on raw long", typ: migrate.Type("long"), value: 5, wantErr: `does not match bsonType "long"`},
+		{name: "int64 on raw long", typ: migrate.Type("long"), value: int64(5), want: int64(5)},
+		{name: "int on raw number", typ: migrate.Type("number"), value: 5, want: 5},
+		{name: "float on raw number", typ: migrate.Type("number"), value: 1.5, want: 1.5},
+		{name: "string on raw number", typ: migrate.Type("number"), value: "5", wantErr: `does not match bsonType "number"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &migrate.Column{Name: "c", Type: tt.typ, NotNull: true, Default: &migrate.DefaultValue{Value: tt.value}}
+
+			got, err := columnDefault(c)
+
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, migrate.ErrInvalidOperation)
+				assert.ErrorContains(t, err, tt.wantErr)
+				assert.ErrorContains(t, err, `mongomigrate: column "c": default `)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+func TestColumnDefault_noLiteral(t *testing.T) {
+	tests := []struct {
+		name   string
+		defVal *migrate.DefaultValue
+	}{
+		{"no default at all", nil},
+		{"an untyped nil is DEFAULT NULL, the same as having none", &migrate.DefaultValue{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &migrate.Column{Name: "c", Type: migrate.Text, Default: tt.defVal}
+
+			got, err := columnDefault(c)
+
+			require.NoError(t, err)
+			assert.Nil(t, got, "there is nothing to backfill")
+		})
+	}
+}
+
+func TestUpdateOptions_bypassOnlyWhenEditingTheValidator(t *testing.T) {
+	// Bypassing validation takes a privilege readWrite lacks, and skips a
+	// validator nothing is about to retire. So it is asked for only when the
+	// action also edits a $jsonSchema validator.
+	tests := []struct {
+		name           string
+		editsValidator bool
+		want           bool
+	}{
+		{"an action that edits the validator", true, true},
+		{"an action that leaves the validator alone", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var applied options.UpdateManyOptions
+			for _, set := range updateOptions(tt.editsValidator).List() {
+				require.NoError(t, set(&applied))
+			}
+
+			if tt.want {
+				require.NotNil(t, applied.BypassDocumentValidation)
+				assert.True(t, *applied.BypassDocumentValidation)
+				return
+			}
+			assert.True(t, applied.BypassDocumentValidation == nil || !*applied.BypassDocumentValidation)
+		})
+	}
 }

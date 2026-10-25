@@ -1142,3 +1142,155 @@ func TestLive_alterInMigration(t *testing.T) {
 	assert.NotContains(t, schema.Properties, "status")
 	assert.Equal(t, []string{"email"}, schema.Required)
 }
+
+func TestLive_addFieldDefaultMatchesItsType(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+	db := migrate.NewDB(New(mdb))
+	createUsers(t, db)
+	insertDocs(t, mdb, "users",
+		bson.M{"_id": 1, "email": "a@example.com"},
+		bson.M{"_id": 2, "email": "b@example.com"},
+	)
+
+	// A Go int encodes as int32, so each of these would otherwise be written
+	// in a width its property refuses.
+	err := db.NewAlterTable("users").
+		AddColumn("count", migrate.BigInt, migrate.NotNull(), migrate.Default(0)).
+		AddColumn("ratio", migrate.Float, migrate.NotNull(), migrate.Default(0)).
+		AddColumn("rank", migrate.Integer, migrate.NotNull(), migrate.Default(int64(1))).
+		AddColumn("tags", migrate.ArrayOf(migrate.BigInt), migrate.NotNull(), migrate.Default([]int{1, 2})).
+		Exec(ctx)
+	require.NoError(t, err)
+
+	for _, doc := range docsOf(t, mdb, "users") {
+		assert.Equal(t, int64(0), doc["count"])
+		assert.Equal(t, float64(0), doc["ratio"])
+		assert.Equal(t, int32(1), doc["rank"])
+		assert.Equal(t, bson.A{int64(1), int64(2)}, doc["tags"])
+	}
+
+	// The backfill skipped validation, so the proof is that a normal write to a
+	// backfilled document passes it now.
+	users := mdb.Collection("users")
+	_, err = users.UpdateOne(ctx, bson.M{"_id": 1}, bson.M{"$set": bson.M{"email": "z@example.com"}})
+	require.NoError(t, err, "a backfilled document must satisfy the validator it was backfilled for")
+	_, err = users.UpdateOne(ctx, bson.M{"_id": 2}, bson.M{"$inc": bson.M{"count": int64(1)}})
+	require.NoError(t, err)
+}
+
+func TestLive_addFieldChecksExistingValues(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+	db := migrate.NewDB(New(mdb))
+	createUsers(t, db)
+	// age is not in the validator yet, so the documents can hold anything there.
+	insertDocs(t, mdb, "users",
+		bson.M{"_id": 1, "email": "a@example.com"},
+		bson.M{"_id": 2, "email": "b@example.com", "age": "old"},
+		bson.M{"_id": 3, "email": "c@example.com", "age": int32(7)},
+		bson.M{"_id": 4, "email": "d@example.com", "age": int64(8)},
+	)
+
+	t.Run("a value of another type fails the action with a count", func(t *testing.T) {
+		err := db.NewAlterTable("users").AddColumn("age", migrate.Integer).Exec(ctx)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `cannot add field "age" to "users": 2 documents hold a value that is not bsonType "int" or "null"`)
+		schema := schemaOf(t, mdb, "users")
+		require.NotNil(t, schema)
+		assert.NotContains(t, schema.Properties, "age")
+	})
+
+	t.Run("a required field names only its own type", func(t *testing.T) {
+		err := db.NewAlterTable("users").AddColumn("age", migrate.Integer, migrate.NotNull(), migrate.Default(5)).Exec(ctx)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `2 documents hold a value that is not bsonType "int"`)
+	})
+
+	t.Run("nothing is backfilled when the check fails", func(t *testing.T) {
+		docs := docsOf(t, mdb, "users")
+		assert.NotContains(t, docs[0], "age", "the check runs before the first write")
+	})
+
+	t.Run("a null is a value an optional field accepts", func(t *testing.T) {
+		require.NoError(t, db.NewCreateTable("nulls").Column("email", migrate.Text, migrate.NotNull()).Exec(ctx))
+		insertDocs(t, mdb, "nulls", bson.M{"_id": 1, "email": "a", "age": nil}, bson.M{"_id": 2, "email": "b", "age": int32(7)})
+
+		require.NoError(t, db.NewAlterTable("nulls").AddColumn("age", migrate.Integer).Exec(ctx))
+	})
+
+	t.Run("a null in a required field is filled with the default", func(t *testing.T) {
+		require.NoError(t, db.NewCreateTable("nulls2").Column("email", migrate.Text, migrate.NotNull()).Exec(ctx))
+		insertDocs(t, mdb, "nulls2", bson.M{"_id": 1, "email": "a", "age": nil}, bson.M{"_id": 2, "email": "b", "age": int32(7)})
+
+		err := db.NewAlterTable("nulls2").AddColumn("age", migrate.Integer, migrate.NotNull(), migrate.Default(5)).Exec(ctx)
+		require.NoError(t, err)
+
+		docs := docsOf(t, mdb, "nulls2")
+		assert.Equal(t, int32(5), docs[0]["age"])
+		assert.Equal(t, int32(7), docs[1]["age"])
+	})
+
+	t.Run("it holds without a validator too", func(t *testing.T) {
+		require.NoError(t, mdb.Database().CreateCollection(ctx, "plain"))
+		insertDocs(t, mdb, "plain", bson.M{"_id": 1, "age": "old"})
+
+		err := db.NewAlterTable("plain").AddColumn("age", migrate.Integer).Exec(ctx)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `cannot add field "age" to "plain": 1 documents hold a value that is not bsonType "int" or "null"`)
+	})
+}
+
+func TestLive_alterRefusesAValidatorItCannotEdit(t *testing.T) {
+	ctx := context.Background()
+	mdb := openLive(t)
+	db := migrate.NewDB(New(mdb))
+
+	validators := map[string]bson.M{
+		"query": {"name": bson.M{"$type": "string"}},
+		"schema inside $and": {"$and": bson.A{
+			bson.M{"$jsonSchema": bson.M{"bsonType": "object", "required": bson.A{"name"}}},
+		}},
+	}
+	for label, validator := range validators {
+		t.Run(label, func(t *testing.T) {
+			// A write that skipped such a validator could leave documents it
+			// rejects, and the edit that would repair it has nowhere to go.
+			coll := "guarded"
+			require.NoError(t, mdb.Database().CreateCollection(ctx, coll, options.CreateCollection().SetValidator(validator)))
+			t.Cleanup(func() { require.NoError(t, mdb.Collection(coll).Drop(ctx)) })
+			insertDocs(t, mdb, coll, bson.M{"_id": 1, "name": "a", "extra": "x"})
+
+			before := docsOf(t, mdb, coll)
+			infoBefore := collectionInfo(t, mdb, coll)
+			require.NotNil(t, infoBefore)
+
+			builds := map[string]func() *migrate.AlterTableQuery{
+				"add": func() *migrate.AlterTableQuery { return db.NewAlterTable(coll).AddColumn("n", migrate.Text) },
+				"add with default": func() *migrate.AlterTableQuery {
+					return db.NewAlterTable(coll).AddColumn("n", migrate.Text, migrate.Default("x"))
+				},
+				"drop":           func() *migrate.AlterTableQuery { return db.NewAlterTable(coll).DropColumn("name") },
+				"drop if exists": func() *migrate.AlterTableQuery { return db.NewAlterTable(coll).DropColumn("extra").IfExists() },
+				"rename":         func() *migrate.AlterTableQuery { return db.NewAlterTable(coll).RenameColumn("name", "title") },
+				"after a good one": func() *migrate.AlterTableQuery {
+					return db.NewAlterTable(coll).AddColumn("n", migrate.Text, migrate.Default("x")).DropColumn("name")
+				},
+			}
+			for name, build := range builds {
+				err := build().Exec(ctx)
+
+				require.ErrorIs(t, err, migrate.ErrInvalidOperation, name)
+				assert.ErrorContains(t, err, `alter table "guarded": validator has no top-level $jsonSchema; alter it by hand`, name)
+			}
+
+			assert.Equal(t, before, docsOf(t, mdb, coll), "no document changed")
+			infoAfter := collectionInfo(t, mdb, coll)
+			require.NotNil(t, infoAfter)
+			assert.Equal(t, infoBefore.Options.Validator, infoAfter.Options.Validator, "the validator is as it was")
+		})
+	}
+}
