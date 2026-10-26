@@ -7,7 +7,7 @@ replace github.com/xraph/grove => ../../
 require (
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/stretchr/testify v1.11.1
-	github.com/xraph/go-utils v1.4.1
+	github.com/xraph/go-utils v1.5.0
 	github.com/xraph/grove v1.10.0
 	go.opentelemetry.io/otel v1.45.0
 	go.opentelemetry.io/otel/trace v1.45.0

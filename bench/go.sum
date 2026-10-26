@@ -49,8 +49,8 @@ github.com/vmihailenco/msgpack/v5 v5.4.1 h1:cQriyiUvjTwOHg8QZaPihLWeRAAVoCpE00IU
 github.com/vmihailenco/msgpack/v5 v5.4.1/go.mod h1:GaZTsDaehaPpQVyxrf5mtQlH+pc21PIudVV/E3rRQok=
 github.com/vmihailenco/tagparser/v2 v2.0.0 h1:y09buUbR+b5aycVFQs/g70pqKVZNBmxwAhO7/IwNM9g=
 github.com/vmihailenco/tagparser/v2 v2.0.0/go.mod h1:Wri+At7QHww0WTrCBeu4J6bNtoV6mEfg5OIWRZA9qds=
-github.com/xraph/go-utils v1.4.1 h1:uP4CD+AaCKThbfR8kdQUh0kKHCFFaGb300fKMEJoSJY=
-github.com/xraph/go-utils v1.4.1/go.mod h1:fMahP6kPUjJP5UmzVje2GSL7OGT9+xpYkukK2dLjSMM=
+github.com/xraph/go-utils v1.5.0 h1:44pIJooK565ds/Ica0yyPoRNbr0qUTgj1aay8ewad1w=
+github.com/xraph/go-utils v1.5.0/go.mod h1:fMahP6kPUjJP5UmzVje2GSL7OGT9+xpYkukK2dLjSMM=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
 go.opentelemetry.io/auto/sdk v1.2.1/go.mod h1:KRTj+aOaElaLi+wW1kO/DZRXwkF4C5xPbEe3ZiIhN7Y=
 go.opentelemetry.io/otel v1.45.0 h1:pdrWmLHofpubmArBv1LgFSv1Z0Ie/ppdZzu+kUN5EeU=
