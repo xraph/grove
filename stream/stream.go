@@ -10,9 +10,15 @@ package stream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 )
+
+// errEndOfStream is returned by a decode function that has run out of rows
+// before the cursor has, such as Filter rejecting the last rows or Take
+// reaching its limit. Stream.Next ends iteration cleanly when it sees it.
+var errEndOfStream = errors.New("stream: end of stream")
 
 // HookRunner is an optional interface for per-row hook execution.
 // This avoids importing the hook package directly.
@@ -92,8 +98,12 @@ func (s *Stream[T]) Next(ctx context.Context) bool {
 
 		val, err := s.decode(s.cursor)
 		if err != nil {
-			s.err = err
 			s.done = true
+			if errors.Is(err, errEndOfStream) {
+				s.err = s.cursor.Err()
+			} else {
+				s.err = err
+			}
 			return false
 		}
 
