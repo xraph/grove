@@ -8,7 +8,7 @@ require (
 	github.com/elastic/elastic-transport-go/v8 v8.6.0
 	github.com/elastic/go-elasticsearch/v8 v8.17.0
 	github.com/stretchr/testify v1.11.1
-	github.com/xraph/go-utils v1.4.1
+	github.com/xraph/go-utils v1.5.0
 	github.com/xraph/grove v1.10.0
 	go.opentelemetry.io/otel v1.45.0
 )

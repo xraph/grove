@@ -6,7 +6,7 @@ replace github.com/xraph/grove => ../../..
 
 require (
 	github.com/gorilla/websocket v1.5.3
-	github.com/xraph/go-utils v1.4.1
+	github.com/xraph/go-utils v1.5.0
 	github.com/xraph/grove v1.10.0
 	modernc.org/sqlite v1.58.0
 )
