@@ -65,9 +65,6 @@ func TestFilter_PropagatesDecodeError(t *testing.T) {
 }
 
 func TestFilter_TrailingRejectedRowsAreDropped(t *testing.T) {
-	t.Skip("bug: Filter yields a zero value when the final rows are rejected; " +
-		"its decode returns (zero, nil) once the cursor is exhausted, and Stream.Next treats that as a row")
-
 	s, _ := newIntStream([]int{1, 2, 3})
 
 	got, err := Filter(s, func(v int) bool { return v%2 == 0 }).Collect(t.Context())
@@ -86,9 +83,6 @@ func TestTake_WholeStreamWhenNIsLarge(t *testing.T) {
 }
 
 func TestTake_StopsAfterN(t *testing.T) {
-	t.Skip("bug: Take marks the source stream done instead of the returned one, " +
-		"so after n rows it keeps yielding zero values until the cursor runs out")
-
 	s, _ := newIntStream([]int{1, 2, 3, 4, 5})
 
 	got, err := Take(s, 2).Collect(t.Context())
@@ -122,9 +116,6 @@ func TestMap_PropagatesFnError(t *testing.T) {
 }
 
 func TestMap_TransformsEveryRow(t *testing.T) {
-	t.Skip("bug: Map advances the cursor inside decode as well as in Stream.Next, " +
-		"so it skips every other row and yields a trailing zero value ([1,2,3] maps to [20 0])")
-
 	s, _ := newIntStream([]int{1, 2, 3})
 
 	got, err := Map(s, func(v int) (int, error) { return v * 10, nil }).Collect(t.Context())
@@ -170,4 +161,24 @@ func TestStream_AllYieldsTerminalError(t *testing.T) {
 	assert.Equal(t, []int{1}, vals)
 	require.Len(t, errs, 1)
 	require.ErrorIs(t, errs[0], iterErr)
+}
+
+func TestFilter_ReportsCursorErrorAfterRejectedRows(t *testing.T) {
+	iterErr := errors.New("connection reset")
+	mc := &mockCursor{data: []int{2, 3}, iterErr: iterErr}
+
+	got, err := Filter(New[int](mc, decodeInt), func(v int) bool { return v%2 == 0 }).Collect(t.Context())
+
+	require.ErrorIs(t, err, iterErr)
+	assert.Equal(t, []int{2}, got)
+}
+
+func TestPipeline_ComposesFilterTakeAndChunk(t *testing.T) {
+	s, _ := newIntStream([]int{1, 2, 3, 4, 5, 6, 7, 8})
+
+	evens := Filter(s, func(v int) bool { return v%2 == 0 })
+	got, err := Chunk(Take(evens, 3), 2).Collect(t.Context())
+
+	require.NoError(t, err)
+	assert.Equal(t, [][]int{{2, 4}, {6}}, got)
 }

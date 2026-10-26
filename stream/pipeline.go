@@ -7,11 +7,7 @@ func Map[T, U any](s *Stream[T], fn func(T) (U, error)) *Stream[U] {
 	return &Stream[U]{
 		cursor: s.cursor,
 		decode: func(c Cursor) (U, error) {
-			if !s.cursor.Next() {
-				var zero U
-				s.done = true
-				return zero, s.cursor.Err()
-			}
+			// Stream.Next has already advanced the cursor to this row.
 			val, err := s.decode(c)
 			if err != nil {
 				var zero U
@@ -39,7 +35,7 @@ func Filter[T any](s *Stream[T], fn func(T) bool) *Stream[T] {
 				// Skip this value, try next.
 				if !c.Next() {
 					var zero T
-					return zero, c.Err()
+					return zero, errEndOfStream
 				}
 			}
 		},
@@ -56,8 +52,7 @@ func Take[T any](s *Stream[T], n int) *Stream[T] {
 			count++
 			if count > n {
 				var zero T
-				s.done = true
-				return zero, nil
+				return zero, errEndOfStream
 			}
 			return original(c)
 		},
