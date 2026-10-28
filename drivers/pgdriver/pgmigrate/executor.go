@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -171,8 +172,7 @@ func (e *Executor) EnsureMigrationTable(ctx context.Context) error {
 		migrated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		UNIQUE(version, "group")
 	)`, migrationTableName)
-	_, err := e.exec(ctx, query)
-	return ignoreConcurrentCreate(err)
+	return e.ensureTable(ctx, query)
 }
 
 // EnsureLockTable creates the grove_migration_locks table if it doesn't exist.
@@ -183,36 +183,99 @@ func (e *Executor) EnsureLockTable(ctx context.Context) error {
 		locked_by   VARCHAR(255),
 		CONSTRAINT single_lock CHECK (id = 1)
 	)`, lockTableName)
-	_, err := e.exec(ctx, query)
-	return ignoreConcurrentCreate(err)
+	return e.ensureTable(ctx, query)
 }
 
-// ignoreConcurrentCreate swallows the unique_violation (SQLSTATE 23505) that a
-// concurrent CREATE TABLE IF NOT EXISTS produces. CREATE TABLE IF NOT EXISTS is
-// NOT atomic against concurrent creation in Postgres: two sessions both pass
-// the existence check, then the loser collides on pg_type_typname_nsp_index
-// when it inserts the table's rowtype. This happens on first boot when several
-// processes/extensions migrate the same database at once (e.g. forge dev
-// starting twinos+atlas, or identity+portal+studio on the platform DB). The
-// winner has committed by the time 23505 fires, so the table now exists and the
-// ensure step has effectively succeeded.
+// bootstrapLockKey is the transaction-level advisory lock ensureTable holds
+// while it creates grove's own tables. It is the FNV-1a 64-bit hash of
+// "github.com/xraph/grove/drivers/pgdriver/pgmigrate.bootstrap"
+// (0x547753172061a306) read as an int64, so it stays clear of the migration
+// lock's key 1 and of keys an application is likely to pick.
+const bootstrapLockKey int64 = 6086424780207137542
+
+// ensureTable runs one of grove's CREATE TABLE IF NOT EXISTS statements under
+// bootstrapLockKey.
+//
+// The migration lock can't protect these statements: it records its holder
+// in grove_migration_locks, so the tables have to exist before anyone takes
+// it. And Postgres doesn't make CREATE TABLE IF NOT EXISTS atomic against a
+// concurrent create. Two sessions both pass the existence check, and the
+// loser fails with 42P07 on the table or its serial sequence, 42710 on its
+// row type, or 23505 on a catalog index. On a fresh database every replica
+// booting at once runs that race.
+//
+// pg_advisory_xact_lock queues the sessions instead. Each one takes the lock
+// in its own short transaction, so the next one in line runs its check after
+// the previous CREATE has committed and finds the table. Postgres drops a
+// transaction-level lock at COMMIT or ROLLBACK, so nothing can leak back into
+// the pool, and the lock is held for one DDL statement at a time, never for
+// a whole migration run.
+//
+// A process on an older grove takes no bootstrap lock and can still collide
+// with this one, so the loser's errors are still treated as success (see
+// [ignoreConcurrentCreate]).
+//
+// Once AcquireLock has a dedicated connection the tables already exist (the
+// lock is recorded in one of them), so the statement runs there directly.
+func (e *Executor) ensureTable(ctx context.Context, query string) error {
+	if e.dedicated != nil {
+		_, err := e.exec(ctx, query)
+		return ignoreConcurrentCreate(err)
+	}
+
+	tx, err := e.drv.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("pgmigrate: bootstrap: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() //nolint:errcheck // no-op after Commit; on error the transaction is abandoned anyway
+
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", bootstrapLockKey); err != nil {
+		return fmt.Errorf("pgmigrate: bootstrap lock: %w", err)
+	}
+	if _, err := tx.Exec(ctx, query); err != nil {
+		return ignoreConcurrentCreate(err)
+	}
+	return tx.Commit()
+}
+
+// ignoreConcurrentCreate swallows the errors a concurrent CREATE TABLE IF NOT
+// EXISTS produces in the session that loses the race:
+//
+//   - 23505 unique_violation, when both sessions insert the table's row type
+//     and the loser collides on pg_type_typname_nsp_index
+//   - 42P07 duplicate_table, when the winner's table, serial sequence or
+//     unique index commits between the loser's existence check and its own
+//     create
+//   - 42710 duplicate_object, the same for the table's row type
+//
+// Each one means another session has committed the table, so the ensure step
+// has effectively succeeded. [Executor.ensureTable] keeps grove's own
+// executors out of this race; the codes still matter when a process running
+// an older grove creates the same tables at the same moment (e.g. forge dev
+// starting several extensions on one database during a rolling upgrade).
 func ignoreConcurrentCreate(err error) error {
 	if err == nil {
 		return nil
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
-		if pgErr.Code == "23505" {
+		if slices.Contains(concurrentCreateCodes, pgErr.Code) {
 			return nil
 		}
 		return err
 	}
 	// Fallback when the driver doesn't surface a typed *pgconn.PgError.
-	if strings.Contains(err.Error(), "SQLSTATE 23505") {
-		return nil
+	msg := err.Error()
+	for _, code := range concurrentCreateCodes {
+		if strings.Contains(msg, "SQLSTATE "+code) {
+			return nil
+		}
 	}
 	return err
 }
+
+// concurrentCreateCodes are the SQLSTATEs ignoreConcurrentCreate accepts.
+var concurrentCreateCodes = []string{"23505", "42P07", "42710"}
 
 // AcquireLock attempts to acquire the distributed migration lock using
 // PostgreSQL advisory locks for immediate feedback.
