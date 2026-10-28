@@ -82,3 +82,5 @@ To prevent concurrent migration runs (in a multi-replica deployment, say), the o
 
 If another process holds the lock, the error wraps `migrate.ErrLockHeld` (`migrate.IsLockError(err)` reports it). The Forge extension's `lock_timeout` controls how long it waits.
 
+The lock lives in `grove_migration_locks`, so that table and `grove_migrations` have to exist before anyone can take it. On PostgreSQL the executor creates them under a second advisory lock, `pg_advisory_xact_lock`, held only for each `CREATE TABLE IF NOT EXISTS`. Replicas that boot together on an empty database queue for it instead of failing with `42P07` or `42710`, which is what Postgres raises when two sessions create the same table at once.
+

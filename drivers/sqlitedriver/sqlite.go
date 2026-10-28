@@ -59,24 +59,25 @@ func (db *SqliteDB) SupportsReturning() bool { return true }
 
 // Open parses the DSN, applies configuration options, opens the SQLite
 // database, and configures WAL mode and foreign keys.
+//
+// Foreign keys are a per-connection setting in SQLite, so Open asks for them
+// in the DSN (see [withForeignKeys]) and modernc.org/sqlite turns them on for
+// every connection the pool dials. A DSN that already sets foreign_keys
+// through a _pragma parameter is left as the caller wrote it.
 func (db *SqliteDB) Open(ctx context.Context, dsn string, opts ...driver.Option) error {
 	db.opts = driver.ApplyOptions(opts)
 
-	sqlDB, err := sql.Open("sqlite", dsn)
+	sqlDB, err := sql.Open("sqlite", withForeignKeys(dsn))
 	if err != nil {
 		return fmt.Errorf("sqlitedriver: open: %w", err)
 	}
 
-	// SQLite only supports one writer at a time; enable WAL mode for better concurrency.
+	// SQLite only supports one writer at a time; enable WAL mode for better
+	// concurrency. Unlike foreign_keys, journal_mode=WAL is stored in the
+	// database file, so setting it on one connection covers all of them.
 	if _, err := sqlDB.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
 		_ = sqlDB.Close()
 		return fmt.Errorf("sqlitedriver: enable WAL: %w", err)
-	}
-
-	// Enable foreign keys.
-	if _, err := sqlDB.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
-		_ = sqlDB.Close()
-		return fmt.Errorf("sqlitedriver: enable foreign keys: %w", err)
 	}
 
 	if db.opts.PoolSize > 0 {

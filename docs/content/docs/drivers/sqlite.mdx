@@ -38,7 +38,9 @@ if err != nil {
 defer db.Close()
 ```
 
-`Open` automatically runs `PRAGMA journal_mode=WAL` and `PRAGMA foreign_keys=ON`, so you do not need to set these yourself.
+`Open` turns on WAL mode and foreign keys, so you don't need to set either yourself. Foreign keys are a per-connection setting in SQLite, so `Open` adds `_pragma=foreign_keys(1)` to your DSN and modernc.org/sqlite runs it on every connection the pool opens. The rest of your DSN stays as you wrote it. If it already sets `foreign_keys` in a `_pragma` parameter, `Open` leaves that alone, so `?_pragma=foreign_keys(0)` keeps them off on every connection. WAL mode is stored in the database file, so `Open` sets it once.
+
+Other per-connection pragmas belong in the DSN too, for example `?_pragma=busy_timeout(5000)`. A `PRAGMA` you run through `Exec` reaches only the one pooled connection it happens to run on.
 
 ### DSN Examples
 
