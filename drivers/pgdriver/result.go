@@ -116,6 +116,12 @@ type pgTx struct {
 	// after a commit) returns ErrTxClosed without reaching the server, so
 	// it isn't recorded as an operation.
 	done bool
+
+	// stmts holds the names of statements prepared in the transaction and
+	// not yet closed. A prepared statement belongs to the session, not the
+	// transaction, so Commit and Rollback deallocate whatever is left
+	// before the connection goes back to the pool.
+	stmts map[string]struct{}
 }
 
 var _ driver.Tx = (*pgTx)(nil)
@@ -157,6 +163,7 @@ func (t *pgTx) Commit() error {
 		return t.tx.Commit(context.Background())
 	}
 	t.done = true
+	t.deallocateStmts()
 	ctx, op := t.tel.Start(t.parentContext(), "COMMIT", "")
 	err := t.tx.Commit(ctx)
 	op.End(err)
@@ -170,6 +177,7 @@ func (t *pgTx) Rollback() error {
 		return t.tx.Rollback(context.Background())
 	}
 	t.done = true
+	t.deallocateStmts()
 	ctx, op := t.tel.Start(t.parentContext(), "ROLLBACK", "")
 	err := t.tx.Rollback(ctx)
 	op.End(err)
@@ -185,12 +193,35 @@ func (t *pgTx) parentContext() context.Context {
 	return trace.ContextWithSpan(context.Background(), t.parent)
 }
 
-// Prepare creates a prepared statement within the transaction.
+// Prepare creates a prepared statement within the transaction. Close
+// deallocates it; any statement still open when the transaction ends is
+// deallocated by Commit or Rollback.
 func (t *pgTx) Prepare(ctx context.Context, query string) (driver.Stmt, error) {
-	name := fmt.Sprintf("grove_txps_%p", t)
+	name := stmtName("grove_txps_")
 	_, err := t.tx.Prepare(ctx, name, query)
 	if err != nil {
 		return nil, fmt.Errorf("pgdriver: tx prepare: %w", err)
 	}
+	if t.stmts == nil {
+		t.stmts = make(map[string]struct{})
+	}
+	t.stmts[name] = struct{}{}
 	return &pgTxStmt{name: name, query: query, tx: t}, nil
+}
+
+// deallocateStmt drops one statement from the session. It goes through
+// pgx so pgx forgets the name too, and it uses the protocol's Close
+// message, which the server accepts even in an aborted transaction.
+func (t *pgTx) deallocateStmt(name string) error {
+	delete(t.stmts, name)
+	return t.tx.Conn().Deallocate(context.Background(), name)
+}
+
+// deallocateStmts drops every statement the caller didn't close. It's best
+// effort: a failure here means the connection is broken, and the Commit or
+// Rollback that follows reports that.
+func (t *pgTx) deallocateStmts() {
+	for name := range t.stmts {
+		_ = t.deallocateStmt(name) //nolint:errcheck // a broken connection fails the Commit or Rollback next
+	}
 }

@@ -3,6 +3,8 @@ package pgdriver
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -10,6 +12,17 @@ import (
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/observability"
 )
+
+// stmtSeq numbers the statements grove prepares. A name has to stay unique
+// on its connection for as long as the statement lives, which outlasts the
+// transaction or pooled handle that prepared it, so a pointer won't do:
+// the runtime hands the same address out again once the old value is gone.
+var stmtSeq atomic.Uint64
+
+// stmtName returns a fresh statement name with the given prefix.
+func stmtName(prefix string) string {
+	return prefix + strconv.FormatUint(stmtSeq.Add(1), 10)
+}
 
 // pgPoolStmt wraps a pgxpool.Conn with a prepared statement for repeated execution.
 // It holds the acquired connection and releases it on Close.
@@ -34,8 +47,10 @@ func (s *pgPoolStmt) Exec(ctx context.Context, args ...any) (driver.Result, erro
 }
 
 // Close deallocates the prepared statement and releases the pooled connection.
+// Deallocating through pgx, rather than running DEALLOCATE as SQL, keeps
+// pgx's own record of the connection's statements in step with the server.
 func (s *pgPoolStmt) Close() error {
-	_, err := s.conn.Exec(context.Background(), "DEALLOCATE "+s.sd.Name)
+	err := s.conn.Conn().Deallocate(context.Background(), s.sd.Name)
 	s.conn.Release()
 	return err
 }
@@ -60,8 +75,18 @@ func (s *pgTxStmt) Exec(ctx context.Context, args ...any) (driver.Result, error)
 	return &pgResult{ct: ct}, nil
 }
 
-// Close is a no-op for transaction statements; the prepared statement
-// is automatically cleaned up when the transaction ends.
+// Close deallocates the prepared statement. After the transaction has
+// ended it does nothing: Commit or Rollback already deallocated it, and the
+// connection may be serving someone else by now.
 func (s *pgTxStmt) Close() error {
+	if s.tx.done {
+		return nil
+	}
+	if _, open := s.tx.stmts[s.name]; !open {
+		return nil
+	}
+	if err := s.tx.deallocateStmt(s.name); err != nil {
+		return fmt.Errorf("pgdriver: tx stmt close: %w", err)
+	}
 	return nil
 }

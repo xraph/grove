@@ -267,7 +267,7 @@ func (db *PgDB) Prepare(ctx context.Context, query string) (driver.Stmt, error) 
 	if err != nil {
 		return nil, fmt.Errorf("pgdriver: acquire conn for prepare: %w", err)
 	}
-	name := fmt.Sprintf("grove_ps_%p", conn)
+	name := stmtName("grove_ps_")
 	sd, err := conn.Conn().Prepare(ctx, name, query)
 	if err != nil {
 		conn.Release()
