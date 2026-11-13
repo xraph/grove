@@ -795,8 +795,8 @@ const defaultStreamFetchSize = 100
 // stream.Stream that yields one model instance at a time. The stream
 // transparently fetches rows in batches of 100 from the cursor.
 //
-// The stream owns a dedicated transaction; it is committed when the
-// stream is closed. Always defer stream.Close().
+// Outside a transaction, the stream owns a dedicated transaction. Inside a
+// PgTx it borrows the caller's transaction. Always defer stream.Close().
 //
 //	s, err := db.NewSelect(&users).Where("active = true").Stream(ctx)
 //	if err != nil { ... }
@@ -812,8 +812,8 @@ func (q *SelectQuery) Stream(ctx context.Context) (*stream.Stream[any], error) {
 // a stream.Stream that yields one model instance at a time. Rows are
 // fetched from the server in batches of fetchSize.
 //
-// The stream owns a dedicated transaction; it is committed when the
-// stream is closed. Always defer stream.Close().
+// Outside a transaction, the stream owns a dedicated transaction. Inside a
+// PgTx it borrows the caller's transaction. Always defer stream.Close().
 func (q *SelectQuery) StreamBatch(ctx context.Context, fetchSize int) (*stream.Stream[any], error) {
 	copyQuery := *q
 	q = &copyQuery
@@ -831,11 +831,7 @@ func (q *SelectQuery) StreamBatch(ctx context.Context, fetchSize int) (*stream.S
 	// Run pre-query hooks if configured.
 	var qc *hook.QueryContext
 	if q.db.hooks != nil {
-		qc = &hook.QueryContext{
-			Operation: hook.OpSelect,
-			Table:     q.table.Name,
-			ModelType: q.table.ModelType,
-		}
+		qc = q.buildSelectHookContext()
 		result, err := q.db.hooks.RunPreQuery(ctx, qc)
 		if err != nil {
 			return nil, err
@@ -861,15 +857,21 @@ func (q *SelectQuery) StreamBatch(ctx context.Context, fetchSize int) (*stream.S
 		qc.RawArgs = args
 	}
 
-	// Start a dedicated transaction for the cursor.
-	tx, err := q.db.BeginTx(ctx, &driver.TxOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("pgdriver: stream begin tx: %w", err)
+	// Reuse a caller-owned transaction; acquiring another connection here
+	// both escapes its snapshot and can exhaust a small pool.
+	tx := q.db.txConn
+	ownsTx := tx == nil
+	if ownsTx {
+		tx, err = q.db.BeginTx(ctx, &driver.TxOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("pgdriver: stream begin tx: %w", err)
+		}
 	}
-
-	cursor, err := newPgCursor(ctx, tx, sqlStr, args, fetchSize, true)
+	cursor, err := newPgCursor(ctx, tx, sqlStr, args, fetchSize, ownsTx)
 	if err != nil {
-		_ = tx.Rollback()
+		if ownsTx {
+			_ = tx.Rollback() //nolint:errcheck // Preserve the cursor declaration error.
+		}
 		return nil, err
 	}
 

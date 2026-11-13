@@ -81,6 +81,10 @@ func (s *Stream[T]) Next(ctx context.Context) bool {
 	if s.done {
 		return false
 	}
+	cursor := s.cursor
+	if contextual, ok := cursor.(ContextCursor); ok {
+		cursor = contextualCursor{ContextCursor: contextual, ctx: ctx}
+	}
 
 	for {
 		// Check context cancellation.
@@ -90,13 +94,13 @@ func (s *Stream[T]) Next(ctx context.Context) bool {
 			return false
 		}
 
-		if !s.cursor.Next() {
+		if !cursor.Next() {
 			s.done = true
 			s.err = s.cursor.Err()
 			return false
 		}
 
-		val, err := s.decode(s.cursor)
+		val, err := s.decode(cursor)
 		if err != nil {
 			s.done = true
 			if errors.Is(err, errEndOfStream) {

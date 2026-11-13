@@ -67,7 +67,11 @@ func (db *TursoDB) SupportsReturning() bool { return true }
 // WithAuthToken, it is appended to the DSN as a query parameter.
 //
 // The driver tries "libsql" first, then falls back to "sqlite" for local files.
+// Open requires an unconnected handle; use New to create another pool.
 func (db *TursoDB) Open(ctx context.Context, dsn string, opts ...driver.Option) error {
+	if db.db != nil {
+		return fmt.Errorf("tursodriver: already opened; use New to create another pool")
+	}
 	db.opts = driver.ApplyOptions(opts)
 	db.topts = extractTursoOpts(db.opts)
 

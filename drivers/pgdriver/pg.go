@@ -145,7 +145,11 @@ func buildPoolConfig(dsn string, opts ...driver.Option) (*pgxpool.Config, *drive
 
 // Open parses the DSN, applies configuration options and creates a lazy
 // connection pool. Call Ping to verify connectivity.
+// Open requires an unconnected handle; use New to create another pool.
 func (db *PgDB) Open(ctx context.Context, dsn string, opts ...driver.Option) error {
+	if db.pool != nil {
+		return fmt.Errorf("pgdriver: already opened; use New to create another pool")
+	}
 	poolCfg, driverOpts, err := buildPoolConfig(dsn, opts...)
 	if err != nil {
 		return err
@@ -246,6 +250,8 @@ func (db *PgDB) BeginTx(ctx context.Context, opts *driver.TxOptions) (driver.Tx,
 	// COMMIT and ROLLBACK get no context, so the transaction keeps the
 	// caller's span to start theirs under.
 	parent := trace.SpanFromContext(ctx)
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
+	defer cancel()
 	ctx, op := db.tel.Start(ctx, "BEGIN", "")
 	tx, err := db.pool.BeginTx(ctx, pgxOpts)
 	op.End(err)

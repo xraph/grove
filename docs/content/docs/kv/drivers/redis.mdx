@@ -30,6 +30,8 @@ defer store.Close()
 
 The DSN follows the standard Redis URL format: `redis://[user:password@]host:port[/db]`.
 
+Grove limits each Redis command pool to 10 active connections by default. `driver.WithPoolSize(n)` sets the base pool size and its default active-connection cap; a positive `max_active_conns` in a standalone DSN overrides that cap. Cluster limits apply per node. Invalid non-positive pool sizes retain the default limit. These limits also apply in Sentinel mode. Pub/Sub subscriptions use separate dedicated connections.
+
 ## Capabilities
 
 | Capability | Supported |

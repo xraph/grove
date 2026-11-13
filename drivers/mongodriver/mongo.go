@@ -54,7 +54,12 @@ func (db *MongoDB) Name() string { return "mongo" }
 //
 //	mdb := mongodriver.New()
 //	err := mdb.Open(ctx, "mongodb://localhost:27017/mydb")
+//
+// Open requires an unconnected handle; use New to create another pool.
 func (db *MongoDB) Open(ctx context.Context, uri string, opts ...MongoOption) error {
+	if db.client != nil {
+		return fmt.Errorf("mongodriver: already opened; use New to create another pool")
+	}
 	mopts := defaultMongoOptions()
 	mopts.apply(opts)
 

@@ -36,6 +36,9 @@ func (db *MemcachedDB) Name() string { return "memcached" }
 // Open connects to Memcached using the given DSN.
 // The DSN should be a comma-separated list of server addresses (e.g., "localhost:11211").
 func (db *MemcachedDB) Open(_ context.Context, dsn string, opts ...driver.Option) error {
+	if db.client != nil {
+		return fmt.Errorf("memcacheddriver: already opened; use New to create another client")
+	}
 	db.opts = driver.ApplyOptions(opts)
 	db.client = memcache.New(dsn)
 	if db.opts.DialTimeout > 0 {
@@ -45,8 +48,10 @@ func (db *MemcachedDB) Open(_ context.Context, dsn string, opts ...driver.Option
 }
 
 func (db *MemcachedDB) Close() error {
-	// gomemcache doesn't have a Close method; connections are pooled and reused.
-	return nil
+	if db.client == nil {
+		return nil
+	}
+	return db.client.Close()
 }
 
 func (db *MemcachedDB) Ping(ctx context.Context) error {

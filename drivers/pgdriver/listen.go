@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/xraph/grove/internal/queryctx"
 	"github.com/xraph/grove/internal/safe"
 )
 
@@ -23,6 +25,7 @@ type Notification struct {
 // only that goroutine may touch it; other goroutines queue commands here
 // and wait on reply.
 type listenCmd struct {
+	ctx   context.Context
 	sql   string
 	reply chan error // buffered (capacity 1) so the goroutine never blocks
 }
@@ -93,6 +96,8 @@ func (l *Listener) Unlisten(ctx context.Context, channel string) error {
 // exec queues a statement for the listen goroutine, wakes it out of
 // WaitForNotification, and waits for the execution result.
 func (l *Listener) exec(ctx context.Context, sql string) error {
+	ctx, cancel := queryctx.WithTimeout(ctx, l.db.opts)
+	defer cancel()
 	l.mu.RLock()
 	started := l.started
 	l.mu.RUnlock()
@@ -105,7 +110,7 @@ func (l *Listener) exec(ctx context.Context, sql string) error {
 	default:
 	}
 
-	cmd := &listenCmd{sql: sql, reply: make(chan error, 1)}
+	cmd := &listenCmd{ctx: ctx, sql: sql, reply: make(chan error, 1)}
 
 	l.cmdMu.Lock()
 	l.pending = append(l.pending, cmd)
@@ -141,9 +146,7 @@ func (l *Listener) exec(ctx context.Context, sql string) error {
 // so that notifications can be sent independently of the listener.
 func (l *Listener) Notify(ctx context.Context, channel, payload string) error {
 	const notifySQL = "SELECT pg_notify($1, $2)"
-	ctx, op := l.db.tel.StartSQL(ctx, notifySQL)
-	_, err := l.db.pool.Exec(ctx, notifySQL, channel, payload)
-	op.End(err)
+	_, err := l.db.Exec(ctx, notifySQL, channel, payload)
 	if err != nil {
 		return fmt.Errorf("pgdriver: notify %q: %w", channel, err)
 	}
@@ -175,7 +178,9 @@ func (l *Listener) Start(ctx context.Context) error {
 	default:
 	}
 
-	conn, err := l.db.pool.Acquire(ctx)
+	acquireCtx, cancel := queryctx.WithTimeout(ctx, l.db.opts)
+	defer cancel()
+	conn, err := l.db.pool.Acquire(acquireCtx)
 	if err != nil {
 		return fmt.Errorf("pgdriver: acquire listener conn: %w", err)
 	}
@@ -195,11 +200,16 @@ func (l *Listener) Start(ctx context.Context) error {
 // on the connection ("conn busy").
 func (l *Listener) listen(ctx context.Context, conn *pgxpool.Conn) {
 	defer func() {
-		close(l.stopped)
+		// A listener's session may still have LISTEN subscriptions or queued
+		// notifications. Retire it instead of returning that state to the pool.
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = conn.Conn().Close(closeCtx) // Release discards the closed connection even if shutdown reports an error.
+		cancel()
+		conn.Release()
 		l.mu.Lock()
 		l.conn = nil
 		l.mu.Unlock()
-		conn.Release()
+		close(l.stopped)
 	}()
 
 	for {
@@ -221,11 +231,12 @@ func (l *Listener) listen(ctx context.Context, conn *pgxpool.Conn) {
 		l.cmdMu.Unlock()
 
 		for _, cmd := range pending {
-			_, err := conn.Exec(ctx, cmd.sql)
+			_, err := conn.Exec(cmd.ctx, cmd.sql)
 			cmd.reply <- err
 		}
 
 		notification, err := conn.Conn().WaitForNotification(waitCtx)
+		interrupted := waitCtx.Err() != nil
 		cancel()
 		if err != nil {
 			// Check if the listener was closed or the context was cancelled.
@@ -236,7 +247,7 @@ func (l *Listener) listen(ctx context.Context, conn *pgxpool.Conn) {
 				return
 			default:
 			}
-			if waitCtx.Err() != nil || pgconn.Timeout(err) {
+			if !conn.Conn().IsClosed() && (interrupted || pgconn.Timeout(err)) {
 				// Woken by exec to process queued commands. The
 				// interrupt is delivered as a read-deadline
 				// timeout, which pgconn does not treat as fatal,
@@ -273,8 +284,8 @@ func (l *Listener) Done() <-chan struct{} {
 }
 
 // Close stops the listener goroutine, which releases the dedicated connection
-// back to the pool as it exits. Close is safe to call multiple times and
-// returns without waiting for the goroutine to finish; pool shutdown blocks
+// by retiring its subscribed session as it exits. Close is safe to call multiple
+// times and returns without waiting for the goroutine to finish; pool shutdown blocks
 // until the connection is released, which happens promptly after the wake.
 func (l *Listener) Close() error {
 	l.once.Do(func() {

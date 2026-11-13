@@ -39,31 +39,29 @@ func New() *RedisDB {
 func (db *RedisDB) Name() string { return "redis" }
 
 // Open connects to Redis using the given DSN (e.g., "redis://localhost:6379/0").
+// Open requires an unconnected handle; use New to create another client.
 func (db *RedisDB) Open(ctx context.Context, dsn string, opts ...driver.Option) error {
+	if db.client != nil {
+		return fmt.Errorf("redisdriver: already opened; use New to create another client")
+	}
 	db.opts = driver.ApplyOptions(opts)
 
-	redisOpts, err := redis.ParseURL(dsn)
+	redisOpts, err := clientOptions(dsn, db.opts)
 	if err != nil {
-		return fmt.Errorf("redisdriver: parse dsn: %w", err)
-	}
-	if db.opts.PoolSize > 0 {
-		redisOpts.PoolSize = db.opts.PoolSize
-	}
-	if db.opts.DialTimeout > 0 {
-		redisOpts.DialTimeout = db.opts.DialTimeout
-	}
-	if db.opts.ReadTimeout > 0 {
-		redisOpts.ReadTimeout = db.opts.ReadTimeout
-	}
-	if db.opts.WriteTimeout > 0 {
-		redisOpts.WriteTimeout = db.opts.WriteTimeout
-	}
-	if db.opts.TLSConfig != nil {
-		redisOpts.TLSConfig = db.opts.TLSConfig
+		return err
 	}
 
-	db.client = redis.NewClient(redisOpts)
-	return db.client.Ping(ctx).Err()
+	return db.openClient(ctx, redis.NewClient(redisOpts))
+}
+
+// openClient publishes the client only after startup succeeds. A failed Ping
+// must close its sockets and background workers before the handle is discarded.
+func (db *RedisDB) openClient(ctx context.Context, client redis.UniversalClient) error {
+	if err := client.Ping(ctx).Err(); err != nil {
+		return fmt.Errorf("redisdriver: ping: %w", errors.Join(err, client.Close()))
+	}
+	db.client = client
+	return nil
 }
 
 func (db *RedisDB) Close() error {

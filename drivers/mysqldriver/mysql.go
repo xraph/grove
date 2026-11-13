@@ -62,7 +62,11 @@ func (db *MysqlDB) SupportsReturning() bool { return false }
 
 // Open parses the DSN, applies configuration options, creates the database/sql
 // connection pool, and verifies connectivity.
+// Open requires an unconnected handle; use New to create another pool.
 func (db *MysqlDB) Open(ctx context.Context, dsn string, opts ...driver.Option) error {
+	if db.db != nil {
+		return fmt.Errorf("mysqldriver: already opened; use New to create another pool")
+	}
 	db.opts = driver.ApplyOptions(opts)
 
 	sqlDB, err := sql.Open("mysql", dsn)
@@ -73,9 +77,12 @@ func (db *MysqlDB) Open(ctx context.Context, dsn string, opts ...driver.Option) 
 	// Apply pool options.
 	sqlpool.Configure(sqlDB, db.opts)
 
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return fmt.Errorf("mysqldriver: ping: %w", errors.Join(err, sqlDB.Close()))
+	}
 	db.db = sqlDB
 	db.tel.SetConnection(connectionOf(dsn))
-	return db.db.PingContext(ctx)
+	return nil
 }
 
 // Close terminates all connections in the pool.
@@ -247,7 +254,7 @@ func (c *mysqlDedicatedConn) Exec(ctx context.Context, query string, args ...any
 func (c *mysqlDedicatedConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
 	ctx, cancel := queryctx.WithTimeout(ctx, c.opts)
 	ctx, op := c.tel.StartSQL(ctx, query)
-	rows, err := c.conn.QueryContext(ctx, query, args...) //nolint:rowserrcheck // caller checks Err() via driver.Rows //nolint:rowserrcheck // The returned queryctx wrapper checks iteration errors and closes rows.
+	rows, err := c.conn.QueryContext(ctx, query, args...) //nolint:rowserrcheck // The returned queryctx wrapper checks iteration errors and closes rows.
 	if err != nil {
 		cancel()
 		op.End(err)

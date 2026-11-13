@@ -696,3 +696,31 @@ func TestStream_NewWithHooks_QueryContext(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "my-query-context", capturedQC, "query context should be passed to hook runner")
 }
+
+type contextAwareCursor struct {
+	*mockCursor
+	contexts []context.Context
+}
+
+func (c *contextAwareCursor) NextContext(ctx context.Context) bool {
+	c.contexts = append(c.contexts, ctx)
+	if err := ctx.Err(); err != nil {
+		c.iterErr = err
+		return false
+	}
+	return c.Next()
+}
+func TestStreamConsumerContextReachesTransformFetches(t *testing.T) {
+	cursor := &contextAwareCursor{mockCursor: &mockCursor{data: []int{1, 2, 3}}}
+	s := Filter(New[int](cursor, decodeInt), func(n int) bool { return n == 3 })
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	got, err := s.Collect(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []int{3}, got)
+	require.Len(t, cursor.contexts, 4, "the filter's internal Next calls need the consumer context too")
+	for _, seen := range cursor.contexts {
+		require.Equal(t, ctx, seen)
+	}
+	require.True(t, cursor.closed)
+}

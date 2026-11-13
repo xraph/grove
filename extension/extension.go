@@ -136,6 +136,24 @@ func (e *Extension) registryFromContainer(c vessel.Vessel) *MigrationRegistry {
 
 // Register implements [forge.Extension].
 func (e *Extension) Register(fapp forge.App) error {
+	if e.db != nil || e.manager != nil {
+		return errors.New("grove: extension already registered")
+	}
+	err := e.register(fapp)
+	if err != nil {
+		if e.manager != nil {
+			err = errors.Join(err, e.manager.Close())
+		} else if e.db != nil {
+			err = errors.Join(err, e.db.Close())
+			e.driver = nil
+		}
+		e.manager = nil
+		e.db = nil
+	}
+	return err
+}
+
+func (e *Extension) register(fapp forge.App) error {
 	// 1. BaseExtension.Register stores app, logger, metrics.
 	if err := e.BaseExtension.Register(fapp); err != nil {
 		return err
@@ -238,9 +256,20 @@ func (e *Extension) registerSingleDB(fapp forge.App) error {
 // registerMultiDB handles the multi-database path.
 func (e *Extension) registerMultiDB(fapp forge.App) error {
 	mgr := NewDBManager()
+	e.manager = mgr
 
 	// Merge programmatic entries with config entries.
 	entries := e.buildDatabaseEntries()
+	seen := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		if entry.name == "" {
+			return errors.New("grove: database name is required")
+		}
+		if seen[entry.name] {
+			return fmt.Errorf("grove: duplicate database name %q", entry.name)
+		}
+		seen[entry.name] = true
+	}
 
 	// Open each database.
 	for _, entry := range entries {

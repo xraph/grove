@@ -54,7 +54,9 @@ func (s *pgPoolStmt) Exec(ctx context.Context, args ...any) (driver.Result, erro
 // Deallocating through pgx, rather than running DEALLOCATE as SQL, keeps
 // pgx's own record of the connection's statements in step with the server.
 func (s *pgPoolStmt) Close() error {
-	err := s.conn.Conn().Deallocate(context.Background(), s.sd.Name)
+	ctx, cancel := queryctx.WithTimeout(context.Background(), s.opts)
+	defer cancel()
+	err := s.conn.Conn().Deallocate(ctx, s.sd.Name)
 	s.conn.Release()
 	return err
 }

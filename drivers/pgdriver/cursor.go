@@ -2,6 +2,7 @@ package pgdriver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 
@@ -16,17 +17,22 @@ var cursorCounter atomic.Int64
 // (DECLARE CURSOR / FETCH). It operates within a transaction and
 // fetches rows in batches of fetchSize.
 type pgCursor struct {
+	ctx        context.Context
+	closed     bool
+	closeErr   error
 	tx         driver.Tx
 	cursorName string
 	fetchSize  int
 	ownerTx    bool // if true, commit/rollback tx on Close
 
-	currentRows driver.Rows // current batch of rows from FETCH
-	done        bool
-	err         error
+	currentRows    driver.Rows // current batch of rows from FETCH
+	releaseContext context.CancelFunc
+	done           bool
+	err            error
 }
 
 var _ stream.Cursor = (*pgCursor)(nil)
+var _ stream.ContextCursor = (*pgCursor)(nil)
 
 // newPgCursor declares a server-side cursor within the given transaction
 // and returns a pgCursor that fetches rows in batches. If ownerTx is true,
@@ -41,6 +47,7 @@ func newPgCursor(ctx context.Context, tx driver.Tx, query string, args []any, fe
 	}
 
 	c := &pgCursor{
+		ctx:        ctx,
 		tx:         tx,
 		cursorName: name,
 		fetchSize:  fetchSize,
@@ -55,26 +62,48 @@ func (c *pgCursor) fetchBatch(ctx context.Context) error {
 	if c.currentRows != nil {
 		_ = c.currentRows.Close()
 		c.currentRows = nil
+		if c.releaseContext != nil {
+			c.releaseContext()
+		}
 	}
 
+	// Keep both the stream lifetime and the consumer's deadline active until
+	// this result batch is closed; canceling when Next returns would abort Scan.
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(c.ctx, cancel)
+	release := func() { stop(); cancel() }
 	fetchSQL := fmt.Sprintf("FETCH %d FROM %s", c.fetchSize, c.cursorName)
 	rows, err := c.tx.Query(ctx, fetchSQL)
 	if err != nil {
+		release()
 		return fmt.Errorf("pgdriver: fetch cursor: %w", err)
 	}
 
+	c.releaseContext = release
 	c.currentRows = rows
 	return nil
 }
 
 // Next advances to the next row. Transparently fetches new batches when
 // the current batch is exhausted.
-func (c *pgCursor) Next() bool {
+func (c *pgCursor) Next() bool { return c.NextContext(c.ctx) }
+
+// NextContext fetches using the consumer's deadline as well as the stream's.
+func (c *pgCursor) NextContext(ctx context.Context) bool {
 	if c.done {
 		return false
 	}
 
-	ctx := context.Background()
+	if err := c.ctx.Err(); err != nil {
+		c.err = err
+		c.done = true
+		return false
+	}
+	if err := ctx.Err(); err != nil {
+		c.err = err
+		c.done = true
+		return false
+	}
 
 	// If we have no current rows, fetch the first batch.
 	if c.currentRows == nil {
@@ -134,21 +163,38 @@ func (c *pgCursor) Columns() ([]string, error) {
 // Close releases the server-side cursor and underlying resources.
 // If the cursor owns the transaction, it commits it.
 func (c *pgCursor) Close() error {
+	if c.closed {
+		return c.closeErr
+	}
+	c.closed = true
+	if c.releaseContext != nil {
+		defer c.releaseContext()
+	}
 	c.done = true
-
 	if c.currentRows != nil {
-		_ = c.currentRows.Close()
+		c.closeErr = c.currentRows.Close()
+		if c.err == nil {
+			c.err = c.currentRows.Err()
+		}
 		c.currentRows = nil
 	}
-
-	// Close the server-side cursor.
-	closeSQL := fmt.Sprintf("CLOSE %s", c.cursorName)
-	_, _ = c.tx.Exec(context.Background(), closeSQL)
-
-	if c.ownerTx {
-		return c.tx.Commit()
+	// A failed/canceled owned stream must release its transaction, without
+	// trying to commit the failure. Borrowed transactions remain caller-owned.
+	if c.ownerTx && (c.err != nil || c.ctx.Err() != nil || c.closeErr != nil) {
+		c.closeErr = errors.Join(c.closeErr, c.tx.Rollback())
+		return c.closeErr
 	}
-	return nil
+	closeSQL := fmt.Sprintf("CLOSE %s", c.cursorName)
+	_, closeErr := c.tx.Exec(context.Background(), closeSQL)
+	c.closeErr = errors.Join(c.closeErr, closeErr)
+	if c.ownerTx {
+		if c.closeErr != nil {
+			c.closeErr = errors.Join(c.closeErr, c.tx.Rollback())
+		} else {
+			c.closeErr = c.tx.Commit()
+		}
+	}
+	return c.closeErr
 }
 
 // Err returns any error encountered during iteration.

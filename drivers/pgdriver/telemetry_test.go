@@ -410,3 +410,21 @@ func TestTelemetryContextCanceled(t *testing.T) {
 		t.Errorf("error.type = %q", v)
 	}
 }
+
+func TestTelemetryNotify(t *testing.T) {
+	rec := telemetrytest.Spans(t)
+	db, m := openFake(t)
+	ctx, parent := telemetrytest.Parent(t.Context())
+	if err := db.NewListener().Notify(ctx, "changes", "payload"); err != nil {
+		t.Fatal(err)
+	}
+	parent.End()
+	spans := telemetrytest.Ended(rec)
+	if len(spans) != 1 || spans[0].Parent().SpanID() != parent.SpanContext().SpanID() {
+		t.Fatalf("Notify must record one operation under the caller, got %v", spanNames(spans))
+	}
+	series := m.Series(observability.OperationDurationMetric)
+	if len(series) != 1 || series[0].Count != 1 {
+		t.Fatalf("Notify metrics = %+v", series)
+	}
+}

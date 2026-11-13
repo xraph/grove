@@ -63,7 +63,11 @@ func (db *ClickHouseDB) SupportsReturning() bool { return false }
 // Open parses the DSN, applies configuration options, and opens the ClickHouse
 // database connection. Unlike SQLite, ClickHouse does not need WAL mode or
 // foreign key pragmas.
+// Open requires an unconnected handle; use New to create another pool.
 func (db *ClickHouseDB) Open(ctx context.Context, dsn string, opts ...driver.Option) error {
+	if db.db != nil {
+		return fmt.Errorf("clickhousedriver: already opened; use New to create another pool")
+	}
 	db.opts = driver.ApplyOptions(opts)
 
 	sqlDB, err := sql.Open("clickhouse", dsn)

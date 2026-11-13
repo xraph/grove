@@ -154,7 +154,9 @@ func (t *pgTx) Commit() error {
 	}
 	t.done = true
 	t.deallocateStmts()
-	ctx, op := t.tel.Start(t.parentContext(), "COMMIT", "")
+	ctx, cancel := queryctx.WithTimeout(t.parentContext(), t.opts)
+	defer cancel()
+	ctx, op := t.tel.Start(ctx, "COMMIT", "")
 	err := t.tx.Commit(ctx)
 	op.End(err)
 	return err
@@ -168,7 +170,9 @@ func (t *pgTx) Rollback() error {
 	}
 	t.done = true
 	t.deallocateStmts()
-	ctx, op := t.tel.Start(t.parentContext(), "ROLLBACK", "")
+	ctx, cancel := queryctx.WithTimeout(t.parentContext(), t.opts)
+	defer cancel()
+	ctx, op := t.tel.Start(ctx, "ROLLBACK", "")
 	err := t.tx.Rollback(ctx)
 	op.End(err)
 	return err
@@ -206,7 +210,9 @@ func (t *pgTx) Prepare(ctx context.Context, query string) (driver.Stmt, error) {
 // message, which the server accepts even in an aborted transaction.
 func (t *pgTx) deallocateStmt(name string) error {
 	delete(t.stmts, name)
-	return t.tx.Conn().Deallocate(context.Background(), name)
+	ctx, cancel := queryctx.WithTimeout(context.Background(), t.opts)
+	defer cancel()
+	return t.tx.Conn().Deallocate(ctx, name)
 }
 
 // deallocateStmts drops every statement the caller didn't close. It's best

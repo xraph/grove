@@ -1,5 +1,7 @@
 package stream
 
+import "context"
+
 // Cursor is the interface that database drivers implement to provide
 // streaming row access. Each driver wraps its native cursor type.
 type Cursor interface {
@@ -22,3 +24,20 @@ type Cursor interface {
 
 // DecodeFunc decodes a cursor row into a value of type T.
 type DecodeFunc[T any] func(cursor Cursor) (T, error)
+
+// ContextCursor optionally supports cancellation while Next waits for the
+// database. Stream passes its consumer context through this interface; existing
+// cursors implementing only Cursor remain supported.
+type ContextCursor interface {
+	Cursor
+	NextContext(ctx context.Context) bool
+}
+
+// contextualCursor also propagates the consumer context through transforms
+// whose decode functions advance the cursor to skip or group rows.
+type contextualCursor struct {
+	ContextCursor
+	ctx context.Context
+}
+
+func (c contextualCursor) Next() bool { return c.NextContext(c.ctx) }

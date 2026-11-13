@@ -65,7 +65,11 @@ func (db *SqliteDB) SupportsReturning() bool { return true }
 // in the DSN (see [withForeignKeys]) and modernc.org/sqlite turns them on for
 // every connection the pool dials. A DSN that already sets foreign_keys
 // through a _pragma parameter is left as the caller wrote it.
+// Open requires an unconnected handle; use New to create another pool.
 func (db *SqliteDB) Open(ctx context.Context, dsn string, opts ...driver.Option) error {
+	if db.db != nil {
+		return fmt.Errorf("sqlitedriver: already opened; use New to create another pool")
+	}
 	db.opts = driver.ApplyOptions(opts)
 
 	sqlDB, err := sql.Open("sqlite", withForeignKeys(dsn))
