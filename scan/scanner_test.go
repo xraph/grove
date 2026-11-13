@@ -496,3 +496,61 @@ func TestScanRows_RowsError(t *testing.T) {
 		t.Fatal("expected error from rows.Err(), got nil")
 	}
 }
+
+// metadataRow models the optional result-column interface without changing
+// the public Row contract used by third-party drivers.
+type metadataRow struct {
+	mockRow
+	columns    []string
+	columnsErr error
+	closed     bool
+}
+
+func (r *metadataRow) Columns() ([]string, error) { return r.columns, r.columnsErr }
+func (r *metadataRow) Close() error               { r.closed = true; return nil }
+
+func TestScanRowColumnMetadata(t *testing.T) {
+	type projection struct {
+		ID     int64  `grove:"id,pk"`
+		Tenant int64  `grove:"tenant_id"`
+		Name   string `grove:"name"`
+	}
+	table, err := schema.NewRegistry().Register((*projection)(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name    string
+		columns []string
+		values  []any
+		want    projection
+	}{
+		{"reordered", []string{"tenant_id", "id", "name"}, []any{int64(2), int64(10), "a"}, projection{10, 2, "a"}},
+		{"subset", []string{"name"}, []any{"a"}, projection{Name: "a"}},
+		{"unknown", []string{"extra", "id"}, []any{"ignored", int64(10)}, projection{ID: 10}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := &metadataRow{mockRow: mockRow{values: tc.values}, columns: tc.columns}
+			var got projection
+			if err := ScanRow(row, &got, table); err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %+v, want %+v", got, tc.want)
+			}
+			if !row.closed {
+				t.Fatal("row was not closed")
+			}
+		})
+	}
+	row := &metadataRow{}
+	if err := ScanRow(row, nil, table); err == nil || !row.closed {
+		t.Fatal("invalid destination must fail and close the row")
+	}
+	failure := errors.New("columns unavailable")
+	row = &metadataRow{columnsErr: failure}
+	if err := ScanRow(row, &projection{}, table); !errors.Is(err, failure) || !row.closed {
+		t.Fatal("column error must be preserved and close the row")
+	}
+}

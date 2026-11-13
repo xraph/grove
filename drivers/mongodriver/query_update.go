@@ -133,14 +133,17 @@ func (q *UpdateQuery) buildUpdateHookContext() *hook.QueryContext {
 		op = hook.OpBulkUpdate
 	}
 	return &hook.QueryContext{
-		Operation: op,
-		Table:     tableName,
-		ModelType: modelType,
+		InTransaction: q.session != nil,
+		Operation:     op,
+		Table:         tableName,
+		ModelType:     modelType,
 	}
 }
 
 // Exec executes the update operation.
 func (q *UpdateQuery) Exec(ctx context.Context) (*mongoResult, error) {
+	copyQuery := *q
+	q = &copyQuery
 	if q.err != nil {
 		return nil, q.err
 	}
@@ -185,6 +188,9 @@ func (q *UpdateQuery) Exec(ctx context.Context) (*mongoResult, error) {
 				return nil, result.Error
 			}
 			return nil, fmt.Errorf("mongodriver: update denied by hook")
+		}
+		if result != nil {
+			q.filter = appendNativeFilters(q.filter, result.Filters)
 		}
 	}
 

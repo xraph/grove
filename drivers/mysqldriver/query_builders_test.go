@@ -55,7 +55,7 @@ func TestSelectQuery_BasicAllFields(t *testing.T) {
 
 	// Should list all fields with the alias prefix, include FROM with alias,
 	// and auto-add the soft delete filter.
-	expected := "SELECT `u`.`id`, `u`.`name`, `u`.`email`, `u`.`role`, `u`.`created_at`, `u`.`updated_at`, `u`.`deleted_at` FROM `users` AS `u` WHERE `u`.`deleted_at` IS NULL"
+	expected := "SELECT `u`.`id`, `u`.`name`, `u`.`email`, `u`.`role`, `u`.`created_at`, `u`.`updated_at`, `u`.`deleted_at` FROM `users` AS `u` WHERE (`u`.`deleted_at` IS NULL)"
 	assert.Equal(t, expected, sql)
 	assert.Empty(t, args)
 }
@@ -68,7 +68,7 @@ func TestSelectQuery_SpecificColumns(t *testing.T) {
 		Build()
 	require.NoError(t, err)
 
-	expected := "SELECT `u`.`name`, `u`.`email` FROM `users` AS `u` WHERE `u`.`deleted_at` IS NULL"
+	expected := "SELECT `u`.`name`, `u`.`email` FROM `users` AS `u` WHERE (`u`.`deleted_at` IS NULL)"
 	assert.Equal(t, expected, sql)
 	assert.Empty(t, args)
 }
@@ -81,7 +81,7 @@ func TestSelectQuery_WhereClause(t *testing.T) {
 		Build()
 	require.NoError(t, err)
 
-	expected := "SELECT `u`.`id`, `u`.`name`, `u`.`email`, `u`.`role`, `u`.`created_at`, `u`.`updated_at`, `u`.`deleted_at` FROM `users` AS `u` WHERE `u`.`role` = 'admin' AND `u`.`deleted_at` IS NULL"
+	expected := "SELECT `u`.`id`, `u`.`name`, `u`.`email`, `u`.`role`, `u`.`created_at`, `u`.`updated_at`, `u`.`deleted_at` FROM `users` AS `u` WHERE (`u`.`role` = 'admin') AND (`u`.`deleted_at` IS NULL)"
 	assert.Equal(t, expected, sql)
 	assert.Empty(t, args)
 }
@@ -95,7 +95,7 @@ func TestSelectQuery_WhereOr(t *testing.T) {
 		Build()
 	require.NoError(t, err)
 
-	expected := "SELECT `u`.`id`, `u`.`name`, `u`.`email`, `u`.`role`, `u`.`created_at`, `u`.`updated_at`, `u`.`deleted_at` FROM `users` AS `u` WHERE `u`.`role` = 'admin' OR `u`.`role` = 'superadmin' AND `u`.`deleted_at` IS NULL"
+	expected := "SELECT `u`.`id`, `u`.`name`, `u`.`email`, `u`.`role`, `u`.`created_at`, `u`.`updated_at`, `u`.`deleted_at` FROM `users` AS `u` WHERE (`u`.`role` = 'admin' OR `u`.`role` = 'superadmin') AND (`u`.`deleted_at` IS NULL)"
 	assert.Equal(t, expected, sql)
 	assert.Empty(t, args)
 }
@@ -107,7 +107,7 @@ func TestSelectQuery_WherePK(t *testing.T) {
 	sql, args, err := db.NewSelect(user).WherePK().Build()
 	require.NoError(t, err)
 
-	expected := "SELECT `u`.`id`, `u`.`name`, `u`.`email`, `u`.`role`, `u`.`created_at`, `u`.`updated_at`, `u`.`deleted_at` FROM `users` AS `u` WHERE `u`.`id` = ? AND `u`.`deleted_at` IS NULL"
+	expected := "SELECT `u`.`id`, `u`.`name`, `u`.`email`, `u`.`role`, `u`.`created_at`, `u`.`updated_at`, `u`.`deleted_at` FROM `users` AS `u` WHERE (`u`.`id` = ?) AND (`u`.`deleted_at` IS NULL)"
 	assert.Equal(t, expected, sql)
 	require.Len(t, args, 1)
 	assert.Equal(t, int64(42), args[0])
@@ -150,7 +150,7 @@ func TestSelectQuery_OrderByGroupByHaving(t *testing.T) {
 		Build()
 	require.NoError(t, err)
 
-	expected := "SELECT `u`.`role`, COUNT(*) AS `cnt` FROM `users` AS `u` WHERE `u`.`deleted_at` IS NULL GROUP BY `u`.`role` HAVING COUNT(*) > 5 ORDER BY `cnt` DESC"
+	expected := "SELECT `u`.`role`, COUNT(*) AS `cnt` FROM `users` AS `u` WHERE (`u`.`deleted_at` IS NULL) GROUP BY `u`.`role` HAVING COUNT(*) > 5 ORDER BY `cnt` DESC"
 	assert.Equal(t, expected, sql)
 	assert.Empty(t, args)
 }
@@ -203,7 +203,7 @@ func TestSelectQuery_BuildCount(t *testing.T) {
 		BuildCount()
 	require.NoError(t, err)
 
-	expected := "SELECT COUNT(*) FROM `users` AS `u` WHERE `u`.`role` = 'admin' AND `u`.`deleted_at` IS NULL"
+	expected := "SELECT COUNT(*) FROM `users` AS `u` WHERE (`u`.`role` = 'admin') AND (`u`.`deleted_at` IS NULL)"
 	assert.Equal(t, expected, sql)
 	assert.Empty(t, args)
 }

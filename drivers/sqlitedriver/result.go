@@ -8,6 +8,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/grove/driver"
+	"github.com/xraph/grove/internal/queryctx"
 	"github.com/xraph/grove/observability"
 )
 
@@ -73,26 +74,11 @@ func (r *sqliteRows) Err() error {
 	return r.rows.Err()
 }
 
-// sqliteRow wraps *sql.Row to implement driver.Row.
-type sqliteRow struct {
-	row *sql.Row
-	op  *observability.Op // ends at Scan, where the row's error surfaces
-}
-
-var _ driver.Row = (*sqliteRow)(nil)
-
-// Scan copies the single row's columns into dest. If the query returned no
-// rows, it returns sql.ErrNoRows.
-func (r *sqliteRow) Scan(dest ...any) error {
-	err := r.row.Scan(dest...)
-	r.op.End(err)
-	return err
-}
-
 // sqliteTx wraps *sql.Tx to implement driver.Tx.
 type sqliteTx struct {
-	tx  *sql.Tx
-	tel *observability.Telemetry
+	opts *driver.DriverOptions
+	tx   *sql.Tx
+	tel  *observability.Telemetry
 
 	// parent is the span that was current when the transaction began.
 	// Commit and Rollback take no context, so their spans start under it.
@@ -109,6 +95,8 @@ var _ driver.Preparer = (*sqliteTx)(nil)
 
 // Exec executes a query within the transaction that does not return rows.
 func (t *sqliteTx) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, t.opts)
+	defer cancel()
 	ctx, op := t.tel.StartSQL(ctx, query)
 	res, err := t.tx.ExecContext(ctx, query, utcArgs(args)...)
 	op.End(err)
@@ -120,21 +108,24 @@ func (t *sqliteTx) Exec(ctx context.Context, query string, args ...any) (driver.
 
 // Query executes a query within the transaction that returns rows.
 func (t *sqliteTx) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, t.opts)
 	ctx, op := t.tel.StartSQL(ctx, query)
-	rows, err := t.tx.QueryContext(ctx, query, utcArgs(args)...)
+	rows, err := t.tx.QueryContext(ctx, query, utcArgs(args)...) //nolint:rowserrcheck // The returned queryctx wrapper checks iteration errors and closes rows.
 	if err != nil {
+		cancel()
 		op.End(err)
 		return nil, fmt.Errorf("sqlitedriver: tx query: %w", err)
 	}
-	return &sqliteRows{rows: rows, op: op}, nil
+	return queryctx.Rows(&sqliteRows{rows: rows, op: op}, cancel), nil
 }
 
 // QueryRow executes a query within the transaction expected to return at most
 // one row.
 func (t *sqliteTx) QueryRow(ctx context.Context, query string, args ...any) driver.Row {
+	ctx, cancel := queryctx.WithTimeout(ctx, t.opts)
 	ctx, op := t.tel.StartSQL(ctx, query)
-	row := t.tx.QueryRowContext(ctx, query, utcArgs(args)...)
-	return &sqliteRow{row: row, op: op}
+	rows, err := t.tx.QueryContext(ctx, query, utcArgs(args)...) //nolint:rowserrcheck // The returned queryctx wrapper checks iteration errors and closes rows.
+	return queryctx.NewRow(rows, err, sql.ErrNoRows, op, cancel)
 }
 
 // Commit commits the transaction.
@@ -173,9 +164,11 @@ func (t *sqliteTx) parentContext() context.Context {
 
 // Prepare creates a prepared statement within the transaction.
 func (t *sqliteTx) Prepare(ctx context.Context, query string) (driver.Stmt, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, t.opts)
+	defer cancel()
 	stmt, err := t.tx.PrepareContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("sqlitedriver: tx prepare: %w", err)
 	}
-	return &sqliteStmt{stmt: stmt, query: query, tel: t.tel}, nil
+	return &sqliteStmt{opts: t.opts, stmt: stmt, query: query, tel: t.tel}, nil
 }

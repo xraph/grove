@@ -3,7 +3,9 @@ package sqlitedriver
 import (
 	"fmt"
 	"reflect"
+	"strings"
 
+	"github.com/xraph/grove/hook"
 	"github.com/xraph/grove/internal/pool"
 	"github.com/xraph/grove/schema"
 )
@@ -80,4 +82,34 @@ func resolveTable(reg *schema.Registry, model any) (*schema.Table, error) {
 	// Create a nil pointer of the struct type for registry lookup (uses sync.Map cache).
 	modelPtr := reflect.New(typ).Interface()
 	return reg.Register(modelPtr)
+}
+
+// appendFilters keeps policy predicates outside the caller's entire Boolean
+// expression. Neither the original conditions nor their arguments are changed.
+func appendFilters(wheres []whereClause, filters []hook.ExtraFilter) []whereClause {
+	var extra []whereClause
+	for _, f := range filters {
+		if f.Clause != "" {
+			extra = append(extra, whereClause{query: "(" + f.Clause + ")", args: f.Args, sep: "AND"})
+		}
+	}
+	if len(extra) == 0 {
+		return wheres
+	}
+	out := make([]whereClause, 0, len(extra)+1)
+	if len(wheres) > 0 {
+		var expr strings.Builder
+		var args []any
+		expr.WriteByte('(')
+		for i, w := range wheres {
+			if i > 0 {
+				expr.WriteString(" " + w.sep + " ")
+			}
+			expr.WriteString(w.query)
+			args = append(args, w.args...)
+		}
+		expr.WriteByte(')')
+		out = append(out, whereClause{query: expr.String(), args: args, sep: "AND"})
+	}
+	return append(out, extra...)
 }

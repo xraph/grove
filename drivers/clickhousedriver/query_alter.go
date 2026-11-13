@@ -97,6 +97,8 @@ func (q *AlterUpdateQuery) Build() (string, []any, error) {
 
 // Exec executes the ALTER TABLE ... UPDATE statement.
 func (q *AlterUpdateQuery) Exec(ctx context.Context) (driver.Result, error) {
+	copyQuery := *q
+	q = &copyQuery
 	// Run pre-mutation hooks.
 	var qc *hook.QueryContext
 	if q.db.hooks != nil {
@@ -110,6 +112,9 @@ func (q *AlterUpdateQuery) Exec(ctx context.Context) (driver.Result, error) {
 				return nil, result.Error
 			}
 			return nil, fmt.Errorf("clickhousedriver: alter update denied by hook")
+		}
+		if result != nil {
+			q.wheres = appendFilters(q.wheres, result.Filters)
 		}
 	}
 
@@ -147,9 +152,10 @@ func (q *AlterUpdateQuery) buildAlterUpdateHookContext() *hook.QueryContext {
 		tableName = q.table.Name
 	}
 	return &hook.QueryContext{
-		Operation: hook.OpUpdate,
-		Table:     tableName,
-		ModelType: modelType,
+		InTransaction: q.db.txConn != nil,
+		Operation:     hook.OpUpdate,
+		Table:         tableName,
+		ModelType:     modelType,
 	}
 }
 
@@ -220,6 +226,8 @@ func (q *AlterDeleteQuery) Build() (string, []any, error) {
 
 // Exec executes the ALTER TABLE ... DELETE statement.
 func (q *AlterDeleteQuery) Exec(ctx context.Context) (driver.Result, error) {
+	copyQuery := *q
+	q = &copyQuery
 	// Run pre-mutation hooks.
 	var qc *hook.QueryContext
 	if q.db.hooks != nil {
@@ -233,6 +241,9 @@ func (q *AlterDeleteQuery) Exec(ctx context.Context) (driver.Result, error) {
 				return nil, result.Error
 			}
 			return nil, fmt.Errorf("clickhousedriver: alter delete denied by hook")
+		}
+		if result != nil {
+			q.wheres = appendFilters(q.wheres, result.Filters)
 		}
 	}
 
@@ -270,8 +281,9 @@ func (q *AlterDeleteQuery) buildAlterDeleteHookContext() *hook.QueryContext {
 		tableName = q.table.Name
 	}
 	return &hook.QueryContext{
-		Operation: hook.OpDelete,
-		Table:     tableName,
-		ModelType: modelType,
+		InTransaction: q.db.txConn != nil,
+		Operation:     hook.OpDelete,
+		Table:         tableName,
+		ModelType:     modelType,
 	}
 }

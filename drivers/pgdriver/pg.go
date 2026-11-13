@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/internal/queryctx"
 	"github.com/xraph/grove/observability"
 	"github.com/xraph/grove/schema"
 )
@@ -177,6 +179,8 @@ func (db *PgDB) SetHooks(engine *hook.Engine) {
 
 // Ping verifies that the database is reachable.
 func (db *PgDB) Ping(ctx context.Context) error {
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
+	defer cancel()
 	if db.pool == nil {
 		return fmt.Errorf("pgdriver: connection pool is not initialized; call Open first")
 	}
@@ -189,6 +193,8 @@ func (db *PgDB) Exec(ctx context.Context, query string, args ...any) (driver.Res
 	if db.txConn != nil {
 		return db.txConn.Exec(ctx, query, args...)
 	}
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
+	defer cancel()
 	ctx, op := db.tel.StartSQL(ctx, query)
 	ct, err := db.pool.Exec(ctx, query, args...)
 	op.End(err)
@@ -204,13 +210,15 @@ func (db *PgDB) Query(ctx context.Context, query string, args ...any) (driver.Ro
 	if db.txConn != nil {
 		return db.txConn.Query(ctx, query, args...)
 	}
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
 	ctx, op := db.tel.StartSQL(ctx, query)
 	rows, err := db.pool.Query(ctx, query, args...)
 	if err != nil {
+		cancel()
 		op.End(err)
 		return nil, fmt.Errorf("pgdriver: query: %w", err)
 	}
-	return &pgRows{rows: rows, op: op}, nil
+	return queryctx.Rows(&pgRows{rows: rows, op: op}, cancel), nil
 }
 
 // QueryRow executes a query expected to return at most one row.
@@ -218,9 +226,10 @@ func (db *PgDB) QueryRow(ctx context.Context, query string, args ...any) driver.
 	if db.txConn != nil {
 		return db.txConn.QueryRow(ctx, query, args...)
 	}
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
 	ctx, op := db.tel.StartSQL(ctx, query)
-	row := db.pool.QueryRow(ctx, query, args...)
-	return &pgRow{row: row, op: op}
+	rows, err := db.pool.Query(ctx, query, args...)
+	return queryctx.NewRow(&pgRows{rows: rows}, err, pgx.ErrNoRows, op, cancel)
 }
 
 // BeginTx starts a new database transaction with the specified options.
@@ -243,7 +252,7 @@ func (db *PgDB) BeginTx(ctx context.Context, opts *driver.TxOptions) (driver.Tx,
 	if err != nil {
 		return nil, fmt.Errorf("pgdriver: begin tx: %w", err)
 	}
-	return &pgTx{tx: tx, tel: db.tel, parent: parent}, nil
+	return &pgTx{opts: db.opts, tx: tx, tel: db.tel, parent: parent}, nil
 }
 
 // GroveTx is the adapter method for grove.DB.BeginTx(). It bridges the
@@ -273,6 +282,8 @@ func (db *PgDB) GroveDelete(model any) any { return db.NewDelete(model) }
 // For pool connections, it acquires a connection from the pool, prepares the
 // statement on it, and returns a pgPoolStmt that releases the connection on Close.
 func (db *PgDB) Prepare(ctx context.Context, query string) (driver.Stmt, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
+	defer cancel()
 	if db.txConn != nil {
 		if p, ok := db.txConn.(driver.Preparer); ok {
 			return p.Prepare(ctx, query)
@@ -289,7 +300,7 @@ func (db *PgDB) Prepare(ctx context.Context, query string) (driver.Stmt, error) 
 		conn.Release()
 		return nil, fmt.Errorf("pgdriver: prepare: %w", err)
 	}
-	return &pgPoolStmt{conn: conn, sd: sd, query: query, tel: db.tel}, nil
+	return &pgPoolStmt{opts: db.opts, conn: conn, sd: sd, query: query, tel: db.tel}, nil
 }
 
 // AcquireConn acquires a dedicated connection from the pool.
@@ -297,16 +308,19 @@ func (db *PgDB) Prepare(ctx context.Context, query string) (driver.Stmt, error) 
 // underlying PostgreSQL session, making it safe for session-level state
 // such as advisory locks.
 func (db *PgDB) AcquireConn(ctx context.Context) (driver.DedicatedConn, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
+	defer cancel()
 	conn, err := db.pool.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("pgdriver: acquire dedicated conn: %w", err)
 	}
-	return &pgDedicatedConn{conn: conn, tel: db.tel}, nil
+	return &pgDedicatedConn{opts: db.opts, conn: conn, tel: db.tel}, nil
 }
 
 // pgDedicatedConn wraps a single pgxpool.Conn to implement driver.DedicatedConn.
 // All queries execute on the same underlying connection.
 type pgDedicatedConn struct {
+	opts *driver.DriverOptions
 	conn *pgxpool.Conn
 	tel  *observability.Telemetry
 }
@@ -314,6 +328,8 @@ type pgDedicatedConn struct {
 var _ driver.DedicatedConn = (*pgDedicatedConn)(nil)
 
 func (c *pgDedicatedConn) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, c.opts)
+	defer cancel()
 	ctx, op := c.tel.StartSQL(ctx, query)
 	ct, err := c.conn.Exec(ctx, query, args...)
 	op.End(err)
@@ -324,19 +340,22 @@ func (c *pgDedicatedConn) Exec(ctx context.Context, query string, args ...any) (
 }
 
 func (c *pgDedicatedConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, c.opts)
 	ctx, op := c.tel.StartSQL(ctx, query)
 	rows, err := c.conn.Query(ctx, query, args...)
 	if err != nil {
+		cancel()
 		op.End(err)
 		return nil, fmt.Errorf("pgdriver: dedicated query: %w", err)
 	}
-	return &pgRows{rows: rows, op: op}, nil
+	return queryctx.Rows(&pgRows{rows: rows, op: op}, cancel), nil
 }
 
 func (c *pgDedicatedConn) QueryRow(ctx context.Context, query string, args ...any) driver.Row {
+	ctx, cancel := queryctx.WithTimeout(ctx, c.opts)
 	ctx, op := c.tel.StartSQL(ctx, query)
-	row := c.conn.QueryRow(ctx, query, args...)
-	return &pgRow{row: row, op: op}
+	rows, err := c.conn.Query(ctx, query, args...)
+	return queryctx.NewRow(&pgRows{rows: rows}, err, pgx.ErrNoRows, op, cancel)
 }
 
 func (c *pgDedicatedConn) Release() {
@@ -362,4 +381,16 @@ func mapIsolationLevel(level driver.IsolationLevel) pgx.TxIsoLevel {
 		// LevelDefault: return empty string so pgx uses the database default.
 		return ""
 	}
+}
+
+// SetQueryTimeout configures the timeout for subsequent queries. Configure it
+// before using the driver concurrently. grove.Open calls it for an explicit
+// grove.WithQueryTimeout option.
+func (db *PgDB) SetQueryTimeout(timeout time.Duration) {
+	if db.opts == nil {
+		db.opts = driver.DefaultDriverOptions()
+	}
+	opts := *db.opts
+	opts.QueryTimeout = timeout
+	db.opts = &opts
 }

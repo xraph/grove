@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 	gometrics "github.com/xraph/go-utils/metrics"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/internal/queryctx"
 	"github.com/xraph/grove/internal/sqlpool"
 	"github.com/xraph/grove/observability"
 	"github.com/xraph/grove/schema"
@@ -92,6 +94,8 @@ func (db *MysqlDB) SetHooks(engine *hook.Engine) {
 
 // Ping verifies that the database is reachable.
 func (db *MysqlDB) Ping(ctx context.Context) error {
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
+	defer cancel()
 	if db.db == nil {
 		return fmt.Errorf("mysqldriver: connection pool is not initialized; call Open first")
 	}
@@ -104,6 +108,8 @@ func (db *MysqlDB) Exec(ctx context.Context, query string, args ...any) (driver.
 	if db.txConn != nil {
 		return db.txConn.Exec(ctx, query, args...)
 	}
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
+	defer cancel()
 	ctx, op := db.tel.StartSQL(ctx, query)
 	res, err := db.db.ExecContext(ctx, query, args...)
 	op.End(err)
@@ -119,13 +125,15 @@ func (db *MysqlDB) Query(ctx context.Context, query string, args ...any) (driver
 	if db.txConn != nil {
 		return db.txConn.Query(ctx, query, args...)
 	}
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
 	ctx, op := db.tel.StartSQL(ctx, query)
-	rows, err := db.db.QueryContext(ctx, query, args...)
+	rows, err := db.db.QueryContext(ctx, query, args...) //nolint:rowserrcheck // The returned queryctx wrapper checks iteration errors and closes rows.
 	if err != nil {
+		cancel()
 		op.End(err)
 		return nil, fmt.Errorf("mysqldriver: query: %w", err)
 	}
-	return &mysqlRows{rows: rows, op: op}, nil
+	return queryctx.Rows(&mysqlRows{rows: rows, op: op}, cancel), nil
 }
 
 // QueryRow executes a query expected to return at most one row.
@@ -133,9 +141,10 @@ func (db *MysqlDB) QueryRow(ctx context.Context, query string, args ...any) driv
 	if db.txConn != nil {
 		return db.txConn.QueryRow(ctx, query, args...)
 	}
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
 	ctx, op := db.tel.StartSQL(ctx, query)
-	row := db.db.QueryRowContext(ctx, query, args...)
-	return &mysqlRow{row: row, op: op}
+	rows, err := db.db.QueryContext(ctx, query, args...) //nolint:rowserrcheck // The returned queryctx wrapper checks iteration errors and closes rows.
+	return queryctx.NewRow(rows, err, sql.ErrNoRows, op, cancel)
 }
 
 // BeginTx starts a new database transaction with the specified options.
@@ -156,7 +165,7 @@ func (db *MysqlDB) BeginTx(ctx context.Context, opts *driver.TxOptions) (driver.
 	if err != nil {
 		return nil, fmt.Errorf("mysqldriver: begin tx: %w", err)
 	}
-	return &mysqlTx{tx: tx, tel: db.tel, parent: parent}, nil
+	return &mysqlTx{opts: db.opts, tx: tx, tel: db.tel, parent: parent}, nil
 }
 
 // GroveTx is the adapter method for grove.DB.BeginTx(). It bridges the
@@ -184,6 +193,8 @@ func (db *MysqlDB) GroveDelete(model any) any { return db.NewDelete(model) }
 // Prepare creates a prepared statement for repeated execution.
 // If operating within a transaction, it delegates to the transaction's Prepare.
 func (db *MysqlDB) Prepare(ctx context.Context, query string) (driver.Stmt, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
+	defer cancel()
 	if db.txConn != nil {
 		if p, ok := db.txConn.(driver.Preparer); ok {
 			return p.Prepare(ctx, query)
@@ -194,7 +205,7 @@ func (db *MysqlDB) Prepare(ctx context.Context, query string) (driver.Stmt, erro
 	if err != nil {
 		return nil, fmt.Errorf("mysqldriver: prepare: %w", err)
 	}
-	return &mysqlStmt{stmt: stmt, query: query, tel: db.tel}, nil
+	return &mysqlStmt{opts: db.opts, stmt: stmt, query: query, tel: db.tel}, nil
 }
 
 // AcquireConn acquires a dedicated connection from the pool.
@@ -202,16 +213,19 @@ func (db *MysqlDB) Prepare(ctx context.Context, query string) (driver.Stmt, erro
 // underlying MySQL session, making it safe for session-level state
 // such as GET_LOCK advisory locks.
 func (db *MysqlDB) AcquireConn(ctx context.Context) (driver.DedicatedConn, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
+	defer cancel()
 	conn, err := db.db.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("mysqldriver: acquire dedicated conn: %w", err)
 	}
-	return &mysqlDedicatedConn{conn: conn, tel: db.tel}, nil
+	return &mysqlDedicatedConn{opts: db.opts, conn: conn, tel: db.tel}, nil
 }
 
 // mysqlDedicatedConn wraps a single *sql.Conn to implement driver.DedicatedConn.
 // All queries execute on the same underlying connection.
 type mysqlDedicatedConn struct {
+	opts *driver.DriverOptions
 	conn *sql.Conn
 	tel  *observability.Telemetry
 }
@@ -219,6 +233,8 @@ type mysqlDedicatedConn struct {
 var _ driver.DedicatedConn = (*mysqlDedicatedConn)(nil)
 
 func (c *mysqlDedicatedConn) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, c.opts)
+	defer cancel()
 	ctx, op := c.tel.StartSQL(ctx, query)
 	res, err := c.conn.ExecContext(ctx, query, args...)
 	op.End(err)
@@ -229,19 +245,22 @@ func (c *mysqlDedicatedConn) Exec(ctx context.Context, query string, args ...any
 }
 
 func (c *mysqlDedicatedConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, c.opts)
 	ctx, op := c.tel.StartSQL(ctx, query)
-	rows, err := c.conn.QueryContext(ctx, query, args...) //nolint:rowserrcheck // caller checks Err() via driver.Rows
+	rows, err := c.conn.QueryContext(ctx, query, args...) //nolint:rowserrcheck // caller checks Err() via driver.Rows //nolint:rowserrcheck // The returned queryctx wrapper checks iteration errors and closes rows.
 	if err != nil {
+		cancel()
 		op.End(err)
 		return nil, fmt.Errorf("mysqldriver: dedicated query: %w", err)
 	}
-	return &mysqlRows{rows: rows, op: op}, nil
+	return queryctx.Rows(&mysqlRows{rows: rows, op: op}, cancel), nil
 }
 
 func (c *mysqlDedicatedConn) QueryRow(ctx context.Context, query string, args ...any) driver.Row {
+	ctx, cancel := queryctx.WithTimeout(ctx, c.opts)
 	ctx, op := c.tel.StartSQL(ctx, query)
-	row := c.conn.QueryRowContext(ctx, query, args...)
-	return &mysqlRow{row: row, op: op}
+	rows, err := c.conn.QueryContext(ctx, query, args...) //nolint:rowserrcheck // The returned queryctx wrapper checks iteration errors and closes rows.
+	return queryctx.NewRow(rows, err, sql.ErrNoRows, op, cancel)
 }
 
 func (c *mysqlDedicatedConn) Release() {
@@ -307,4 +326,16 @@ func connectionOf(dsn string) (namespace, address string, port int) {
 	}
 	port, _ = strconv.Atoi(portStr) //nolint:errcheck // a bad port is reported as none
 	return cfg.DBName, host, port
+}
+
+// SetQueryTimeout configures the timeout for subsequent queries. Configure it
+// before using the driver concurrently. grove.Open calls it for an explicit
+// grove.WithQueryTimeout option.
+func (db *MysqlDB) SetQueryTimeout(timeout time.Duration) {
+	if db.opts == nil {
+		db.opts = driver.DefaultDriverOptions()
+	}
+	opts := *db.opts
+	opts.QueryTimeout = timeout
+	db.opts = &opts
 }

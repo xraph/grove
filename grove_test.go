@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -320,4 +321,23 @@ func TestDB_RegisterModel(t *testing.T) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 	assert.Len(t, db.models, 2)
+}
+
+type timeoutDriver struct {
+	minimalDriver
+	timeout time.Duration
+}
+
+func (d *timeoutDriver) SetQueryTimeout(timeout time.Duration) { d.timeout = timeout }
+func TestOpenQueryTimeout(t *testing.T) {
+	d := &timeoutDriver{timeout: 2 * time.Second}
+	_, err := Open(d)
+	require.NoError(t, err)
+	require.Equal(t, 2*time.Second, d.timeout, "unspecified root option must preserve driver configuration")
+	_, err = Open(d, WithQueryTimeout(5*time.Second))
+	require.NoError(t, err)
+	require.Equal(t, 5*time.Second, d.timeout)
+	_, err = Open(d, WithQueryTimeout(0), WithQueryTimeout(-1))
+	require.NoError(t, err)
+	require.Equal(t, 5*time.Second, d.timeout, "invalid root options retain their existing ignore behavior")
 }

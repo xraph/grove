@@ -80,7 +80,10 @@ func WithPoolSize(n int) Option {
 	}
 }
 
-// WithQueryTimeout returns an Option that sets the default query timeout.
+// WithQueryTimeout sets the SQL query timeout, including connection acquisition
+// and result consumption (default 30s). Non-positive durations disable it; a
+// shorter caller deadline still wins. Each transaction query gets its own
+// deadline; this does not limit the lifetime of the transaction.
 func WithQueryTimeout(d time.Duration) Option {
 	return func(o *DriverOptions) {
 		o.QueryTimeout = d

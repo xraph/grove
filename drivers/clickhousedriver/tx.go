@@ -90,6 +90,7 @@ func (t *ClickHouseTx) txDB() *ClickHouseDB {
 		dialect:  t.db.dialect,
 		opts:     t.db.opts,
 		txConn:   t.tx,
+		hooks:    t.db.hooks,
 		registry: t.db.registry,
 		tel:      t.db.tel,
 	}

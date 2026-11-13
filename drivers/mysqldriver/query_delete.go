@@ -227,14 +227,17 @@ func (q *DeleteQuery) buildDeleteHookContext() *hook.QueryContext {
 		tableName = q.table.Name
 	}
 	return &hook.QueryContext{
-		Operation: hook.OpDelete,
-		Table:     tableName,
-		ModelType: modelType,
+		InTransaction: q.db.txConn != nil,
+		Operation:     hook.OpDelete,
+		Table:         tableName,
+		ModelType:     modelType,
 	}
 }
 
 // Exec executes the DELETE (or soft-delete UPDATE).
 func (q *DeleteQuery) Exec(ctx context.Context) (driver.Result, error) {
+	copyQuery := *q
+	q = &copyQuery
 	qc := q.buildDeleteHookContext()
 
 	// Run model BeforeDelete hooks.
@@ -253,6 +256,9 @@ func (q *DeleteQuery) Exec(ctx context.Context) (driver.Result, error) {
 				return nil, result.Error
 			}
 			return nil, fmt.Errorf("mysqldriver: delete denied by hook")
+		}
+		if result != nil {
+			q.wheres = appendFilters(q.wheres, result.Filters)
 		}
 	}
 
@@ -288,6 +294,8 @@ func (q *DeleteQuery) Exec(ctx context.Context) (driver.Result, error) {
 // Scan executes the DELETE and scans results. Since MySQL does not support
 // RETURNING, this executes the delete and passes dest to post-mutation hooks.
 func (q *DeleteQuery) Scan(ctx context.Context, dest ...any) error {
+	copyQuery := *q
+	q = &copyQuery
 	qc := q.buildDeleteHookContext()
 
 	// Run model BeforeDelete hooks.
@@ -306,6 +314,9 @@ func (q *DeleteQuery) Scan(ctx context.Context, dest ...any) error {
 				return result.Error
 			}
 			return fmt.Errorf("mysqldriver: delete denied by hook")
+		}
+		if result != nil {
+			q.wheres = appendFilters(q.wheres, result.Filters)
 		}
 	}
 

@@ -134,14 +134,17 @@ func (q *DeleteQuery) buildDeleteHookContext() *hook.QueryContext {
 		tableName = q.table.Name
 	}
 	return &hook.QueryContext{
-		Operation: hook.OpDelete,
-		Table:     tableName,
-		ModelType: modelType,
+		InTransaction: q.db.txConn != nil,
+		Operation:     hook.OpDelete,
+		Table:         tableName,
+		ModelType:     modelType,
 	}
 }
 
 // Exec executes the DELETE (ALTER TABLE ... DELETE WHERE).
 func (q *DeleteQuery) Exec(ctx context.Context) (driver.Result, error) {
+	copyQuery := *q
+	q = &copyQuery
 	qc := q.buildDeleteHookContext()
 
 	// Run model BeforeDelete hooks.
@@ -160,6 +163,9 @@ func (q *DeleteQuery) Exec(ctx context.Context) (driver.Result, error) {
 				return nil, result.Error
 			}
 			return nil, fmt.Errorf("clickhousedriver: delete denied by hook")
+		}
+		if result != nil {
+			q.wheres = appendFilters(q.wheres, result.Filters)
 		}
 	}
 

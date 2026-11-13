@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/xraph/grove/driver"
+	"github.com/xraph/grove/internal/queryctx"
 	"github.com/xraph/grove/observability"
 )
 
@@ -27,6 +28,7 @@ func stmtName(prefix string) string {
 // pgPoolStmt wraps a pgxpool.Conn with a prepared statement for repeated execution.
 // It holds the acquired connection and releases it on Close.
 type pgPoolStmt struct {
+	opts  *driver.DriverOptions
 	conn  *pgxpool.Conn
 	sd    *pgconn.StatementDescription
 	query string // the statement's text, for its span name and labels
@@ -37,6 +39,8 @@ var _ driver.Stmt = (*pgPoolStmt)(nil)
 
 // Exec executes the prepared statement with the given arguments.
 func (s *pgPoolStmt) Exec(ctx context.Context, args ...any) (driver.Result, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, s.opts)
+	defer cancel()
 	ctx, op := s.tel.StartSQL(ctx, s.query)
 	ct, err := s.conn.Exec(ctx, s.sd.Name, args...)
 	op.End(err)
@@ -66,6 +70,8 @@ var _ driver.Stmt = (*pgTxStmt)(nil)
 
 // Exec executes the prepared statement within the transaction.
 func (s *pgTxStmt) Exec(ctx context.Context, args ...any) (driver.Result, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, s.tx.opts)
+	defer cancel()
 	ctx, op := s.tx.tel.StartSQL(ctx, s.query)
 	ct, err := s.tx.tx.Exec(ctx, s.name, args...)
 	op.End(err)

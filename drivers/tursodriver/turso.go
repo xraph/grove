@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	gometrics "github.com/xraph/go-utils/metrics"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/internal/queryctx"
 	"github.com/xraph/grove/internal/sqlpool"
 	"github.com/xraph/grove/observability"
 	"github.com/xraph/grove/schema"
@@ -144,6 +146,8 @@ func (db *TursoDB) SetHooks(engine *hook.Engine) {
 
 // Ping verifies that the database is reachable.
 func (db *TursoDB) Ping(ctx context.Context) error {
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
+	defer cancel()
 	if db.db == nil {
 		return fmt.Errorf("tursodriver: database is not initialized; call Open first")
 	}
@@ -156,6 +160,8 @@ func (db *TursoDB) Exec(ctx context.Context, query string, args ...any) (driver.
 	if db.txConn != nil {
 		return db.txConn.Exec(ctx, query, args...)
 	}
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
+	defer cancel()
 	ctx, op := db.tel.StartSQL(ctx, query)
 	res, err := db.db.ExecContext(ctx, query, args...)
 	op.End(err)
@@ -171,13 +177,15 @@ func (db *TursoDB) Query(ctx context.Context, query string, args ...any) (driver
 	if db.txConn != nil {
 		return db.txConn.Query(ctx, query, args...)
 	}
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
 	ctx, op := db.tel.StartSQL(ctx, query)
-	rows, err := db.db.QueryContext(ctx, query, args...)
+	rows, err := db.db.QueryContext(ctx, query, args...) //nolint:rowserrcheck // The returned queryctx wrapper checks iteration errors and closes rows.
 	if err != nil {
+		cancel()
 		op.End(err)
 		return nil, fmt.Errorf("tursodriver: query: %w", err)
 	}
-	return &tursoRows{rows: rows, op: op}, nil
+	return queryctx.Rows(&tursoRows{rows: rows, op: op}, cancel), nil
 }
 
 // QueryRow executes a query expected to return at most one row.
@@ -185,9 +193,10 @@ func (db *TursoDB) QueryRow(ctx context.Context, query string, args ...any) driv
 	if db.txConn != nil {
 		return db.txConn.QueryRow(ctx, query, args...)
 	}
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
 	ctx, op := db.tel.StartSQL(ctx, query)
-	row := db.db.QueryRowContext(ctx, query, args...)
-	return &tursoRow{row: row, op: op}
+	rows, err := db.db.QueryContext(ctx, query, args...) //nolint:rowserrcheck // The returned queryctx wrapper checks iteration errors and closes rows.
+	return queryctx.NewRow(rows, err, sql.ErrNoRows, op, cancel)
 }
 
 // BeginTx starts a new database transaction with the specified options.
@@ -208,7 +217,7 @@ func (db *TursoDB) BeginTx(ctx context.Context, opts *driver.TxOptions) (driver.
 	if err != nil {
 		return nil, fmt.Errorf("tursodriver: begin tx: %w", err)
 	}
-	return &tursoTx{tx: tx, tel: db.tel, parent: parent}, nil
+	return &tursoTx{opts: db.opts, tx: tx, tel: db.tel, parent: parent}, nil
 }
 
 // GroveTx is the adapter method for grove.DB.BeginTx(). It bridges the
@@ -236,6 +245,8 @@ func (db *TursoDB) GroveDelete(model any) any { return db.NewDelete(model) }
 // Prepare creates a prepared statement for repeated execution.
 // If operating within a transaction, it delegates to the transaction's Prepare.
 func (db *TursoDB) Prepare(ctx context.Context, query string) (driver.Stmt, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
+	defer cancel()
 	if db.txConn != nil {
 		if p, ok := db.txConn.(driver.Preparer); ok {
 			return p.Prepare(ctx, query)
@@ -246,7 +257,7 @@ func (db *TursoDB) Prepare(ctx context.Context, query string) (driver.Stmt, erro
 	if err != nil {
 		return nil, fmt.Errorf("tursodriver: prepare: %w", err)
 	}
-	return &tursoStmt{stmt: stmt, query: query, tel: db.tel}, nil
+	return &tursoStmt{opts: db.opts, stmt: stmt, query: query, tel: db.tel}, nil
 }
 
 // mapIsolationLevel converts a driver.IsolationLevel to the corresponding
@@ -278,4 +289,16 @@ func (db *TursoDB) SetMetrics(m gometrics.Metrics) {
 // entry in the OTel database conventions, so db.system.name is "turso".
 func newTelemetry() *observability.Telemetry {
 	return observability.NewTelemetry("turso")
+}
+
+// SetQueryTimeout configures the timeout for subsequent queries. Configure it
+// before using the driver concurrently. grove.Open calls it for an explicit
+// grove.WithQueryTimeout option.
+func (db *TursoDB) SetQueryTimeout(timeout time.Duration) {
+	if db.opts == nil {
+		db.opts = driver.DefaultDriverOptions()
+	}
+	opts := *db.opts
+	opts.QueryTimeout = timeout
+	db.opts = &opts
 }

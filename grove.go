@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	gometrics "github.com/xraph/go-utils/metrics"
 
@@ -80,6 +81,11 @@ func Open(drv GroveDriver, opts ...Option) (*DB, error) {
 		opts:   o,
 		hooks:  hook.NewEngine(),
 		models: make(map[string]any),
+	}
+	if o.queryTimeoutSet {
+		if configurable, ok := drv.(interface{ SetQueryTimeout(time.Duration) }); ok {
+			configurable.SetQueryTimeout(o.queryTimeout)
+		}
 	}
 
 	// Drivers that support lifecycle hooks receive the DB's engine, so

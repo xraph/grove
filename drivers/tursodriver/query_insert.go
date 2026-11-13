@@ -205,9 +205,10 @@ func (q *InsertQuery) buildInsertHookContext() *hook.QueryContext {
 		tableName = q.table.Name
 	}
 	return &hook.QueryContext{
-		Operation: hook.OpInsert,
-		Table:     tableName,
-		ModelType: modelType,
+		InTransaction: q.db.txConn != nil,
+		Operation:     hook.OpInsert,
+		Table:         tableName,
+		ModelType:     modelType,
 	}
 }
 

@@ -135,13 +135,13 @@ type Condition struct {
 type HookResult struct { //nolint:revive // HookResult is the established public API name
 	Decision Decision
 	Error    error         // Set when Decision == Deny.
-	Filters  []ExtraFilter // Additional conditions to inject (pre-query).
+	Filters  []ExtraFilter // Additional conditions to inject (pre-query or pre-mutation).
 }
 
 // ExtraFilter is a condition that a hook wants to inject into the query.
 type ExtraFilter struct {
-	// Clause is a raw WHERE fragment with placeholders.
-	// e.g., "tenant_id = $1"
+	// Clause is a raw WHERE fragment using ? placeholders, for example
+	// "tenant_id = ?". SQL drivers bind Args after the caller's query arguments.
 	Clause string
 	Args   []any
 

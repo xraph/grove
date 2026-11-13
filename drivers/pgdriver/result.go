@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/grove/driver"
+	"github.com/xraph/grove/internal/queryctx"
 	"github.com/xraph/grove/observability"
 )
 
@@ -85,27 +86,11 @@ func (r *pgRows) Err() error {
 	return r.rows.Err()
 }
 
-// pgRow wraps pgx.Row to implement driver.Row. pgx holds back a QueryRow's
-// error until Scan, so that's where the operation ends.
-type pgRow struct {
-	row pgx.Row
-	op  *observability.Op
-}
-
-var _ driver.Row = (*pgRow)(nil)
-
-// Scan copies the single row's columns into dest. If the query returned no
-// rows, it returns pgx.ErrNoRows.
-func (r *pgRow) Scan(dest ...any) error {
-	err := r.row.Scan(dest...)
-	r.op.End(err)
-	return err
-}
-
 // pgTx wraps pgx.Tx to implement driver.Tx.
 type pgTx struct {
-	tx  pgx.Tx
-	tel *observability.Telemetry
+	opts *driver.DriverOptions
+	tx   pgx.Tx
+	tel  *observability.Telemetry
 
 	// parent is the span that was current when the transaction began.
 	// Commit and Rollback take no context, so their spans start under it.
@@ -129,6 +114,8 @@ var _ driver.Preparer = (*pgTx)(nil)
 
 // Exec executes a query within the transaction that does not return rows.
 func (t *pgTx) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, t.opts)
+	defer cancel()
 	ctx, op := t.tel.StartSQL(ctx, query)
 	ct, err := t.tx.Exec(ctx, query, args...)
 	op.End(err)
@@ -140,21 +127,24 @@ func (t *pgTx) Exec(ctx context.Context, query string, args ...any) (driver.Resu
 
 // Query executes a query within the transaction that returns rows.
 func (t *pgTx) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, t.opts)
 	ctx, op := t.tel.StartSQL(ctx, query)
 	rows, err := t.tx.Query(ctx, query, args...)
 	if err != nil {
+		cancel()
 		op.End(err)
 		return nil, fmt.Errorf("pgdriver: tx query: %w", err)
 	}
-	return &pgRows{rows: rows, op: op}, nil
+	return queryctx.Rows(&pgRows{rows: rows, op: op}, cancel), nil
 }
 
 // QueryRow executes a query within the transaction expected to return at most
 // one row.
 func (t *pgTx) QueryRow(ctx context.Context, query string, args ...any) driver.Row {
+	ctx, cancel := queryctx.WithTimeout(ctx, t.opts)
 	ctx, op := t.tel.StartSQL(ctx, query)
-	row := t.tx.QueryRow(ctx, query, args...)
-	return &pgRow{row: row, op: op}
+	rows, err := t.tx.Query(ctx, query, args...)
+	return queryctx.NewRow(&pgRows{rows: rows}, err, pgx.ErrNoRows, op, cancel)
 }
 
 // Commit commits the transaction.
@@ -197,6 +187,8 @@ func (t *pgTx) parentContext() context.Context {
 // deallocates it; any statement still open when the transaction ends is
 // deallocated by Commit or Rollback.
 func (t *pgTx) Prepare(ctx context.Context, query string) (driver.Stmt, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, t.opts)
+	defer cancel()
 	name := stmtName("grove_txps_")
 	_, err := t.tx.Prepare(ctx, name, query)
 	if err != nil {

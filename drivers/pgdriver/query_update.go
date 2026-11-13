@@ -239,6 +239,8 @@ func (q *UpdateQuery) buildUpdateHookContext() *hook.QueryContext {
 
 // Exec executes the UPDATE.
 func (q *UpdateQuery) Exec(ctx context.Context) (driver.Result, error) {
+	copyQuery := *q
+	q = &copyQuery
 	qc := q.buildUpdateHookContext()
 
 	// Run model BeforeUpdate hooks.
@@ -257,6 +259,9 @@ func (q *UpdateQuery) Exec(ctx context.Context) (driver.Result, error) {
 				return nil, result.Error
 			}
 			return nil, fmt.Errorf("pgdriver: update denied by hook")
+		}
+		if result != nil {
+			q.wheres = appendFilters(q.wheres, result.Filters)
 		}
 	}
 
@@ -291,6 +296,8 @@ func (q *UpdateQuery) Exec(ctx context.Context) (driver.Result, error) {
 
 // Scan executes the UPDATE with RETURNING and scans results into dest.
 func (q *UpdateQuery) Scan(ctx context.Context, dest ...any) error {
+	copyQuery := *q
+	q = &copyQuery
 	qc := q.buildUpdateHookContext()
 
 	// Run model BeforeUpdate hooks.
@@ -309,6 +316,9 @@ func (q *UpdateQuery) Scan(ctx context.Context, dest ...any) error {
 				return result.Error
 			}
 			return fmt.Errorf("pgdriver: update denied by hook")
+		}
+		if result != nil {
+			q.wheres = appendFilters(q.wheres, result.Filters)
 		}
 	}
 

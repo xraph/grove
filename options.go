@@ -13,6 +13,7 @@ type Option func(*options)
 type options struct {
 	poolSize        int
 	queryTimeout    time.Duration
+	queryTimeoutSet bool
 	logger          log.Logger
 	metrics         gometrics.Metrics
 	collectionLabel func(string) string
@@ -45,12 +46,15 @@ func WithPoolSize(n int) Option {
 	}
 }
 
-// WithQueryTimeout sets the default timeout for query execution.
-// Default: 30s.
+// WithQueryTimeout overrides the query timeout on drivers implementing
+// SetQueryTimeout(time.Duration), including all SQL drivers. Without this
+// option the driver retains its own timeout (SQL default: 30s). Non-positive
+// durations are ignored; use driver.WithQueryTimeout(0) to disable the timeout.
 func WithQueryTimeout(d time.Duration) Option {
 	return func(o *options) {
 		if d > 0 {
 			o.queryTimeout = d
+			o.queryTimeoutSet = true
 		}
 	}
 }

@@ -52,9 +52,12 @@ type Rows interface {
 
 // ScanRow scans a single row into a struct using the provided table metadata.
 // dest must be a pointer to a struct. The function builds a slice of field
-// pointers from the struct based on the Table's Fields ordering and calls
-// row.Scan with those pointers.
+// pointers using result column metadata when the row exposes Columns. Legacy
+// rows without metadata retain positional scanning in Table.Fields order.
 func ScanRow(row Row, dest any, table *schema.Table) error { //nolint:revive // ScanRow is the established public API name
+	if closer, ok := row.(interface{ Close() error }); ok {
+		defer closer.Close() // Preserve the scan/validation error while releasing the result.
+	}
 	v := reflect.ValueOf(dest)
 	if v.Kind() != reflect.Pointer || v.IsNil() {
 		return fmt.Errorf("scan: dest must be a non-nil pointer to a struct, got %T", dest)
@@ -64,11 +67,23 @@ func ScanRow(row Row, dest any, table *schema.Table) error { //nolint:revive // 
 		return fmt.Errorf("scan: dest must be a pointer to a struct, got pointer to %s", v.Kind())
 	}
 
-	// Build scan targets from the table's field list.
-	sp := getScanPtrs(len(table.Fields))
+	fields := table.Fields
+	if named, ok := row.(interface{ Columns() ([]string, error) }); ok {
+		columns, err := named.Columns()
+		if err != nil {
+			return fmt.Errorf("scan: failed to get columns: %w", err)
+		}
+		fields = NewColumnMap(table).Resolve(columns)
+	}
+	sp := getScanPtrs(len(fields))
 	ptrs := *sp
-	for i, field := range table.Fields {
-		ptrs[i] = FieldPtr(v, field)
+	var discard any
+	for i, field := range fields {
+		if field == nil {
+			ptrs[i] = &discard
+		} else {
+			ptrs[i] = FieldPtr(v, field)
+		}
 	}
 	err := row.Scan(ptrs...)
 	putScanPtrs(sp)

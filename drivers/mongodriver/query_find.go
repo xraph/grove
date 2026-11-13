@@ -132,9 +132,10 @@ func (q *FindQuery) buildFindHookContext() *hook.QueryContext {
 		tableName = q.table.Name
 	}
 	return &hook.QueryContext{
-		Operation: hook.OpSelect,
-		Table:     tableName,
-		ModelType: modelType,
+		InTransaction: q.session != nil,
+		Operation:     hook.OpSelect,
+		Table:         tableName,
+		ModelType:     modelType,
 	}
 }
 
@@ -142,6 +143,8 @@ func (q *FindQuery) buildFindHookContext() *hook.QueryContext {
 // For slice pointers, it decodes all matching documents.
 // For struct pointers, it decodes the first matching document.
 func (q *FindQuery) Scan(ctx context.Context) error {
+	copyQuery := *q
+	q = &copyQuery
 	if q.err != nil {
 		return q.err
 	}
@@ -174,17 +177,8 @@ func (q *FindQuery) Scan(ctx context.Context) error {
 			return fmt.Errorf("mongodriver: query denied by hook")
 		}
 
-		// Inject native filters from hooks into the query filter.
-		if result != nil && len(result.Filters) > 0 {
-			for _, f := range result.Filters {
-				if f.NativeFilter != nil {
-					if nf, ok := f.NativeFilter.(bson.M); ok {
-						for k, v := range nf {
-							q.filter[k] = v
-						}
-					}
-				}
-			}
+		if result != nil {
+			q.filter = appendNativeFilters(q.filter, result.Filters)
 		}
 	}
 
@@ -264,24 +258,42 @@ func (q *FindQuery) scanOne(ctx context.Context, coll *mongo.Collection, dest an
 
 // Count returns the number of documents matching the filter.
 func (q *FindQuery) Count(ctx context.Context) (int64, error) {
+	copyQuery := *q
+	q = &copyQuery
 	if q.err != nil {
 		return 0, q.err
 	}
 	if q.collection == "" {
 		return 0, fmt.Errorf("mongodriver: no collection specified")
 	}
-
-	coll := q.db.Collection(q.collection)
-
+	qc := q.buildFindHookContext()
+	if q.db.hooks != nil {
+		result, err := q.db.hooks.RunPreQuery(ctx, qc)
+		if err != nil {
+			return 0, err
+		}
+		if result != nil && result.Decision == hook.Deny {
+			if result.Error != nil {
+				return 0, result.Error
+			}
+			return 0, fmt.Errorf("mongodriver: query denied by hook")
+		}
+		if result != nil {
+			q.filter = appendNativeFilters(q.filter, result.Filters)
+		}
+	}
 	if q.session != nil {
 		ctx = mongo.NewSessionContext(ctx, q.session)
 	}
-
-	count, err := coll.CountDocuments(ctx, q.filter)
+	count, err := q.db.Collection(q.collection).CountDocuments(ctx, q.filter)
 	if err != nil {
 		return 0, fmt.Errorf("mongodriver: count: %w", err)
 	}
-
+	if q.db.hooks != nil {
+		if err := q.db.hooks.RunPostQuery(ctx, qc, count); err != nil {
+			return 0, err
+		}
+	}
 	return count, nil
 }
 
@@ -320,4 +332,22 @@ func (q *FindQuery) buildFindOneOptions() *options.FindOneOptionsBuilder {
 	}
 
 	return opts
+}
+
+// appendNativeFilters intersects policy filters with the whole user filter,
+// including any $or clauses, without mutating reusable query documents.
+func appendNativeFilters(filter bson.M, filters []hook.ExtraFilter) bson.M {
+	parts := bson.A{}
+	if len(filter) > 0 {
+		parts = append(parts, filter)
+	}
+	for _, f := range filters {
+		if f.NativeFilter != nil {
+			parts = append(parts, f.NativeFilter)
+		}
+	}
+	if len(parts) == 0 {
+		return filter
+	}
+	return bson.M{"$and": parts}
 }

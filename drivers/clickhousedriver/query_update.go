@@ -196,14 +196,17 @@ func (q *UpdateQuery) buildUpdateHookContext() *hook.QueryContext {
 		tableName = q.table.Name
 	}
 	return &hook.QueryContext{
-		Operation: hook.OpUpdate,
-		Table:     tableName,
-		ModelType: modelType,
+		InTransaction: q.db.txConn != nil,
+		Operation:     hook.OpUpdate,
+		Table:         tableName,
+		ModelType:     modelType,
 	}
 }
 
 // Exec executes the UPDATE (ALTER TABLE ... UPDATE).
 func (q *UpdateQuery) Exec(ctx context.Context) (driver.Result, error) {
+	copyQuery := *q
+	q = &copyQuery
 	qc := q.buildUpdateHookContext()
 
 	// Run model BeforeUpdate hooks.
@@ -222,6 +225,9 @@ func (q *UpdateQuery) Exec(ctx context.Context) (driver.Result, error) {
 				return nil, result.Error
 			}
 			return nil, fmt.Errorf("clickhousedriver: update denied by hook")
+		}
+		if result != nil {
+			q.wheres = appendFilters(q.wheres, result.Filters)
 		}
 	}
 

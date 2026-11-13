@@ -8,6 +8,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/grove/driver"
+	"github.com/xraph/grove/internal/queryctx"
 	"github.com/xraph/grove/observability"
 )
 
@@ -73,26 +74,11 @@ func (r *tursoRows) Err() error {
 	return r.rows.Err()
 }
 
-// tursoRow wraps *sql.Row to implement driver.Row.
-type tursoRow struct {
-	row *sql.Row
-	op  *observability.Op // ends at Scan, where the row's error surfaces
-}
-
-var _ driver.Row = (*tursoRow)(nil)
-
-// Scan copies the single row's columns into dest. If the query returned no
-// rows, it returns sql.ErrNoRows.
-func (r *tursoRow) Scan(dest ...any) error {
-	err := r.row.Scan(dest...)
-	r.op.End(err)
-	return err
-}
-
 // tursoTx wraps *sql.Tx to implement driver.Tx.
 type tursoTx struct {
-	tx  *sql.Tx
-	tel *observability.Telemetry
+	opts *driver.DriverOptions
+	tx   *sql.Tx
+	tel  *observability.Telemetry
 
 	// parent is the span that was current when the transaction began.
 	// Commit and Rollback take no context, so their spans start under it.
@@ -109,6 +95,8 @@ var _ driver.Preparer = (*tursoTx)(nil)
 
 // Exec executes a query within the transaction that does not return rows.
 func (t *tursoTx) Exec(ctx context.Context, query string, args ...any) (driver.Result, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, t.opts)
+	defer cancel()
 	ctx, op := t.tel.StartSQL(ctx, query)
 	res, err := t.tx.ExecContext(ctx, query, args...)
 	op.End(err)
@@ -120,21 +108,24 @@ func (t *tursoTx) Exec(ctx context.Context, query string, args ...any) (driver.R
 
 // Query executes a query within the transaction that returns rows.
 func (t *tursoTx) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, t.opts)
 	ctx, op := t.tel.StartSQL(ctx, query)
-	rows, err := t.tx.QueryContext(ctx, query, args...)
+	rows, err := t.tx.QueryContext(ctx, query, args...) //nolint:rowserrcheck // The returned queryctx wrapper checks iteration errors and closes rows.
 	if err != nil {
+		cancel()
 		op.End(err)
 		return nil, fmt.Errorf("tursodriver: tx query: %w", err)
 	}
-	return &tursoRows{rows: rows, op: op}, nil
+	return queryctx.Rows(&tursoRows{rows: rows, op: op}, cancel), nil
 }
 
 // QueryRow executes a query within the transaction expected to return at most
 // one row.
 func (t *tursoTx) QueryRow(ctx context.Context, query string, args ...any) driver.Row {
+	ctx, cancel := queryctx.WithTimeout(ctx, t.opts)
 	ctx, op := t.tel.StartSQL(ctx, query)
-	row := t.tx.QueryRowContext(ctx, query, args...)
-	return &tursoRow{row: row, op: op}
+	rows, err := t.tx.QueryContext(ctx, query, args...) //nolint:rowserrcheck // The returned queryctx wrapper checks iteration errors and closes rows.
+	return queryctx.NewRow(rows, err, sql.ErrNoRows, op, cancel)
 }
 
 // Commit commits the transaction.
@@ -173,9 +164,11 @@ func (t *tursoTx) parentContext() context.Context {
 
 // Prepare creates a prepared statement within the transaction.
 func (t *tursoTx) Prepare(ctx context.Context, query string) (driver.Stmt, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, t.opts)
+	defer cancel()
 	stmt, err := t.tx.PrepareContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("tursodriver: tx prepare: %w", err)
 	}
-	return &tursoStmt{stmt: stmt, query: query, tel: t.tel}, nil
+	return &tursoStmt{opts: t.opts, stmt: stmt, query: query, tel: t.tel}, nil
 }

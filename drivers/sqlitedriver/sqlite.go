@@ -14,6 +14,7 @@ import (
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/internal/queryctx"
 	"github.com/xraph/grove/observability"
 	"github.com/xraph/grove/schema"
 )
@@ -104,6 +105,8 @@ func (db *SqliteDB) SetHooks(engine *hook.Engine) {
 
 // Ping verifies that the database is reachable.
 func (db *SqliteDB) Ping(ctx context.Context) error {
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
+	defer cancel()
 	if db.db == nil {
 		return fmt.Errorf("sqlitedriver: database is not initialized; call Open first")
 	}
@@ -116,6 +119,8 @@ func (db *SqliteDB) Exec(ctx context.Context, query string, args ...any) (driver
 	if db.txConn != nil {
 		return db.txConn.Exec(ctx, query, args...)
 	}
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
+	defer cancel()
 	ctx, op := db.tel.StartSQL(ctx, query)
 	res, err := db.db.ExecContext(ctx, query, utcArgs(args)...)
 	op.End(err)
@@ -131,13 +136,15 @@ func (db *SqliteDB) Query(ctx context.Context, query string, args ...any) (drive
 	if db.txConn != nil {
 		return db.txConn.Query(ctx, query, args...)
 	}
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
 	ctx, op := db.tel.StartSQL(ctx, query)
-	rows, err := db.db.QueryContext(ctx, query, utcArgs(args)...)
+	rows, err := db.db.QueryContext(ctx, query, utcArgs(args)...) //nolint:rowserrcheck // The returned queryctx wrapper checks iteration errors and closes rows.
 	if err != nil {
+		cancel()
 		op.End(err)
 		return nil, fmt.Errorf("sqlitedriver: query: %w", err)
 	}
-	return &sqliteRows{rows: rows, op: op}, nil
+	return queryctx.Rows(&sqliteRows{rows: rows, op: op}, cancel), nil
 }
 
 // QueryRow executes a query expected to return at most one row.
@@ -145,9 +152,10 @@ func (db *SqliteDB) QueryRow(ctx context.Context, query string, args ...any) dri
 	if db.txConn != nil {
 		return db.txConn.QueryRow(ctx, query, args...)
 	}
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
 	ctx, op := db.tel.StartSQL(ctx, query)
-	row := db.db.QueryRowContext(ctx, query, utcArgs(args)...)
-	return &sqliteRow{row: row, op: op}
+	rows, err := db.db.QueryContext(ctx, query, utcArgs(args)...) //nolint:rowserrcheck // The returned queryctx wrapper checks iteration errors and closes rows.
+	return queryctx.NewRow(rows, err, sql.ErrNoRows, op, cancel)
 }
 
 // BeginTx starts a new database transaction with the specified options.
@@ -168,7 +176,7 @@ func (db *SqliteDB) BeginTx(ctx context.Context, opts *driver.TxOptions) (driver
 	if err != nil {
 		return nil, fmt.Errorf("sqlitedriver: begin tx: %w", err)
 	}
-	return &sqliteTx{tx: tx, tel: db.tel, parent: parent}, nil
+	return &sqliteTx{opts: db.opts, tx: tx, tel: db.tel, parent: parent}, nil
 }
 
 // GroveTx is the adapter method for grove.DB.BeginTx(). It bridges the
@@ -196,6 +204,8 @@ func (db *SqliteDB) GroveDelete(model any) any { return db.NewDelete(model) }
 // Prepare creates a prepared statement for repeated execution.
 // If operating within a transaction, it delegates to the transaction's Prepare.
 func (db *SqliteDB) Prepare(ctx context.Context, query string) (driver.Stmt, error) {
+	ctx, cancel := queryctx.WithTimeout(ctx, db.opts)
+	defer cancel()
 	if db.txConn != nil {
 		if p, ok := db.txConn.(driver.Preparer); ok {
 			return p.Prepare(ctx, query)
@@ -206,7 +216,7 @@ func (db *SqliteDB) Prepare(ctx context.Context, query string) (driver.Stmt, err
 	if err != nil {
 		return nil, fmt.Errorf("sqlitedriver: prepare: %w", err)
 	}
-	return &sqliteStmt{stmt: stmt, query: query, tel: db.tel}, nil
+	return &sqliteStmt{opts: db.opts, stmt: stmt, query: query, tel: db.tel}, nil
 }
 
 // utcArgs returns args with every time.Time, non-nil *time.Time and valid
@@ -291,4 +301,16 @@ func resultCode(err error) string {
 		return strconv.Itoa(sqliteErr.Code())
 	}
 	return ""
+}
+
+// SetQueryTimeout configures the timeout for subsequent queries. Configure it
+// before using the driver concurrently. grove.Open calls it for an explicit
+// grove.WithQueryTimeout option.
+func (db *SqliteDB) SetQueryTimeout(timeout time.Duration) {
+	if db.opts == nil {
+		db.opts = driver.DefaultDriverOptions()
+	}
+	opts := *db.opts
+	opts.QueryTimeout = timeout
+	db.opts = &opts
 }

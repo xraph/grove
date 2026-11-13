@@ -205,7 +205,7 @@ func (q *SelectQuery) WithDeleted() *SelectQuery {
 
 // applySoftDeleteFilter adds a WHERE clause filtering out soft-deleted rows
 // if the model has a soft_delete field and WithDeleted was not called.
-// This is idempotent -- it tracks whether it has already been applied.
+// Build applies this to an execution-local copy of the query.
 func (q *SelectQuery) applySoftDeleteFilter() {
 	if q.table == nil || q.table.SoftDelete == nil || q.withDeleted {
 		return
@@ -217,18 +217,14 @@ func (q *SelectQuery) applySoftDeleteFilter() {
 	}
 	clause := sdCol + " IS NULL"
 
-	// Check if we already added this filter (idempotency for BuildCount reuse).
-	for _, w := range q.wheres {
-		if w.query == clause {
-			return
-		}
-	}
-
-	q.addWhere("AND", clause, nil)
+	q.wheres = appendFilters(q.wheres, []hook.ExtraFilter{{Clause: clause}})
 }
 
 // Build generates the SQL string and args without executing.
 func (q *SelectQuery) Build() (string, []any, error) {
+	copyQuery := *q
+	q = &copyQuery
+	q.args = nil
 	if q.err != nil {
 		return "", nil, q.err
 	}
@@ -386,6 +382,9 @@ func (q *SelectQuery) Build() (string, []any, error) {
 
 // BuildCount generates a SELECT COUNT(*) query string and args.
 func (q *SelectQuery) BuildCount() (string, []any, error) {
+	copyQuery := *q
+	q = &copyQuery
+	q.args = nil
 	if q.err != nil {
 		return "", nil, q.err
 	}
@@ -469,14 +468,18 @@ func (q *SelectQuery) buildSelectHookContext() *hook.QueryContext {
 		tableName = q.table.Name
 	}
 	return &hook.QueryContext{
-		Operation: hook.OpSelect,
-		Table:     tableName,
-		ModelType: modelType,
+		InTransaction: q.db.txConn != nil,
+		Operation:     hook.OpSelect,
+		Table:         tableName,
+		ModelType:     modelType,
 	}
 }
 
 // Scan executes the query and scans results into the model.
 func (q *SelectQuery) Scan(ctx context.Context, dest ...any) error {
+	copyQuery := *q
+	q = &copyQuery
+	q.args = nil
 	qc := q.buildSelectHookContext()
 
 	// Determine scan target early for model hooks.
@@ -503,13 +506,8 @@ func (q *SelectQuery) Scan(ctx context.Context, dest ...any) error {
 			return fmt.Errorf("mysqldriver: query denied by hook")
 		}
 
-		// Inject extra filters from hooks as WHERE clauses.
-		if result != nil && len(result.Filters) > 0 {
-			for _, f := range result.Filters {
-				if f.Clause != "" {
-					q.addWhere("AND", f.Clause, f.Args)
-				}
-			}
+		if result != nil {
+			q.wheres = appendFilters(q.wheres, result.Filters)
 		}
 	}
 
@@ -591,15 +589,38 @@ func (q *SelectQuery) Scan(ctx context.Context, dest ...any) error {
 
 // Count executes a SELECT COUNT(*) and returns the count.
 func (q *SelectQuery) Count(ctx context.Context) (int64, error) {
+	copyQuery := *q
+	q = &copyQuery
+	q.args = nil
+	qc := q.buildSelectHookContext()
+	if q.db.hooks != nil {
+		result, err := q.db.hooks.RunPreQuery(ctx, qc)
+		if err != nil {
+			return 0, err
+		}
+		if result != nil && result.Decision == hook.Deny {
+			if result.Error != nil {
+				return 0, result.Error
+			}
+			return 0, fmt.Errorf("mysqldriver: query denied by hook")
+		}
+		if result != nil {
+			q.wheres = appendFilters(q.wheres, result.Filters)
+		}
+	}
 	sqlStr, args, err := q.BuildCount()
 	if err != nil {
 		return 0, err
 	}
-
+	qc.RawQuery, qc.RawArgs = sqlStr, args
 	var count int64
-	row := q.db.QueryRow(ctx, sqlStr, args...)
-	if err := row.Scan(&count); err != nil {
+	if err := q.db.QueryRow(ctx, sqlStr, args...).Scan(&count); err != nil {
 		return 0, fmt.Errorf("mysqldriver: count: %w", err)
+	}
+	if q.db.hooks != nil {
+		if err := q.db.hooks.RunPostQuery(ctx, qc, count); err != nil {
+			return 0, err
+		}
 	}
 	return count, nil
 }

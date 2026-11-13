@@ -104,7 +104,7 @@ An `ExtraFilter` is a condition that a hook wants to inject into the query:
 ```go
 type ExtraFilter struct {
     // Clause is a raw WHERE fragment with placeholders.
-    // e.g., "tenant_id = $1"
+    // e.g., "tenant_id = ?" (Args are bound after the query's arguments)
     Clause string
     Args   []any
 
