@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/elastic/go-elasticsearch/v8/esapi"
 	"github.com/stretchr/testify/require"
 
 	"github.com/xraph/grove/observability/telemetrytest"
@@ -283,4 +284,18 @@ func TestFailedOpenReleasesOwnedConnectionsAndCanRetry(t *testing.T) {
 	available.Store(true)
 	require.NoError(t, db.Open(t.Context(), srv.URL))
 	require.NoError(t, db.Close())
+}
+
+type responseBody struct {
+	*strings.Reader
+	closed bool
+}
+
+func (b *responseBody) Close() error { b.closed = true; return nil }
+
+func TestResponseWithoutDestinationIsDrained(t *testing.T) {
+	body := &responseBody{Reader: strings.NewReader(`{"acknowledged":true}`)}
+	require.NoError(t, decodeResponse(&esapi.Response{StatusCode: http.StatusOK, Body: body}, nil))
+	require.True(t, body.closed)
+	require.Zero(t, body.Len(), "response cleanup must reach EOF even without transport-specific auto-draining")
 }

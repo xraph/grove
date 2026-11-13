@@ -142,7 +142,7 @@ func (db *ElasticDB) Open(ctx context.Context, addresses string, opts ...EsOptio
 	if err != nil {
 		return fmt.Errorf("esdriver: ping: %w", err)
 	}
-	defer func() { _ = res.Body.Close() }()
+	defer closeResponse(res)
 
 	if res.IsError() {
 		return fmt.Errorf("esdriver: ping: %s", res.Status())
@@ -173,7 +173,7 @@ func (db *ElasticDB) Ping(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("esdriver: ping: %w", err)
 	}
-	defer func() { _ = res.Body.Close() }()
+	defer closeResponse(res)
 
 	if res.IsError() {
 		return fmt.Errorf("esdriver: ping: %s", res.Status())
@@ -241,7 +241,7 @@ func (db *ElasticDB) CreateIndex(ctx context.Context, name string, mapping M) er
 	if err != nil {
 		return fmt.Errorf("esdriver: create index: %w", err)
 	}
-	defer func() { _ = res.Body.Close() }()
+	defer closeResponse(res)
 
 	if res.IsError() {
 		return decodeError(res)
@@ -258,7 +258,7 @@ func (db *ElasticDB) DeleteIndex(ctx context.Context, name string) error {
 	if err != nil {
 		return fmt.Errorf("esdriver: delete index: %w", err)
 	}
-	defer func() { _ = res.Body.Close() }()
+	defer closeResponse(res)
 
 	if res.IsError() {
 		return decodeError(res)
@@ -275,7 +275,7 @@ func (db *ElasticDB) IndexExists(ctx context.Context, name string) (bool, error)
 	if err != nil {
 		return false, fmt.Errorf("esdriver: index exists: %w", err)
 	}
-	defer func() { _ = res.Body.Close() }()
+	defer closeResponse(res)
 
 	return res.StatusCode == 200, nil
 }
@@ -295,7 +295,7 @@ func (db *ElasticDB) PutMapping(ctx context.Context, index string, mapping M) er
 	if err != nil {
 		return fmt.Errorf("esdriver: put mapping: %w", err)
 	}
-	defer func() { _ = res.Body.Close() }()
+	defer closeResponse(res)
 
 	if res.IsError() {
 		return decodeError(res)
@@ -312,7 +312,7 @@ func (db *ElasticDB) Refresh(ctx context.Context, indices ...string) error {
 	if err != nil {
 		return fmt.Errorf("esdriver: refresh: %w", err)
 	}
-	defer func() { _ = res.Body.Close() }()
+	defer closeResponse(res)
 
 	if res.IsError() {
 		return decodeError(res)
@@ -361,7 +361,7 @@ func decodeError(res *esapi.Response) error {
 // It checks for errors first and returns a formatted error if the
 // response indicates failure.
 func decodeResponse(res *esapi.Response, dest any) error {
-	defer func() { _ = res.Body.Close() }()
+	defer closeResponse(res)
 
 	if res.IsError() {
 		return decodeError(res)
@@ -372,6 +372,13 @@ func decodeResponse(res *esapi.Response, dest any) error {
 	}
 
 	return json.NewDecoder(res.Body).Decode(dest)
+}
+
+// closeResponse drains unread acknowledgements and error bodies before closing
+// them. Older Go HTTP transports discard connections when a body is left unread.
+func closeResponse(res *esapi.Response) {
+	_, _ = io.Copy(io.Discard, res.Body) //nolint:errcheck // Draining only enables reuse; Close still releases the connection on read failure.
+	_ = res.Body.Close()
 }
 
 // refreshOption returns the refresh query parameter for write operations.

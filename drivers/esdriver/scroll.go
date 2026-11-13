@@ -106,7 +106,7 @@ func (c *EsCursor) Close() error {
 	if err != nil {
 		return fmt.Errorf("esdriver: clear scroll: %w", err)
 	}
-	defer func() { _ = res.Body.Close() }()
+	defer closeResponse(res)
 	if res.IsError() {
 		return decodeError(res)
 	}
