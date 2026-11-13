@@ -1380,16 +1380,9 @@ final class CrdtStore {
   /// Undoes the last local write. Returns false when there is nothing to undo
   /// or the undo is refused.
   ///
-  /// Undo emits compensating changes, so it reaches the server and every
-  /// other replica: the field is reconciled toward its value before the write
-  /// ([reconcileField]; null when the field did not exist), and those changes
-  /// are queued for push but not recorded for undo. A `formatText` is undone
-  /// by a format over the same characters (the original spans) with each
-  /// attribute set back to its value at the first character, or null.
-  ///
-  /// Because undo reconciles the whole field toward its earlier value, it also
-  /// overrides concurrent edits to that field made since, as crdt-js undo
-  /// does when it restores the earlier field state.
+  /// Undo emits inverse operations against the local write's tags, nodes,
+  /// spans or paths. Concurrent edits outside that operation survive. Redo
+  /// inverts those compensations with fresh clocks and identifiers.
   ///
   /// Undoing a `deleteDocument` whose tombstone is still pending drops it from
   /// the queue and restores the document's earlier tombstone state. Once the
@@ -1405,82 +1398,291 @@ final class CrdtStore {
     _assertPendingCapacity();
     final entry = _undo.popUndo()!;
     final c = entry.change;
-    if (_isRecordDelete(c)) return _undoDelete(entry);
+    if (entry.group == null && _isRecordDelete(c)) return _undoDelete(entry);
+    late UndoEntry inverse;
     _suppressUndo++;
     try {
-      transact(() => _compensate(entry));
+      inverse = transact(() => _compensate(entry));
     } on Object {
       _undo.pushUndo(entry);
       rethrow;
     } finally {
       _suppressUndo--;
     }
-    _undo.pushRedo(entry);
+    _undo.pushRedo(inverse);
     return true;
   }
 
-  void _compensate(UndoEntry entry) {
-    final c = entry.change;
-    final prev = entry.previousState;
-    final op = c.textOp;
-    if (c.crdtType == CrdtType.text &&
-        op != null &&
-        op.op == TextOpType.format) {
-      if (op.spans.isEmpty) return;
-      final first = op.spans.first;
-      final ts = prev?.textState;
-      _formatSpans(c.table, c.pk, c.field, op.spans, {
-        for (final name in op.attrs.keys)
-          name: ts == null ? null : _attrAt(ts, first, name),
-      });
-      return;
-    }
-    reconcileField(
-      c.table,
-      c.pk,
-      c.field,
-      c.crdtType,
-      prev == null ? null : resolveFieldValue(prev),
-    );
-  }
-
-  /// The value of attribute [name] at the first character of [span] in [s].
-  static Object? _attrAt(TextState s, TextSpan span, String name) {
-    for (final f
-        in s.frags[textOriginKey(span.origin)] ?? const <TextFragment>[]) {
-      if (span.start >= f.start && span.start < f.start + f.length) {
-        return goJsonCopy(f.attrs[name]?.value.value);
+  UndoEntry _compensate(UndoEntry entry) {
+    final changes = _inverseChanges(entry);
+    _assertPendingCapacity(changes.length);
+    final applied = <UndoEntry>[];
+    for (final change in changes) {
+      final previous = _captureFieldState(
+        change.table,
+        change.pk,
+        change.field,
+      );
+      final committed = _commitLocal(change, change.value?.value);
+      if (committed != null) {
+        applied.add(
+          UndoEntry(
+            change: committed,
+            previousState: previous,
+            timestamp: DateTime.now().millisecondsSinceEpoch,
+          ),
+        );
       }
     }
-    return null;
+    if (applied.length == 1) return applied.single;
+    return UndoEntry(
+      change: entry.change,
+      previousState: null,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      group: List.unmodifiable(applied),
+    );
   }
 
-  ChangeRecord? _formatSpans(
-    String t,
-    String p,
-    String f,
-    List<TextSpan> spans,
-    Map<String, Object?> attrs,
-  ) {
-    _assertPendingCapacity();
-    final hlc = clock.now();
-    final op = TextOperation(
-      TextOpType.format,
-      spans: spans,
-      attrs: {for (final e in attrs.entries) e.key: JsonValue(e.value)},
-    );
-    return _commitLocal(
-      ChangeRecord(
-        table: t,
-        pk: p,
-        field: f,
-        crdtType: CrdtType.text,
-        hlc: hlc,
-        nodeId: hlc.node,
-        textOp: op,
-      ),
-      attrs,
-    );
+  List<ChangeRecord> _inverseChanges(UndoEntry entry) {
+    final group = entry.group;
+    if (group != null) {
+      return [for (final part in group.reversed) ..._inverseChanges(part)];
+    }
+    final c = entry.change;
+    final prev = entry.previousState;
+    ChangeRecord next({
+      HLC? hlc,
+      JsonValue? value,
+      CounterDelta? counter,
+      SetOperation? set,
+      ListOperation? list,
+      TextOperation? text,
+      bool tombstone = false,
+    }) {
+      final at = hlc ?? clock.now();
+      return ChangeRecord(
+        table: c.table,
+        pk: c.pk,
+        field: c.field,
+        crdtType: c.crdtType,
+        hlc: at,
+        nodeId: at.node,
+        value: value,
+        counterDelta: counter,
+        setOp: set,
+        listOp: list,
+        textOp: text,
+        tombstone: tombstone,
+      );
+    }
+
+    switch (c.crdtType) {
+      case CrdtType.lww || CrdtType.none:
+        return [next(value: prev?.value ?? const JsonValue(null))];
+      case CrdtType.counter:
+        final delta = c.counterDelta;
+        if (delta == null) return [];
+        final inc = delta.inc - (prev?.counterState?.inc[c.nodeId] ?? 0);
+        final dec = delta.dec - (prev?.counterState?.dec[c.nodeId] ?? 0);
+        final current = _getDoc(c.table, c.pk)?.fields[c.field]?.counterState;
+        final at = clock.now();
+        return [
+          next(
+            hlc: at,
+            counter: CounterDelta(
+              (current?.inc[at.node] ?? 0) + dec,
+              (current?.dec[at.node] ?? 0) + inc,
+            ),
+          ),
+        ];
+      case CrdtType.set:
+        final op = c.setOp;
+        if (op == null) return [];
+        if (op.op == SetOpType.add) {
+          return [
+            next(
+              set: SetOperation(
+                SetOpType.remove,
+                op.elements,
+                tags: [OrSetTag(c.nodeId, c.hlc)],
+              ),
+            ),
+          ];
+        }
+        final before = prev?.setState;
+        final back = [
+          for (final e in op.elements)
+            if (before != null &&
+                setElements(before).any(
+                  (value) => jsonDeepEquals(
+                    value,
+                    e is RawJson ? jsonDecode(e.json) : e,
+                  ),
+                ))
+              e,
+        ];
+        return back.isEmpty
+            ? []
+            : [next(set: SetOperation(SetOpType.add, back))];
+      case CrdtType.list:
+        final op = c.listOp;
+        if (op == null) return [];
+        if (op.op == ListOpType.insert) {
+          return [
+            next(
+              list: ListOperation(
+                ListOpType.delete,
+                nodeId: op.nodeId.isZero ? c.hlc : op.nodeId,
+              ),
+            ),
+          ];
+        }
+        final node = prev?.listState?.nodes[hlcString(op.nodeId)];
+        if (node == null || node.tombstone) return [];
+        if (op.op == ListOpType.move) {
+          return [
+            next(
+              list: ListOperation(
+                ListOpType.move,
+                nodeId: op.nodeId,
+                parentId: node.parentId,
+              ),
+            ),
+          ];
+        }
+        final at = clock.now();
+        return [
+          next(
+            hlc: at,
+            list: ListOperation(
+              ListOpType.insert,
+              nodeId: at,
+              parentId: op.nodeId,
+              value: node.value,
+            ),
+          ),
+        ];
+      case CrdtType.text:
+        final op = c.textOp;
+        if (op == null) return [];
+        if (op.op == TextOpType.insert) {
+          if (op.content.isEmpty) return [];
+          final origin = op.origin.isZero ? c.hlc : op.origin;
+          final start = !op.ref.origin.isZero && op.ref.origin == origin
+              ? op.ref.offset + 1
+              : 0;
+          return [
+            next(
+              text: TextOperation(
+                TextOpType.delete,
+                spans: [TextSpan(origin, start, op.content.runes.length)],
+              ),
+            ),
+          ];
+        }
+        final segments = _undoTextSegments(
+          prev?.textState ?? newTextState(),
+          op.spans,
+          visibleOnly: op.op == TextOpType.delete,
+        );
+        if (op.op == TextOpType.delete) {
+          if (segments.isEmpty) return [];
+          final last = segments.last.span;
+          var ref = TextRef(last.origin, last.start + last.length - 1);
+          final changes = <ChangeRecord>[];
+          for (final segment in segments) {
+            final at = clock.now();
+            changes.add(
+              next(
+                hlc: at,
+                text: TextOperation(
+                  TextOpType.insert,
+                  ref: ref,
+                  origin: at,
+                  content: segment.content,
+                  attrs: {
+                    for (final e in segment.attrs.entries)
+                      if (e.value.value != null) e.key: e.value,
+                  },
+                ),
+              ),
+            );
+            ref = TextRef(at, segment.content.runes.length - 1);
+          }
+          return changes;
+        }
+        return [
+          for (final segment in segments)
+            next(
+              text: TextOperation(
+                TextOpType.format,
+                spans: [segment.span],
+                attrs: {
+                  for (final key in op.attrs.keys)
+                    key: segment.attrs[key] ?? const JsonValue(null),
+                },
+              ),
+            ),
+        ];
+      case CrdtType.document:
+        final payload = c.value?.value;
+        if (payload is! Map<String, Object?> || payload['path'] is! String) {
+          return [];
+        }
+        final path = payload['path']! as String;
+        final before = prev?.docState?.fields ?? <String, FieldState>{};
+        final leaves = before.entries.where(
+          (e) => e.key == path || e.key.startsWith('$path.'),
+        );
+        ChangeRecord restore(String key, FieldState value) =>
+            next(value: JsonValue({'path': key, 'value': value.value?.value}));
+        if (c.tombstone) {
+          return [for (final e in leaves) restore(e.key, e.value)];
+        }
+        if (before.containsKey(path)) return [restore(path, before[path]!)];
+        return [
+          next(tombstone: true, value: JsonValue({'path': path})),
+          for (final e in leaves) restore(e.key, e.value),
+        ];
+    }
+  }
+
+  static List<({TextSpan span, String content, Map<String, JsonValue> attrs})>
+  _undoTextSegments(
+    TextState state,
+    List<TextSpan> spans, {
+    required bool visibleOnly,
+  }) {
+    final out =
+        <({TextSpan span, String content, Map<String, JsonValue> attrs})>[];
+    for (final seg in textWalk(state)) {
+      final fragment = seg.frag;
+      if (visibleOnly && (fragment.tombstone || fragment.content.isEmpty)) {
+        continue;
+      }
+      for (final span in spans) {
+        if (span.origin != fragment.origin) continue;
+        final start = (fragment.start + seg.from).clamp(
+          span.start,
+          span.start + span.length,
+        );
+        final end = (fragment.start + seg.to).clamp(
+          span.start,
+          span.start + span.length,
+        );
+        if (start >= end) continue;
+        out.add((
+          span: TextSpan(fragment.origin, start, end - start),
+          content: String.fromCharCodes(
+            fragment.content.runes
+                .skip(start - fragment.start)
+                .take(end - start),
+          ),
+          attrs: {for (final e in fragment.attrs.entries) e.key: e.value.value},
+        ));
+      }
+    }
+    return out;
   }
 
   /// Reserves records immediately before transport sends them. A lost reply
@@ -1530,96 +1732,37 @@ final class CrdtStore {
     return true;
   }
 
-  /// Redoes the last undone write: the original intent is applied again with
-  /// new clocks through the same mutators. Returns false when there is
-  /// nothing to redo.
+  /// Redoes the last undo by inverting its compensating operations.
   bool redo() {
     _checkWritable();
     if (!_undo.canRedo) return false;
     _assertPendingCapacity();
     final entry = _undo.redo()!;
-    // redo() put the entry back on the undo stack; it is replaced below by one
-    // holding the replayed change.
     _undo.popUndo();
-    final c = entry.change;
-    final isDelete = _isRecordDelete(c);
-    final before = isDelete ? _getDoc(c.table, c.pk) : null;
-    ChangeRecord? replayed;
     _suppressUndo++;
     try {
-      replayed = transact(() => _replay(entry));
+      if (entry.group == null && _isRecordDelete(entry.change)) {
+        final c = entry.change;
+        final before = _getDoc(c.table, c.pk);
+        final replayed = deleteDocument(c.table, c.pk);
+        _undo.pushUndo(
+          UndoEntry(
+            change: replayed,
+            previousState: null,
+            previousDocument: before,
+            timestamp: DateTime.now().millisecondsSinceEpoch,
+          ),
+        );
+      } else {
+        _undo.pushUndo(transact(() => _compensate(entry)));
+      }
     } on Object {
       _undo.pushRedo(entry);
       rethrow;
     } finally {
       _suppressUndo--;
     }
-    _undo.pushUndo(
-      UndoEntry(
-        change: replayed ?? c,
-        previousState: entry.previousState,
-        previousDocument: isDelete ? before : entry.previousDocument,
-        timestamp: DateTime.now().millisecondsSinceEpoch,
-      ),
-    );
     return true;
-  }
-
-  ChangeRecord? _replay(UndoEntry entry) {
-    final c = entry.change;
-    final prev = entry.previousState;
-    if (_isRecordDelete(c)) return deleteDocument(c.table, c.pk);
-    switch (c.crdtType) {
-      case CrdtType.lww || CrdtType.none:
-        return setField(c.table, c.pk, c.field, c.value?.value);
-      case CrdtType.counter:
-        final d = c.counterDelta!;
-        final base = prev?.counterState;
-        final inc = d.inc - (base?.inc[c.nodeId] ?? 0);
-        final dec = d.dec - (base?.dec[c.nodeId] ?? 0);
-        _assertPendingCapacity((inc > 0 ? 1 : 0) + (dec > 0 ? 1 : 0));
-        ChangeRecord? last;
-        if (inc > 0) last = incrementCounter(c.table, c.pk, c.field, inc);
-        if (dec > 0) last = decrementCounter(c.table, c.pk, c.field, dec);
-        return last;
-      case CrdtType.set:
-        final op = c.setOp!;
-        final elements = [
-          for (final e in op.elements) e is RawJson ? jsonDecode(e.json) : e,
-        ];
-        return op.op == SetOpType.add
-            ? addToSet(c.table, c.pk, c.field, elements)
-            : removeFromSet(c.table, c.pk, c.field, elements);
-      case CrdtType.document:
-        final payload = c.value?.value;
-        final path = payload is Map<String, Object?> ? payload['path'] : null;
-        if (path is! String) return null;
-        return c.tombstone
-            ? deleteDocumentField(c.table, c.pk, c.field, path)
-            : setDocumentField(
-                c.table,
-                c.pk,
-                c.field,
-                path,
-                (payload! as Map<String, Object?>)['value'],
-              );
-      case CrdtType.text when c.textOp?.op == TextOpType.format:
-        final op = c.textOp!;
-        return _formatSpans(c.table, c.pk, c.field, op.spans, {
-          for (final e in op.attrs.entries) e.key: e.value.value,
-        });
-      case CrdtType.list || CrdtType.text:
-        // Node and origin ids change on every insert, so a list or text write
-        // is replayed as the value it produced.
-        final out = reconcileField(
-          c.table,
-          c.pk,
-          c.field,
-          c.crdtType,
-          resolveFieldValue(applyChange(prev, c)),
-        );
-        return out.isEmpty ? null : out.last;
-    }
   }
 
   // --- Sync ---

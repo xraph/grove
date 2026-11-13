@@ -12,6 +12,7 @@ final class UndoEntry {
     required this.previousState,
     required this.timestamp,
     this.previousDocument,
+    this.group,
   });
 
   /// The change that was applied.
@@ -25,6 +26,9 @@ final class UndoEntry {
   /// change. Dart only: undoing an unpushed delete restores the document
   /// exactly, where the field snapshot alone could not.
   final DocumentState? previousDocument;
+
+  /// Compensating operations that must be inverted together, in reverse order.
+  final List<UndoEntry>? group;
 
   /// When the change was recorded, in milliseconds since the Unix epoch.
   final int timestamp;

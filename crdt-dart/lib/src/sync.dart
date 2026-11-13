@@ -689,8 +689,11 @@ final class SyncEngine {
         out.addAll(changes);
       }
       if (next == null) return;
-      _cursorCache[table] = next;
+      // The checkpoint must never outlive the documents it acknowledges.
+      await store.flushPersistence();
+      _checkCancelled(gen);
       await _cursors?.writeCursor(table, next);
+      _cursorCache[table] = next;
       _checkCancelled(gen);
     });
   }

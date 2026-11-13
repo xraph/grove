@@ -1303,11 +1303,12 @@ void main() {
         maxPendingChanges: 3,
         throwOnOverflow: true,
       );
-      s.setDocumentField('t', '1', 'meta', 'a', 1);
+      s.setDocumentField('t', '1', 'meta', 'x.a', 1);
+      s.setDocumentField('t', '1', 'meta', 'x.b', 2);
       s.clearPendingChanges();
       s.setField('t', '1', 'z', 1);
-      s.setDocumentField('t', '1', 'meta', 'x', 1);
-      // A remote path lands after the write, so undoing it needs two deletes.
+      s.deleteDocumentField('t', '1', 'meta', 'x');
+      // Restoring two deleted leaves needs two slots. An unrelated remote path survives.
       s.applyChanges([
         ChangeRecord(
           table: 't',
@@ -1326,8 +1327,11 @@ void main() {
       expect(s.canRedo, isFalse);
       s.clearPendingChanges();
       expect(s.undo(), isTrue);
-      expect(s.getDocument('t', '1')!['meta'], {'a': 1});
-      expect(s.getPendingChanges().map((c) => c.tombstone), [true, true]);
+      expect(s.getDocument('t', '1')!['meta'], {
+        'x': {'a': 1, 'b': 2},
+        'y': 2,
+      });
+      expect(s.getPendingChanges().map((c) => c.tombstone), [false, false]);
     });
 
     test(
