@@ -226,6 +226,7 @@ void main() {
       expect(frames, hasLength(1));
       expect(frames.single['payload'], {
         'tables': ['docs'],
+        'since': HLC.zero.toJson(),
       });
 
       c.latest.serverSends({'type': 'change', 'payload': _change('1')});
@@ -275,6 +276,7 @@ void main() {
         expect(subscribeFrames(), hasLength(2));
         expect(subscribeFrames()[1]['payload'], {
           'tables': ['docs'],
+          'since': HLC.zero.toJson(),
         });
 
         sub.disconnect();
@@ -542,7 +544,7 @@ void main() {
       await t.close();
     });
 
-    test('never sends unsubscribe', () async {
+    test('sends unsubscribe when the last subscriber disconnects', () async {
       final ws = FakeWs();
       final t = WebSocketTransport(
         url: Uri.parse('ws://x/sync/ws'),
@@ -552,7 +554,7 @@ void main() {
       await pumpEventQueue();
       sub.disconnect();
       await pumpEventQueue();
-      expect(ws.sent.where((f) => f['type'] == 'unsubscribe'), isEmpty);
+      expect(ws.sent.where((f) => f['type'] == 'unsubscribe'), hasLength(1));
       await t.close();
     });
 
@@ -666,6 +668,7 @@ void main() {
       await pumpEventQueue();
       expect(c.latest.ofType('subscribe').single['payload'], {
         'tables': <Object?>[],
+        'since': HLC.zero.toJson(),
       });
       c.latest.drop();
       await pumpEventQueue();

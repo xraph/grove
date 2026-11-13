@@ -450,3 +450,7 @@ merged, err := engine.MergeState(localState, remoteState)
 | User profile with nested fields | `crdt:document` | Independent merge per nested path |
 | Form with mixed field types | `crdt:document` | Different merge strategies per section |
 | Settings with counters and flags | `crdt:document` | Heterogeneous child types at each path |
+
+### Observed remove wire compatibility
+
+New set removals name their observed add tags. An explicit `"tags": []` means that no additions were observed and removes nothing, so a concurrent addition survives. Omitted or `null` tags retain the older timestamp-based remove behavior for existing clients. Upgrade Go, TypeScript, and Dart consumers together before relying on empty exact removes; older implementations treat an empty list as a legacy remove.

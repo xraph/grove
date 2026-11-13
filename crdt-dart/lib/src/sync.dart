@@ -944,10 +944,12 @@ final class SyncEngine {
 
   /// One top-level batch. Null when `beforePush` cancelled the push.
   Future<_Tally?> _pushBatch(int gen, List<PendingChange> batch) async {
-    final records = store.pluginManager.dispatchBeforePush([
+    final allowed = store.pluginManager.dispatchBeforePush([
       for (final p in batch) p.change,
     ]);
-    if (records == null) return null;
+    if (allowed == null) return null;
+    final records = store.markPushAttempt(allowed);
+    if (records.isEmpty) return _none;
     final PushResponse resp;
     try {
       resp = await _call(gen, () => client.push(records));
@@ -1124,7 +1126,8 @@ final class SyncEngine {
   }
 
   Future<void> _pushPairs(int gen, _Bisection b, List<_Pair> pairs) async {
-    final records = [for (final p in pairs) p.record];
+    final records = store.markPushAttempt([for (final p in pairs) p.record]);
+    if (records.isEmpty) return;
     final PushResponse resp;
     try {
       resp = await _call(gen, () => client.push(records));

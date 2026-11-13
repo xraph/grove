@@ -313,6 +313,10 @@ const stop = engine.start({ intervalMs: 30_000 });
 
 Calling `sync()` while a run is in flight hands you that same run, so two callers never push the same batch twice. `start()` swallows failed runs. The pending queue is still there, so the next tick tries again.
 
+An empty pull preserves the last incremental cursor. A deletion undone while the pull is pending is removed from the outgoing batch. Once sending a tombstone has begun, it cannot be undone locally, including after a timeout: the server may have accepted it without delivering the acknowledgement. The Dart sync engine follows the same rule.
+
+Await `store.ready` before making local edits against persisted data. Incoming stream events during startup merge with loaded fields, and persistence waits for that merge. Hydration restores the persisted logical clock so later writes remain newer even after the device clock moves backward.
+
 ### Rejected changes
 
 The server can refuse a push outright, because a `BeforeInboundChange` hook said no or the push failed validation. It answers 422 and merges nothing from it. Sending the same batch again would only get the same answer and hold up everything queued behind it, so the engine doesn't. It pushes that batch again one change at a time, keeps every change the server accepts, and drops the ones it refuses on their own. Subscribe to find out which:

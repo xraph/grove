@@ -164,13 +164,14 @@ func (rm *RoomManager) AddHook(hook RoomHook) {
 	rm.hooks = append(rm.hooks, hook)
 }
 
-// CreateRoom creates or returns an existing room.
+// CreateRoom creates or returns an existing room as an isolated snapshot.
 func (rm *RoomManager) CreateRoom(ctx context.Context, id, roomType string, opts ...RoomOption) (*Room, error) {
 	rm.mu.Lock()
-	defer rm.mu.Unlock()
 
 	if existing, ok := rm.rooms[id]; ok {
-		return existing, nil
+		result := cloneRoom(existing)
+		rm.mu.Unlock()
+		return result, nil
 	}
 
 	room := &Room{
@@ -182,28 +183,32 @@ func (rm *RoomManager) CreateRoom(ctx context.Context, id, roomType string, opts
 		opt(room)
 	}
 
-	rm.rooms[id] = room
+	rm.rooms[id] = cloneRoom(room)
+	hooks := append([]RoomHook(nil), rm.hooks...)
+	result := cloneRoom(room)
+	rm.mu.Unlock()
 
-	for _, h := range rm.hooks {
-		if err := h.OnRoomCreated(ctx, room); err != nil {
+	for _, h := range hooks {
+		if err := h.OnRoomCreated(ctx, cloneRoom(result)); err != nil {
 			rm.logger.Error("room hook error", log.String("error", err.Error()))
 		}
 	}
 
-	return room, nil
+	return result, nil
 }
 
-// GetRoom returns a room by ID, or nil if not found.
+// GetRoom returns an isolated room snapshot by ID, or nil if not found.
 func (rm *RoomManager) GetRoom(id string) *Room {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
-	return rm.rooms[id]
+	return cloneRoom(rm.rooms[id])
 }
 
 // GetRoomInfo returns a room with live participant info.
 func (rm *RoomManager) GetRoomInfo(id string) *RoomInfo {
 	rm.mu.RLock()
 	room, ok := rm.rooms[id]
+	room = cloneRoom(room)
 	rm.mu.RUnlock()
 	if !ok {
 		return nil
@@ -226,7 +231,7 @@ func (rm *RoomManager) ListRooms() []RoomInfo {
 	for _, room := range rm.rooms {
 		participants := rm.presence.Get(room.ID)
 		result = append(result, RoomInfo{
-			Room:             *room,
+			Room:             *cloneRoom(room),
 			ParticipantCount: len(participants),
 			Participants:     participants,
 		})
@@ -244,7 +249,7 @@ func (rm *RoomManager) ListRoomsByType(roomType string) []RoomInfo {
 		if room.Type == roomType {
 			participants := rm.presence.Get(room.ID)
 			result = append(result, RoomInfo{
-				Room:             *room,
+				Room:             *cloneRoom(room),
 				ParticipantCount: len(participants),
 				Participants:     participants,
 			})
@@ -267,37 +272,22 @@ func (rm *RoomManager) JoinRoom(ctx context.Context, roomID, nodeID string, data
 		rm.rooms[roomID] = room
 	}
 
-	// Check participant limit and update presence while holding the lock
-	// to prevent TOCTOU races where two goroutines both pass the check.
-	if room.MaxParticipants > 0 {
-		current := rm.presence.Get(roomID)
-		alreadyJoined := false
-		for _, state := range current {
-			if state.NodeID == nodeID {
-				alreadyJoined = true
-				break
-			}
-		}
-		if !alreadyJoined && len(current) >= room.MaxParticipants {
-			rm.mu.Unlock()
-			return fmt.Errorf("crdt: room %s is full (%d/%d)", roomID, len(current), room.MaxParticipants)
-		}
+	if err := rm.checkCapacityLocked(roomID, nodeID); err != nil {
+		rm.mu.Unlock()
+		return err
 	}
-
-	// Update presence while still holding the lock to ensure atomicity
-	// between the capacity check and the join.
-	rm.presence.Update(PresenceUpdate{
-		NodeID: nodeID,
-		Topic:  roomID,
-		Data:   data,
-	})
+	rm.presence.mu.Lock()
+	rm.presence.updateLocked(PresenceUpdate{NodeID: nodeID, Topic: roomID, Data: data})
+	rm.presence.mu.Unlock()
+	room = cloneRoom(room)
 
 	hooks := make([]RoomHook, len(rm.hooks))
 	copy(hooks, rm.hooks)
 	rm.mu.Unlock()
+	rm.presence.notify()
 
 	for _, h := range hooks {
-		if err := h.OnParticipantJoin(ctx, room, nodeID); err != nil {
+		if err := h.OnParticipantJoin(ctx, cloneRoom(room), nodeID); err != nil {
 			rm.logger.Error("room join hook error", log.String("error", err.Error()))
 		}
 	}
@@ -320,6 +310,8 @@ func (rm *RoomManager) LeaveRoom(ctx context.Context, roomID, nodeID string) {
 	hooks := make([]RoomHook, len(rm.hooks))
 	copy(hooks, rm.hooks)
 
+	room = cloneRoom(room)
+
 	// Check if room is now empty.
 	remaining := rm.presence.Get(roomID)
 	isEmpty := len(remaining) == 0
@@ -330,14 +322,14 @@ func (rm *RoomManager) LeaveRoom(ctx context.Context, roomID, nodeID string) {
 	rm.mu.Unlock()
 
 	for _, h := range hooks {
-		if err := h.OnParticipantLeave(ctx, room, nodeID); err != nil {
+		if err := h.OnParticipantLeave(ctx, cloneRoom(room), nodeID); err != nil {
 			rm.logger.Error("room leave hook error", log.String("error", err.Error()))
 		}
 	}
 
 	if isEmpty {
 		for _, h := range hooks {
-			if err := h.OnRoomDestroyed(ctx, room); err != nil {
+			if err := h.OnRoomDestroyed(ctx, cloneRoom(room)); err != nil {
 				rm.logger.Error("room destroy hook error", log.String("error", err.Error()))
 			}
 		}
@@ -368,9 +360,19 @@ func (rm *RoomManager) patchParticipant(roomID, nodeID string, patch map[string]
 		rm.logger.Error("crdt: encode participant patch", log.String("error", err.Error()))
 		return
 	}
-	if _, err := rm.presence.Patch(PresenceUpdate{NodeID: nodeID, Topic: roomID, Data: data}); err != nil {
+	rm.mu.Lock()
+	if err = rm.checkCapacityLocked(roomID, nodeID); err != nil {
+		rm.mu.Unlock()
 		rm.logger.Error("crdt: patch participant", log.String("error", err.Error()))
+		return
 	}
+	_, err = rm.presence.patch(PresenceUpdate{NodeID: nodeID, Topic: roomID, Data: data})
+	rm.mu.Unlock()
+	if err != nil {
+		rm.logger.Error("crdt: patch participant", log.String("error", err.Error()))
+		return
+	}
+	rm.presence.notify()
 }
 
 // SetRoomMetadata updates the metadata for a room.
@@ -643,4 +645,46 @@ func RoomHTTPHandler(rm *RoomManager) http.Handler {
 	})
 
 	return mux
+}
+
+// cloneRoom isolates public snapshots and hook arguments from mutable room state.
+func cloneRoom(room *Room) *Room {
+	if room == nil {
+		return nil
+	}
+	snapshot := *room
+	snapshot.Metadata = append(json.RawMessage(nil), room.Metadata...)
+	return &snapshot
+}
+
+// checkCapacityLocked is shared by joins, raw presence, and cursor patches.
+func (rm *RoomManager) checkCapacityLocked(topic, nodeID string) error {
+	room := rm.rooms[topic]
+	if room == nil || room.MaxParticipants <= 0 {
+		return nil
+	}
+	current := rm.presence.Get(topic)
+	for _, state := range current {
+		if state.NodeID == nodeID {
+			return nil
+		}
+	}
+	if len(current) >= room.MaxParticipants {
+		return fmt.Errorf("crdt: room %s is full (%d/%d)", topic, len(current), room.MaxParticipants)
+	}
+	return nil
+}
+
+func (rm *RoomManager) updatePresence(update PresenceUpdate) (PresenceEvent, error) {
+	rm.mu.Lock()
+	if err := rm.checkCapacityLocked(update.Topic, update.NodeID); err != nil {
+		rm.mu.Unlock()
+		return PresenceEvent{}, err
+	}
+	rm.presence.mu.Lock()
+	event := rm.presence.updateLocked(update)
+	rm.presence.mu.Unlock()
+	rm.mu.Unlock()
+	rm.presence.notify()
+	return event, nil
 }

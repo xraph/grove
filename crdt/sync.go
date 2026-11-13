@@ -3,6 +3,7 @@ package crdt
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -37,8 +38,10 @@ type Syncer struct {
 	retryMaxDelay  time.Duration
 
 	// lastSync tracks the last sync HLC per peer (index-based for peers array).
+	cycleMu  sync.Mutex // Serializes sync rounds so checkpoints cannot overtake failed work.
 	mu       sync.Mutex
-	lastSync map[string]HLC // peer identifier → last synced HLC
+	lastSync map[string]HLC            // inbound checkpoint per peer
+	lastPush map[string]map[string]HLC // outbound shadow cursor per peer and table
 }
 
 // NewSyncer creates a new Syncer for the given plugin.
@@ -52,6 +55,7 @@ func NewSyncer(plugin *Plugin, opts ...SyncerOption) *Syncer {
 		retryMaxDelay:  30 * time.Second,
 		logger:         log.NewNoopLogger(),
 		lastSync:       make(map[string]HLC),
+		lastPush:       make(map[string]map[string]HLC),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -69,22 +73,26 @@ func (s *Syncer) Sync(ctx context.Context) (*SyncReport, error) {
 		return report, fmt.Errorf("crdt: no transports configured; use WithTransport() or WithPeers()")
 	}
 
+	var failures []error
 	for i, t := range transports {
 		peerID := fmt.Sprintf("peer-%d", i)
 		r, err := s.syncWithPeerRetry(ctx, t, peerID)
+		if r != nil {
+			report.Pulled += r.Pulled
+			report.Pushed += r.Pushed
+			report.Merged += r.Merged
+		}
 		if err != nil {
+			failures = append(failures, fmt.Errorf("crdt: sync %s: %w", peerID, err))
 			s.logger.Error("crdt: sync failed after retries",
 				log.String("peer", peerID),
 				log.String("error", err.Error()),
 			)
 			continue
 		}
-		report.Pulled += r.Pulled
-		report.Pushed += r.Pushed
-		report.Merged += r.Merged
 	}
 
-	return report, nil
+	return report, errors.Join(failures...)
 }
 
 // Run starts a background sync loop that runs until the context is cancelled.
@@ -147,12 +155,18 @@ func (s *Syncer) PushChange(ctx context.Context, table, pk, field string, crdtTy
 // syncWithPeerRetry wraps syncWithPeer with exponential backoff retry.
 func (s *Syncer) syncWithPeerRetry(ctx context.Context, t Transport, peerID string) (*SyncReport, error) {
 	var lastErr error
+	total := &SyncReport{}
 	backoff := s.retryBaseDelay
 
 	for attempt := 0; attempt <= s.retryAttempts; attempt++ {
 		r, err := s.syncWithPeer(ctx, t, peerID)
+		if r != nil {
+			total.Pulled += r.Pulled
+			total.Merged += r.Merged
+			total.Pushed += r.Pushed
+		}
 		if err == nil {
-			return r, nil
+			return total, nil
 		}
 		lastErr = err
 
@@ -165,7 +179,7 @@ func (s *Syncer) syncWithPeerRetry(ctx context.Context, t Transport, peerID stri
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return total, ctx.Err()
 			}
 			backoff = time.Duration(float64(backoff) * 1.5)
 			if backoff > s.retryMaxDelay {
@@ -173,11 +187,16 @@ func (s *Syncer) syncWithPeerRetry(ctx context.Context, t Transport, peerID stri
 			}
 		}
 	}
-	return nil, lastErr
+	return total, lastErr
 }
 
 func (s *Syncer) syncWithPeer(ctx context.Context, t Transport, peerID string) (*SyncReport, error) {
+	s.cycleMu.Lock()
+	defer s.cycleMu.Unlock()
 	report := &SyncReport{}
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
 
 	s.mu.Lock()
 	since := s.lastSync[peerID]
@@ -202,7 +221,7 @@ func (s *Syncer) syncWithPeer(ctx context.Context, t Transport, peerID string) (
 				log.String("pk", change.PK),
 				log.String("error", err.Error()),
 			)
-			continue
+			return report, fmt.Errorf("crdt: merge remote change: %w", err)
 		}
 		report.Pulled++
 		report.Merged++
@@ -211,59 +230,58 @@ func (s *Syncer) syncWithPeer(ctx context.Context, t Transport, peerID string) (
 		s.plugin.clock.Update(change.HLC)
 	}
 
-	// Phase 2: Push local changes since last sync.
-	var localChanges []ChangeRecord
-	for _, table := range s.tables {
-		changes, err := s.metadata.ReadChangesSince(ctx, table, since)
-		if err != nil {
-			return nil, fmt.Errorf("read local changes for %s: %w", table, err)
-		}
-		// Filter to only our own changes (don't echo back what we received).
-		for _, c := range changes {
-			if c.NodeID == s.plugin.nodeID {
-				localChanges = append(localChanges, c)
-			}
-		}
-	}
-
-	// Run BeforeOutboundChange hook on each local change.
-	var filteredChanges []ChangeRecord
-	for _, c := range localChanges {
-		if s.plugin.syncHooks != nil {
-			processed, err := s.plugin.syncHooks.BeforeOutboundChange(ctx, &c)
-			if err != nil {
-				s.logger.Error("crdt: outbound change hook error",
-					log.String("error", err.Error()),
-				)
-				continue
-			}
-			if processed == nil {
-				continue // Hook says skip this change.
-			}
-			filteredChanges = append(filteredChanges, *processed)
-		} else {
-			filteredChanges = append(filteredChanges, c)
-		}
-	}
-
-	// Update last sync point after pull succeeds — even if push fails later,
-	// we don't need to re-pull the same changes (merges are idempotent but wasteful).
+	// Only a fully applied pull may advance the inbound checkpoint. Outbound
+	// progress is independent: remote clocks do not acknowledge local writes.
 	s.mu.Lock()
-	if !pullResp.LatestHLC.IsZero() {
+	if pullResp.LatestHLC.After(s.lastSync[peerID]) {
 		s.lastSync[peerID] = pullResp.LatestHLC
 	}
 	s.mu.Unlock()
-
-	if len(filteredChanges) > 0 {
-		pushResp, err := t.Push(ctx, &PushRequest{
-			Changes: filteredChanges,
-			NodeID:  s.plugin.nodeID,
-		})
-		if err != nil {
-			return report, fmt.Errorf("push: %w", err)
+	if s.lastPush == nil {
+		s.lastPush = make(map[string]map[string]HLC)
+	}
+	if s.lastPush[peerID] == nil {
+		s.lastPush[peerID] = make(map[string]HLC)
+	}
+	for _, table := range s.tables {
+		for {
+			if err := ctx.Err(); err != nil {
+				return report, err
+			}
+			page, err := s.metadata.readChangesPage(ctx, table, s.lastPush[peerID][table], DefaultChangesLimit)
+			if err != nil {
+				return report, fmt.Errorf("crdt: read local changes for %s: %w", table, err)
+			}
+			var outgoing []ChangeRecord
+			for _, change := range page.changes {
+				if change.NodeID != s.plugin.nodeID {
+					continue
+				}
+				processed := &change
+				if s.plugin.syncHooks != nil {
+					processed, err = s.plugin.syncHooks.BeforeOutboundChange(ctx, &change)
+					if err != nil {
+						return report, fmt.Errorf("crdt: outbound change hook: %w", err)
+					}
+				}
+				if processed != nil {
+					outgoing = append(outgoing, *processed)
+				}
+			}
+			if len(outgoing) > 0 {
+				if _, err := t.Push(ctx, &PushRequest{Changes: outgoing, NodeID: s.plugin.nodeID}); err != nil {
+					return report, fmt.Errorf("crdt: push: %w", err)
+				}
+				report.Pushed += len(outgoing)
+			}
+			// Use the shadow row cursor, not the authored HLC (late edits are restamped).
+			if !page.last.IsZero() {
+				s.lastPush[peerID][table] = page.last
+			}
+			if !page.full {
+				break
+			}
 		}
-		report.Pushed = len(filteredChanges)
-		_ = pushResp
 	}
 
 	return report, nil
@@ -407,13 +425,9 @@ func (s *Syncer) StreamSync(ctx context.Context) error {
 					return
 				}
 
-				// Update local clock and last sync.
+				// Polling owns the durable inbound checkpoint. A stream can
+				// miss an event or fail a merge; the next pull repairs it.
 				s.plugin.clock.Update(change.HLC)
-				s.mu.Lock()
-				if change.HLC.After(s.lastSync[pid]) {
-					s.lastSync[pid] = change.HLC
-				}
-				s.mu.Unlock()
 			})
 			results <- streamResult{peerID: pid, err: err}
 		}(st, peerID, since)

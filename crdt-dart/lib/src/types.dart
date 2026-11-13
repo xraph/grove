@@ -155,7 +155,9 @@ final class OrSetTag {
 @immutable
 final class SetOperation {
   /// Creates a set operation.
-  const SetOperation(this.op, this.elements, {this.tags = const []});
+  const SetOperation(this.op, this.elements, {List<OrSetTag>? tags})
+    : tags = tags ?? const [],
+      hasTags = tags != null;
 
   /// Add or remove.
   final SetOpType op;
@@ -166,11 +168,15 @@ final class SetOperation {
   /// Observed add tags an exact remove deletes.
   final List<OrSetTag> tags;
 
+  /// Whether the wire named exact observed tags, including an empty set.
+  /// Missing tags retain compatibility with legacy timestamp-based removes.
+  final bool hasTags;
+
   /// Go wire form.
   Map<String, Object?> toJson() => {
     'op': op.name,
     'elements': elements,
-    if (tags.isNotEmpty) 'tags': [for (final t in tags) t.toJson()],
+    if (hasTags) 'tags': [for (final t in tags) t.toJson()],
   };
 
   /// Decodes the Go wire form.
@@ -179,7 +185,7 @@ final class SetOperation {
     return SetOperation(
       wireEnum(SetOpType.values, wireStr(m, 'op'), 'set op'),
       wireList<Object?>(m['elements'], (e) => e),
-      tags: wireList(m['tags'], OrSetTag.fromJson),
+      tags: m['tags'] == null ? null : wireList(m['tags'], OrSetTag.fromJson),
     );
   }
 }

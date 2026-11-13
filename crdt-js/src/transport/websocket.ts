@@ -16,7 +16,7 @@ import type {
 import { TransportError } from "../errors.js";
 import { Backoff } from "../backoff.js";
 import type { BackoffOptions } from "../backoff.js";
-import { hlcAfter } from "../hlc.js";
+import { hlcAfter, HLC_ZERO } from "../hlc.js";
 
 /** Mirrors WSMessageType in crdt/transport_ws.go. */
 export type WSMessageType =
@@ -59,25 +59,23 @@ interface Pending {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface SubscriptionState {
+  tables: string[];
+  lastHLC: HLC | null;
+  handlers: Set<StreamEventHandler>;
+}
+
 export class WebSocketTransport implements StreamTransport {
   private socket: WebSocket | null = null;
   private pending = new Map<string, Pending>();
-  private handlers = new Set<StreamEventHandler>();
+  private subscriptions = new Set<SubscriptionState>();
   private nextId = 0;
   private closed = false;
   private opening: Promise<WebSocket> | null = null;
   private openingReject: ((err: Error) => void) | null = null;
   private backoff: Backoff;
-  private subscribedTables: string[] = [];
-  /**
-   * Whether a subscription has asked to be connected. Separate from
-   * `subscribedTables`, which can legitimately be empty for a
-   * subscribe-to-everything config — this flag is what tells `onopen`
-   * a `connected` event has an audience. The transport's own eager
-   * connect at construction happens with this false, so it stays silent.
-   */
-  private subscriptionActive = false;
-  private _lastHLC: HLC | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private announced: string | null = null;
 
   private impl: typeof WebSocket;
   private requestTimeout: number;
@@ -131,64 +129,72 @@ export class WebSocketTransport implements StreamTransport {
 
   subscribe(config: StreamConfig): StreamSubscription {
     const transport = this;
-    let connected = false;
-
+    const state: SubscriptionState = {
+      tables: [...(config.tables ?? [])], lastHLC: config.since ?? null,
+      handlers: new Set(),
+    };
     return {
-      get connected() { return connected && transport.socket?.readyState === 1; },
-      get lastHLC() { return transport._lastHLC; },
-
-      on(handler: StreamEventHandler): () => void {
-        transport.handlers.add(handler);
-        return () => { transport.handlers.delete(handler); };
+      get connected() { return transport.subscriptions.has(state) && transport.socket?.readyState === 1; },
+      get lastHLC() { return state.lastHLC; },
+      on(handler) {
+        state.handlers.add(handler);
+        return () => { state.handlers.delete(handler); };
       },
-
-      connect(): void {
-        if (connected) return;
-        connected = true;
-        transport.subscribedTables = config.tables ?? [];
-        transport.subscriptionActive = true;
-        // onopen is the single owner of sending the `subscribe` frame — it
-        // fires (and sends) whenever a *new* connection completes, whether
-        // that's this call's own first connect or a later reconnect. But
-        // onopen only fires once per socket: if the socket is already open
-        // (e.g. from the transport's eager connect at construction, before
-        // any tables were set) it won't fire again for us, so we have to
-        // send the frame ourselves in that case. Recording this before
-        // ensureOpen() resolves is what keeps the two paths from racing
-        // into a duplicate send for a socket that opens after this call.
-        //
-        // `connected` is emitted on the same split: onopen owns it for any
-        // connection it opens (first connect and every reconnect alike, so
-        // the event keeps firing after a blip), and this branch owns it for
-        // the already-open socket onopen will never fire for.
+      connect() {
+        if (transport.closed || transport.subscriptions.has(state)) return;
+        transport.subscriptions.add(state);
         const alreadyOpen = transport.socket?.readyState === 1;
         void transport.ensureOpen().then((socket) => {
-          if (alreadyOpen) {
-            socket.send(JSON.stringify({
-              type: "subscribe",
-              payload: { tables: transport.subscribedTables },
-            }));
-            transport.emit({ type: "connected" });
-          }
+          if (!transport.subscriptions.has(state)) return;
+          transport.announce(socket);
+          if (alreadyOpen) transport.deliver(state, { type: "connected" });
         }).catch((err: unknown) => {
-          transport.emit({
-            type: "error",
-            error: err instanceof Error ? err : new Error(String(err)),
+          if (transport.subscriptions.has(state)) transport.deliver(state, {
+            type: "error", error: err instanceof Error ? err : new Error(String(err)),
           });
         });
       },
-
-      disconnect(): void {
-        if (!connected) return;
-        connected = false;
-        transport.subscriptionActive = false;
-        // No `unsubscribe` frame: the Go server does not handle that type
-        // and would answer with an error frame, surfacing as a spurious
-        // stream error. Dropping the subscription client-side is enough.
-        transport.subscribedTables = [];
-        transport.emit({ type: "disconnected" });
+      disconnect() {
+        if (!transport.subscriptions.delete(state)) return;
+        transport.deliver(state, { type: "disconnected" });
+        if (transport.subscriptions.size === 0) transport.cancelReconnect();
+        if (transport.socket?.readyState === 1) transport.announce(transport.socket);
       },
     };
+  }
+
+  private announce(socket: WebSocket): void {
+    if (socket !== this.socket || socket.readyState !== 1) return;
+    if (this.subscriptions.size === 0) {
+      if (this.announced !== null) socket.send(JSON.stringify({ type: "unsubscribe" }));
+      this.announced = null;
+      return;
+    }
+    const active = [...this.subscriptions];
+    const tables = [...new Set(active.flatMap((s) => s.tables))].sort();
+    // A new table scope starts from its own checkpoint, never another scope's.
+    const since = active.reduce((min, s) => {
+      const cursor = s.lastHLC ?? HLC_ZERO;
+      return hlcAfter(min, cursor) ? cursor : min;
+    }, active[0].lastHLC ?? HLC_ZERO);
+    const payload = JSON.stringify({ tables, since });
+    if (payload === this.announced) return;
+    socket.send(JSON.stringify({ type: "subscribe", payload: { tables, since } }));
+    this.announced = payload;
+  }
+
+  private cancelReconnect(): void {
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
+  private scheduleReconnect(): void {
+    if (this.closed || this.subscriptions.size === 0 || this.reconnectTimer !== null) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.closed || this.subscriptions.size === 0) return;
+      void this.ensureOpen().catch(() => { this.scheduleReconnect(); });
+    }, this.backoff.next());
   }
 
   /**
@@ -203,6 +209,7 @@ export class WebSocketTransport implements StreamTransport {
    */
   close(): void {
     this.closed = true;
+    this.cancelReconnect();
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
       p.reject(new TransportError("WebSocket transport closed"));
@@ -219,9 +226,28 @@ export class WebSocketTransport implements StreamTransport {
 
   // --- Internals ---
 
+  private deliver(state: SubscriptionState, event: StreamEvent): void {
+    for (const handler of state.handlers) {
+      try { handler(event); } catch { /* An observer cannot stop delivery. */ }
+    }
+  }
+
   private emit(event: StreamEvent): void {
-    for (const handler of this.handlers) {
-      try { handler(event); } catch { /* Ignore handler errors. */ }
+    for (const state of this.subscriptions) {
+      const accepts = (c: ChangeRecord) => state.tables.includes(c.table);
+      const observe = (c: ChangeRecord) => {
+        if (!state.lastHLC || hlcAfter(c.hlc, state.lastHLC)) state.lastHLC = c.hlc;
+      };
+      if (event.type === "change") {
+        if (!accepts(event.data)) continue;
+        observe(event.data);
+        this.deliver(state, event);
+      } else if (event.type === "changes") {
+        const changes = event.data.filter(accepts);
+        if (changes.length === 0) continue;
+        changes.forEach(observe);
+        this.deliver(state, { type: "changes", data: changes });
+      } else { this.deliver(state, event); }
     }
   }
 
@@ -240,7 +266,8 @@ export class WebSocketTransport implements StreamTransport {
         reject,
         timer,
       });
-      socket.send(JSON.stringify({ type, payload, request_id: id }));
+      try { socket.send(JSON.stringify({ type, payload, request_id: id })); }
+      catch (err) { clearTimeout(timer); this.pending.delete(id); reject(err); }
     });
   }
 
@@ -254,6 +281,7 @@ export class WebSocketTransport implements StreamTransport {
       }).finally(() => {
         this.opening = null;
         this.openingReject = null;
+        if (this.socket?.readyState !== 1) this.scheduleReconnect();
       });
     }
 
@@ -301,43 +329,30 @@ export class WebSocketTransport implements StreamTransport {
     this.socket = socket;
 
     socket.onopen = () => {
+      if (this.closed || this.socket !== socket) { socket.close(); return; }
+      this.cancelReconnect();
       this.backoff.reset();
-      // Re-subscribe after a reconnect: the server does not remember us.
-      // (subscribe().connect() owns sending the frame for an already-open
-      // socket; this branch is what sends it for a fresh connection —
-      // first connect or reconnect alike — so the two paths never both
-      // fire for the same connection.)
-      if (this.subscribedTables.length > 0) {
-        socket.send(JSON.stringify({
-          type: "subscribe",
-          payload: { tables: this.subscribedTables },
-        }));
-      }
-      // Every connection this path opens gets a `connected` event, so a
-      // reconnect looks the same to subscribers as the first connect —
-      // matching CRDTStream, which re-emits on every reconnect too. Gated
-      // on an active subscription so the eager connect at construction,
-      // which nobody subscribed to, stays silent.
-      if (this.subscriptionActive) this.emit({ type: "connected" });
+      this.announced = null;
+      this.announce(socket);
+      this.emit({ type: "connected" });
       resolve(socket);
     };
-
     socket.onmessage = (ev: MessageEvent) => {
-      this.handleMessage(String(ev.data));
+      if (!this.closed && this.socket === socket) this.handleMessage(String(ev.data));
     };
-
-    socket.onerror = () => {
-      reject(new TransportError(`CRDT ws connection failed: ${url}`));
-    };
-
-    socket.onclose = () => {
+    const dropped = () => {
+      if (this.socket !== socket) return;
       this.socket = null;
+      this.announced = null;
+      const err = new TransportError("CRDT ws connection closed");
+      reject(err);
+      for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(err); }
+      this.pending.clear();
       this.emit({ type: "disconnected" });
-      if (!this.closed && this.subscribedTables.length > 0) {
-        setTimeout(() => { void this.ensureOpen().catch(() => {}); },
-          this.backoff.next());
-      }
+      this.scheduleReconnect();
     };
+    socket.onerror = () => { dropped(); socket.close(); };
+    socket.onclose = dropped;
   }
 
   private handleMessage(raw: string): void {
@@ -368,13 +383,11 @@ export class WebSocketTransport implements StreamTransport {
     switch (msg.type) {
       case "change": {
         const change = msg.payload as ChangeRecord;
-        this.updateLastHLC(change.hlc);
         this.emit({ type: "change", data: change });
         break;
       }
       case "changes": {
         const changes = msg.payload as ChangeRecord[];
-        for (const c of changes) this.updateLastHLC(c.hlc);
         this.emit({ type: "changes", data: changes });
         break;
       }
@@ -396,10 +409,6 @@ export class WebSocketTransport implements StreamTransport {
         // pong and unknown types need no action.
         break;
     }
-  }
-
-  private updateLastHLC(hlc: HLC): void {
-    if (!this._lastHLC || hlcAfter(hlc, this._lastHLC)) this._lastHLC = hlc;
   }
 
   private async buildURL(): Promise<string> {

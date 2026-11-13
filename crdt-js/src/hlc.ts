@@ -125,6 +125,15 @@ export class HybridClock {
     this.nowFn = options?.nowFn ?? (() => Date.now());
   }
 
+  /** Restore a trusted persisted clock without remote drift clamping. */
+  advanceTo(value: HLC): void {
+    const ts = tsBigInt(value.ts);
+    if (ts > this.lastTs || (ts === this.lastTs && value.c > this.lastC)) {
+      this.lastTs = ts;
+      this.lastC = value.c;
+    }
+  }
+
   private emit(): HLC {
     return { ts: this.lastTs.toString(), c: this.lastC, node: this.nodeID };
   }

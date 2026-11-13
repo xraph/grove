@@ -313,6 +313,7 @@ final class CrdtStore {
 
   /// Local changes waiting to be pushed, oldest first.
   final List<PendingChange> _pending = [];
+  final Set<String> _attemptedPushes = {};
 
   final Set<void Function(List<ChangeRecord> dropped)> _overflowHandlers = {};
   final Set<void Function()> _globalListeners = {};
@@ -607,8 +608,8 @@ final class CrdtStore {
   /// ([keysForElement]), verbatim as a [RawJson], so a key another engine
   /// wrote non-canonically is removed on the server too. The op carries the
   /// tags observed under those keys. An element with no stored key is sent as
-  /// its value. When no element has a key the op has no tags: a legacy remove,
-  /// which Go applies to tags older than the change.
+  /// its value. An explicit empty tag list removes nothing and preserves
+  /// concurrent additions, just like every other observed remove.
   ChangeRecord? removeFromSet(
     String table,
     String pk,
@@ -1482,11 +1483,30 @@ final class CrdtStore {
     );
   }
 
+  /// Reserves records immediately before transport sends them. A lost reply
+  /// does not prove a tombstone was rejected; undo must not resurrect it.
+  List<ChangeRecord> markPushAttempt(List<ChangeRecord> changes) {
+    final keys = {for (final p in _pending) p.key};
+    _attemptedPushes.removeWhere((key) => !keys.contains(key));
+    final reserved = <ChangeRecord>[];
+    for (final change in changes) {
+      final key = pendingKey(change);
+      if (!keys.contains(key)) continue;
+      _attemptedPushes.add(key);
+      reserved.add(change);
+    }
+    return reserved;
+  }
+
   bool _undoDelete(UndoEntry entry) {
     final c = entry.change;
     final i = _pending.indexWhere((p) => p.key == pendingKey(c));
     final doc = _getDoc(c.table, c.pk);
-    if (i < 0 || doc == null || !doc.tombstone || doc.tombstoneHlc != c.hlc) {
+    if (i < 0 ||
+        _attemptedPushes.contains(pendingKey(c)) ||
+        doc == null ||
+        !doc.tombstone ||
+        doc.tombstoneHlc != c.hlc) {
       return false;
     }
     _pending.removeAt(i);
@@ -1634,6 +1654,7 @@ final class CrdtStore {
     for (final raw in changes) {
       try {
         final change = _normalizeKeys(raw);
+        clock.update(change.hlc);
         final local = _getDoc(change.table, change.pk)?.fields[change.field];
         final event = MergeEvent(
           table: change.table,
@@ -1646,6 +1667,7 @@ final class CrdtStore {
         final allowed = hooks ? _plugins.dispatchBeforeMerge(event) : change;
         if (allowed == null) continue;
         final c = _normalizeKeys(allowed);
+        clock.update(c.hlc);
         _applyChangeInternal(c);
         affected.add((table: c.table, pk: c.pk));
         if (hooks) {

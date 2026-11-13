@@ -24,7 +24,7 @@ import type {
   TextSpan,
   TextDeltaSegment,
 } from "./types.js";
-import { HybridClock, hlcString, hlcIsZero } from "./hlc.js";
+import { HybridClock, hlcString, hlcIsZero, hlcAfter } from "./hlc.js";
 import { compactDocument } from "./compact.js";
 import {
   mergeFieldState,
@@ -129,6 +129,8 @@ export class CRDTStore {
 
   /** Pending local changes that need to be pushed to the server. */
   private pending: ChangeRecord[] = [];
+  private attemptedPushes = new WeakSet<ChangeRecord>();
+  private hydrated = false;
 
   /** Max queued unpushed changes (0 disables the bound). */
   private maxPendingChanges: number;
@@ -491,7 +493,7 @@ export class CRDTStore {
       crdt_type: "set",
       hlc,
       node_id: this.nodeID,
-      set_op: { op: "remove", elements, ...(tags.length > 0 ? { tags } : {}) },
+      set_op: { op: "remove", elements, tags },
     };
 
     const previousState = this.captureFieldState(table, pk, field);
@@ -1100,13 +1102,13 @@ export class CRDTStore {
   }
 
   /**
-   * Undo a record delete. Only possible while the tombstone is still
-   * pending: the server keeps a tombstone for good once it has one.
+   * Undo a record delete. Only possible before the tombstone has been
+   * sent: an unacknowledged request may already have reached the server.
    */
   private undeleteRecord(entry: UndoEntry): UndoEntry | null {
     const { change, previousState } = entry;
     const at = this.pending.indexOf(change);
-    if (at < 0) return null;
+    if (at < 0 || this.attemptedPushes.has(change)) return null;
     const doc = this.docOrEmpty(change.table, change.pk);
     // A newer tombstone from elsewhere is in effect: nothing to restore.
     if (previousState === null && doc.tombstone_hlc && hlcString(doc.tombstone_hlc) !== hlcString(change.hlc)) {
@@ -1140,6 +1142,7 @@ export class CRDTStore {
     const affected = new Map<string, Set<string>>();
 
     for (const change of changes) {
+      this.clock.update(change.hlc);
       // Run beforeMerge plugins.
       const localFS = this.getDoc(change.table, change.pk)?.fields[change.field] ?? null;
       const mergeEvent: MergeEvent = {
@@ -1155,6 +1158,7 @@ export class CRDTStore {
       if (!allowed) continue; // Plugin rejected this change.
 
       const changeCopy = allowed === change ? change : { ...change, ...allowed };
+      this.clock.update(changeCopy.hlc);
       this.applyChangeInternal(changeCopy);
 
       let pks = affected.get(change.table);
@@ -1180,6 +1184,17 @@ export class CRDTStore {
         this.notifyListeners(table, pk);
       }
     }
+  }
+
+  /** Reserve pending records immediately before sending. A delete may already
+   * be accepted even if its acknowledgement is lost, so it stays non-undoable. */
+  markPushAttempt(changes: ChangeRecord[]): ChangeRecord[] {
+    const pending = new Set(this.pending);
+    return changes.filter((change) => {
+      if (!pending.has(change)) return false;
+      this.attemptedPushes.add(change);
+      return true;
+    });
   }
 
   /** Get all pending (dirty) local changes that need to be pushed. */
@@ -1522,24 +1537,39 @@ export class CRDTStore {
       this.storage.loadPendingChanges(),
     ]);
 
-    // Merge loaded state into in-memory maps.
+    // Persisted and early streamed state are independent CRDT snapshots.
+    // Merge each field; skipping a whole existing document loses untouched fields.
     for (const [table, docs] of loadedState) {
-      for (const [pk, doc] of docs) {
-        // Only set if no in-memory mutation happened during hydration.
-        if (!this.getDoc(table, pk)) {
-          normalizeHLCKeys(doc);
-          const hydrated = this.plugins.dispatchAfterHydrate(table, pk, doc);
-          this.setDocument(table, pk, hydrated);
+      for (const [pk, stored] of docs) {
+        normalizeHLCKeys(stored);
+        const doc = this.plugins.dispatchAfterHydrate(table, pk, stored);
+        for (const fs of Object.values(doc.fields)) this.clock.advanceTo(fs.hlc);
+        if (doc.tombstone_hlc) this.clock.advanceTo(doc.tombstone_hlc);
+        const current = this.getDoc(table, pk);
+        if (!current) { this.setDocument(table, pk, doc); continue; }
+        const fields = { ...doc.fields };
+        for (const [field, state] of Object.entries(current.fields)) {
+          fields[field] = mergeFieldState(fields[field] ?? null, {
+            table, pk, field, crdt_type: state.type, hlc: state.hlc,
+            node_id: state.node_id, state,
+          });
         }
+        const oldHLC = doc.tombstone_hlc;
+        const newHLC = current.tombstone_hlc;
+        this.setDocument(table, pk, {
+          ...doc, fields, tombstone: doc.tombstone || current.tombstone,
+          tombstone_hlc: !oldHLC || (newHLC && hlcAfter(newHLC, oldHLC)) ? newHLC : oldHLC,
+        });
       }
     }
-
-    // Prepend loaded pending changes (before any new ones added during hydration).
-    if (loadedPending.length > 0) {
-      this.pending = [...loadedPending, ...this.pending];
+    for (const change of loadedPending) this.clock.advanceTo(change.hlc);
+    this.pending = [...loadedPending, ...this.pending];
+    this.hydrated = true;
+    // Deferred writes now see the merged state, never an incomplete startup snapshot.
+    this.drainDebouncedPersist();
+    for (const [table, docs] of this.state) {
+      for (const pk of docs.keys()) this.notifyListeners(table, pk);
     }
-
-    // Notify all listeners that state may have changed.
     for (const listener of this.globalListeners) listener();
   }
 
@@ -1552,7 +1582,7 @@ export class CRDTStore {
    * of edits to the same document still produces a single saveDocument.
    */
   private persistDocumentNow(table: string, pk: string): void {
-    if (this.persistDebounceMs <= 0) {
+    if (this.hydrated && this.persistDebounceMs <= 0) {
       const doc = this.getDoc(table, pk);
       if (doc) {
         const transformed = this.plugins.dispatchBeforePersist(table, pk, doc);
@@ -1577,7 +1607,7 @@ export class CRDTStore {
    * the latest array regardless of how many writes landed after scheduling.
    */
   private persistPendingNow(): void {
-    if (this.persistDebounceMs <= 0) {
+    if (this.hydrated && this.persistDebounceMs <= 0) {
       this.storage.savePendingChanges([...this.pending]).catch(() => {});
       return;
     }
@@ -1593,7 +1623,7 @@ export class CRDTStore {
    * just adds to the queue the eventual drain will read.
    */
   private scheduleDebouncedPersist(): void {
-    if (this.pendingPersistTimer) return;
+    if (!this.hydrated || this.pendingPersistTimer) return;
     this.pendingPersistTimer = setTimeout(() => {
       this.pendingPersistTimer = null;
       this.drainDebouncedPersist();
@@ -1640,6 +1670,7 @@ export class CRDTStore {
    * debounce fix this method exists to support, not a special case of it.
    */
   async flushPersistence(): Promise<void> {
+    await this.ready;
     if (this.pendingPersistTimer) {
       clearTimeout(this.pendingPersistTimer);
       this.pendingPersistTimer = null;

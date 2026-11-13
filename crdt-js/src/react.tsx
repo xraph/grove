@@ -191,7 +191,7 @@ export function useCRDT(config: UseCRDTConfig): UseCRDTReturn {
     const stream = client.stream(config.streamConfig);
     streamRef.current = stream;
 
-    stream.on((event) => {
+    const off = stream.on((event) => {
       switch (event.type) {
         case "connected":
           setStatus("connected");
@@ -217,6 +217,7 @@ export function useCRDT(config: UseCRDTConfig): UseCRDTReturn {
     stream.connect();
 
     return () => {
+      off();
       stream.disconnect();
       streamRef.current = null;
     };

@@ -675,7 +675,7 @@ export function mergeFieldState(
           }
         } else if (op.op === "remove") {
           const keys: string[] = [];
-          if (op.tags && op.tags.length > 0) {
+          if (op.tags != null) {
             // Exact observed-remove: the op names the tags it saw, scoped
             // to the elements it removes.
             for (const elem of op.elements) {

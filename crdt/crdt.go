@@ -153,9 +153,10 @@ type SetOperation struct {
 	Elements json.RawMessage `json:"elements"` // JSON array of elements
 
 	// Tags names the observed add-tags a remove is deleting (exact
-	// observed-remove semantics). Removes without tags fall back to
-	// removing every local tag older than the op's HLC.
-	Tags []Tag `json:"tags,omitempty"`
+	// observed-remove semantics). An explicit empty slice removes nothing.
+	// A nil slice is omitted on the wire for legacy timestamp-based removes,
+	// which remove every local tag older than the op's HLC.
+	Tags []Tag `json:"tags,omitzero"`
 }
 
 // SetOp is the type of set operation.

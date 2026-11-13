@@ -5,6 +5,8 @@ description: Scoped collaborative spaces with participant limits, cursor trackin
 
 Rooms extend the [Presence & Awareness](/docs/crdt/presence) system with structured collaborative spaces. Presence tracks who is here; rooms answer who is working on what, with participant limits, cursor tracking, typing indicators and lifecycle hooks.
 
+Room reads and lifecycle hooks receive isolated snapshots. Use `SetRoomMetadata` to change stored metadata. Configure participant limits when creating a room; the limit applies to joins, raw presence publication, and cursor or typing updates. Existing participants may keep updating a full room. Lifecycle callbacks run after the manager releases its lock, so they may query rooms.
+
 ## Overview
 
 A room is a named collaborative space scoped to a document, a canvas or any other context. Rooms give you:

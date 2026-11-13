@@ -248,14 +248,15 @@ final class CrdtClient {
   ///
   /// Throws an [UnsupportedError] when the transport has no presence.
   Future<void> updatePresence(String topic, Object? data) async {
-    final transport = _presenceTransport();
+    if (_disposed) throw StateError('crdt: client is disposed');
+    _presenceTransport();
     final store = _store;
     final hooked = store == null
         ? data
         : store.pluginManager.dispatchBeforePresenceUpdate(topic, data);
     if (identical(hooked, presenceRejected)) return;
     _lastPresence[topic] = hooked;
-    await transport.updatePresence(
+    await _writePresence(
       PresenceUpdate(nodeId: _presenceNodeId, topic: topic, data: hooked),
     );
     // Left or disposed while the update was in flight: no heartbeat.
@@ -336,7 +337,7 @@ final class CrdtClient {
     _presenceResyncNeeded.remove(topic);
     final t = _transport;
     if (t is PresenceTransport) {
-      await (t as PresenceTransport).updatePresence(
+      await _writePresence(
         PresenceUpdate(nodeId: _presenceNodeId, topic: topic),
       );
     }
@@ -363,17 +364,9 @@ final class CrdtClient {
     _presenceResyncNeeded.clear();
     _presenceGeneration++;
     presence.clear();
-    Object? failure;
-    StackTrace? trace;
-    for (final topic in topics) {
-      try {
-        await leavePresence(topic);
-      } on Object catch (e, s) {
-        failure ??= e;
-        trace ??= s;
-      }
-    }
-    if (failure != null) Error.throwWithStackTrace(failure, trace!);
+    // Queue all leaves synchronously before yielding so a rejoin cannot be
+    // overtaken by a leave for a later topic.
+    await Future.wait([for (final topic in topics) leavePresence(topic)]);
   }
 
   /// Leaves every topic, stops every heartbeat, clears [presence], stops
@@ -399,21 +392,39 @@ final class CrdtClient {
     if (_ownsTransport && t is HttpTransport) t.close();
   }
 
+  final Map<String, Future<void>> _presenceWrites = {};
+
+  Future<void> _writePresence(PresenceUpdate update) {
+    final previous = _presenceWrites[update.topic];
+    Future<void> send() => _presenceTransport().updatePresence(update);
+    final write = previous == null
+        ? Future<void>.sync(send)
+        : previous.then((_) => send());
+    // The queue always settles successfully so one failed update cannot
+    // prevent a later leave. Return the original failure to its caller.
+    late final Future<void> tail;
+    tail = write.then<void>((_) {}, onError: (Object _) {}).whenComplete(() {
+      if (identical(_presenceWrites[update.topic], tail)) {
+        _presenceWrites.remove(update.topic);
+      }
+    });
+    _presenceWrites[update.topic] = tail;
+    return write;
+  }
+
   void _reannounce() {
     if (_disposed) return;
     final t = _transport;
     if (t is! PresenceTransport) return;
     for (final entry in _lastPresence.entries.toList()) {
       unawaited(
-        (t as PresenceTransport)
-            .updatePresence(
-              PresenceUpdate(
-                nodeId: _presenceNodeId,
-                topic: entry.key,
-                data: entry.value,
-              ),
-            )
-            .then<void>((_) {}, onError: (Object _) {}),
+        _writePresence(
+          PresenceUpdate(
+            nodeId: _presenceNodeId,
+            topic: entry.key,
+            data: entry.value,
+          ),
+        ).then<void>((_) {}, onError: (Object _) {}),
       );
     }
   }
@@ -421,12 +432,15 @@ final class CrdtClient {
   void _startHeartbeat(String topic) {
     _stopHeartbeat(topic);
     _heartbeats[topic] = Timer.periodic(_presenceConfig.heartbeatInterval, (_) {
-      if (_disposed || !_lastPresence.containsKey(topic)) return;
+      if (_disposed ||
+          !_lastPresence.containsKey(topic) ||
+          _presenceWrites.containsKey(topic)) {
+        return;
+      }
       final t = _transport;
       if (t is! PresenceTransport) return;
       unawaited(
-        (t as PresenceTransport)
-            .updatePresence(
+        _writePresence(
               PresenceUpdate(
                 nodeId: _presenceNodeId,
                 topic: topic,

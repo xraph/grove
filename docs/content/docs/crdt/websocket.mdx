@@ -297,6 +297,8 @@ Leave `since` out and the first subscribe starts from the beginning of each tabl
 
 Send `unsubscribe` to stop database changes. The server doesn't reply, and you can subscribe again on the same connection. Presence broadcasts continue independently, including for connections with no table subscription.
 
+The TypeScript and Dart transports send `since` on subscribe and reconnect. Each subscription keeps its own resume cursor and receives only its requested tables. Concurrent subscriptions share the union of their tables and use the oldest cursor; replayed changes merge idempotently. Disconnecting the last subscription sends `unsubscribe` and cancels reconnect attempts while leaving the socket available for requests. An empty table list keeps presence connected without streaming documents.
+
 To see who's in a topic right now, send `presence_get` with `{"topic": "documents:doc-1"}` and a `request_id`. You get back a `presence_snapshot` with the same `request_id`, or an `error` frame if presence is disabled.
 
 ## Error Handling

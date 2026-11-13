@@ -285,6 +285,7 @@ void main() {
         expect(change.setOp!.toJson(), {
           'op': 'remove',
           'elements': ['x'],
+          'tags': <Object?>[],
         });
       });
 

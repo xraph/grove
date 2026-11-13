@@ -61,6 +61,15 @@ func (pm *PresenceManager) Update(update PresenceUpdate) PresenceEvent {
 // Only supplied top-level keys change; null values are retained. It creates
 // an entry when absent and rejects non-object payloads without changing state.
 func (pm *PresenceManager) Patch(update PresenceUpdate) (PresenceEvent, error) {
+	event, err := pm.patch(update)
+	if err == nil {
+		pm.notify()
+	}
+	return event, err
+}
+
+// patch queues notification, leaving delivery to the caller after its locks are released.
+func (pm *PresenceManager) patch(update PresenceUpdate) (PresenceEvent, error) {
 	var patch map[string]json.RawMessage
 	if err := json.Unmarshal(update.Data, &patch); err != nil {
 		return PresenceEvent{}, fmt.Errorf("crdt: decode presence patch: %w", err)
@@ -90,7 +99,6 @@ func (pm *PresenceManager) Patch(update PresenceUpdate) (PresenceEvent, error) {
 	update.Data = raw
 	event := pm.updateLocked(update)
 	pm.mu.Unlock()
-	pm.notify()
 	return event, nil
 }
 

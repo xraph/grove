@@ -122,8 +122,8 @@ func TestSyncer_SyncRetriesThenGivesUp(t *testing.T) {
 
 	report, err := s.Sync(t.Context())
 
-	// A peer that keeps failing is logged and skipped, not returned.
-	require.NoError(t, err)
+	// A peer that keeps failing must be visible to the caller.
+	require.ErrorIs(t, err, tr.pullErr)
 	assert.Equal(t, &SyncReport{}, report)
 	assert.Equal(t, 3, tr.pullCount(), "one attempt plus two retries")
 }

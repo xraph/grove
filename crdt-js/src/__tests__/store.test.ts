@@ -243,7 +243,7 @@ describe("CRDTStore", () => {
     it("returns ChangeRecord with set_op remove", () => {
       const { store } = createTestStore();
       const change = store.removeFromSet("users", "1", "tags", ["x"])!;
-      expect(change.set_op).toEqual({ op: "remove", elements: ["x"] });
+      expect(change.set_op).toEqual({ op: "remove", elements: ["x"], tags: [] });
     });
 
     it("is a no-op when element was never added", () => {

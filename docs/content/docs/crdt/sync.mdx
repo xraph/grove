@@ -5,6 +5,8 @@ description: Transport interface, HTTP client, Syncer orchestration, multi-peer 
 
 Grove CRDT sync uses a two-phase pull/push protocol over a pluggable transport layer. This page covers the transport interface, wire format, syncer orchestration, multi-peer topologies, and sync hooks.
 
+The Go syncer maintains separate inbound progress and per-table outbound progress for each peer. Failed merges keep the pull checkpoint unchanged; failed pushes retain their outbound page for retry. Stream delivery does not advance the polling checkpoint, allowing polling to repair missed or failed stream events. `Sync` attempts every peer and returns a combined error alongside its partial report if any peer still fails after retries.
+
 ## Transport Interface
 
 The `Transport` interface defines how nodes communicate:

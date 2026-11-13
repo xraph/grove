@@ -46,7 +46,7 @@ describe("copy-on-write store", () => {
     expect(first.fields["f"].value).toBe(1);
   });
 
-  it("installs a new DocumentState object rather than mutating in place", () => {
+  it("installs a new DocumentState object rather than mutating in place", async () => {
     // persistDebounceMs: 0 — this test asserts one beforePersist call per
     // setField; the default debounce coalesces same-document writes into a
     // single call, which is what the debounce is for but not what this
@@ -54,6 +54,7 @@ describe("copy-on-write store", () => {
     const store = new CRDTStore("n1", new HybridClock("n1"), undefined, {
       persistDebounceMs: 0,
     });
+    await store.ready;
     const seen: DocumentState[] = [];
     const watcher: StorePlugin & StorageHook = {
       name: "identity-watcher",
@@ -167,10 +168,11 @@ describe("copy-on-write store", () => {
   // loop below runs in ~900ms; on CI it measured 1894ms, 2574ms, 2611ms
   // and 2686ms against a 2000ms ceiling, so it passed once and failed
   // three times without anything changing. Assert the property instead.
-  it("undo captures the previous field state by reference, not by clone (D8)", () => {
+  it("undo captures the previous field state by reference, not by clone (D8)", async () => {
     const store = new CRDTStore("n1", new HybridClock("n1"), undefined, {
       persistDebounceMs: 0,
     });
+    await store.ready;
 
     let liveAfterFirstWrite: unknown;
     let previousSeenBySecondWrite: unknown;

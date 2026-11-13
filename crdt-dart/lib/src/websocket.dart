@@ -145,11 +145,9 @@ final class _Pending {
 /// The transport connects at construction (a failure is swallowed and the
 /// next call retries) and, while a subscription is active, reconnects with
 /// `backoff` after the socket drops or a connect fails, sending `subscribe`
-/// again on each new socket. A subscription with no `tables` reconnects too
-/// (crdt-js does not), but note that over the Go WebSocket an empty table list
-/// streams nothing: the server waits for tables. Name the tables. One active
-/// subscription at a time is supported, as in crdt-js: a second `connect` on
-/// an already-subscribed socket does not send its tables.
+/// again on each new socket. Empty table lists keep presence connected without
+/// streaming documents. Active subscriptions share a union of their tables,
+/// resume from the oldest requested cursor, and receive only their own tables.
 ///
 /// A socket never outlives its credentials. Auth headers are read from `auth`
 /// before every request ([pull], [push], [updatePresence]) and before
@@ -239,7 +237,6 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
   final CancellableWait _wait;
 
   final Map<String, _Pending> _pending = {};
-  final Set<void Function(CrdtStreamEvent)> _handlers = {};
   final List<_WsSubscription> _active = [];
   var _nextId = 0;
   var _closed = false;
@@ -250,7 +247,7 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
   WsConnection? _announced;
   Completer<WsConnection>? _opening;
   Timer? _pingTimer;
-  HLC? _lastHlc;
+  String? _announcedSpec;
 
   // --- Transport ---
 
@@ -293,7 +290,7 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
 
   @override
   CrdtSubscription subscribe(StreamConfig config) =>
-      _WsSubscription(this, List.unmodifiable(config.tables));
+      _WsSubscription(this, List.unmodifiable(config.tables), config.since);
 
   /// Closes the socket and rejects every in-flight request, including a caller
   /// still waiting for the socket to open (it is not in the pending map yet,
@@ -335,11 +332,26 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
   // --- Internals ---
 
   void _emit(CrdtStreamEvent event) {
-    for (final handler in List.of(_handlers)) {
-      try {
-        handler(event);
-      } on Object {
-        // A handler's error must not stop the transport or other handlers.
+    for (final sub in List.of(_active)) {
+      if (!sub._connected) continue;
+      bool accepts(ChangeRecord c) => sub.tables.contains(c.table);
+      void observe(ChangeRecord c) {
+        if (sub._lastHlc == null || c.hlc.isAfter(sub._lastHlc!)) {
+          sub._lastHlc = c.hlc;
+        }
+      }
+
+      if (event is StreamChange) {
+        if (!accepts(event.change)) continue;
+        observe(event.change);
+        sub._deliver(event);
+      } else if (event is StreamChanges) {
+        final changes = event.changes.where(accepts).toList();
+        if (changes.isEmpty) continue;
+        changes.forEach(observe);
+        sub._deliver(StreamChanges(changes));
+      } else {
+        sub._deliver(event);
       }
     }
   }
@@ -642,17 +654,37 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
   /// The Go server does not remember a subscription across sockets, so every
   /// new socket needs its own.
   void _announce(WsConnection socket) {
-    if (_closed || _active.isEmpty) return;
-    if (!identical(_socket, socket) || identical(_announced, socket)) return;
-    _announced = socket;
-    _send(
-      socket,
-      WebSocketMessage(
-        WsMessageType.subscribe,
-        payload: {'tables': _active.last.tables},
-      ),
-    );
-    _emit(const StreamConnected());
+    if (_closed || !identical(_socket, socket)) return;
+    if (_active.isEmpty) {
+      if (_announced != null) {
+        _send(socket, const WebSocketMessage(WsMessageType.unsubscribe));
+      }
+      _announced = null;
+      _announcedSpec = null;
+      return;
+    }
+    final tables = {for (final s in _active) ...s.tables}.toList()..sort();
+    var since = _active.first._lastHlc ?? HLC.zero;
+    for (final s in _active) {
+      final cursor = s._lastHlc ?? HLC.zero;
+      if (since.isAfter(cursor)) since = cursor;
+    }
+    final payload = {'tables': tables, 'since': since.toJson()};
+    final spec = jsonEncode(payload);
+    if (!identical(_announced, socket) || _announcedSpec != spec) {
+      _announced = socket;
+      _announcedSpec = spec;
+      _send(
+        socket,
+        WebSocketMessage(WsMessageType.subscribe, payload: payload),
+      );
+    }
+    for (final s in List.of(_active)) {
+      if (!identical(s._announcedSocket, socket)) {
+        s._announcedSocket = socket;
+        s._deliver(const StreamConnected());
+      }
+    }
   }
 
   void _startPing(WsConnection socket) {
@@ -756,6 +788,7 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
   }
 
   void _handleMessage(WsConnection socket, String raw) {
+    if (_closed || !identical(_socket, socket)) return;
     final String typeText;
     final String requestId;
     final Object? payload;
@@ -831,7 +864,6 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
 
   StreamChange _changeEvent(Object? payload) {
     final change = ChangeRecord.fromJson(payload);
-    _updateLastHlc(change.hlc);
     return StreamChange(change);
   }
 
@@ -842,9 +874,6 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
       );
     }
     final changes = [for (final c in payload) ChangeRecord.fromJson(c)];
-    for (final c in changes) {
-      _updateLastHlc(c.hlc);
-    }
     return StreamChanges(changes);
   }
 
@@ -860,11 +889,6 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
         ),
       ),
     );
-  }
-
-  void _updateLastHlc(HLC hlc) {
-    final last = _lastHlc;
-    if (last == null || hlc.isAfter(last)) _lastHlc = hlc;
   }
 }
 
@@ -882,7 +906,21 @@ final class _RedactedCause {
 
 /// The subscription [WebSocketTransport.subscribe] returns.
 final class _WsSubscription implements CrdtSubscription {
-  _WsSubscription(this._transport, this.tables);
+  _WsSubscription(this._transport, this.tables, this._lastHlc);
+
+  HLC? _lastHlc;
+  WsConnection? _announcedSocket;
+  final Set<void Function(CrdtStreamEvent)> _handlers = {};
+
+  void _deliver(CrdtStreamEvent event) {
+    for (final handler in List.of(_handlers)) {
+      try {
+        handler(event);
+      } on Object {
+        /* An observer cannot stop delivery. */
+      }
+    }
+  }
 
   final WebSocketTransport _transport;
   final List<String> tables;
@@ -892,12 +930,12 @@ final class _WsSubscription implements CrdtSubscription {
   bool get connected => _connected && _transport._socket != null;
 
   @override
-  HLC? get lastHlc => _transport._lastHlc;
+  HLC? get lastHlc => _lastHlc;
 
   @override
   void Function() on(void Function(CrdtStreamEvent event) handler) {
-    _transport._handlers.add(handler);
-    return () => _transport._handlers.remove(handler);
+    _handlers.add(handler);
+    return () => _handlers.remove(handler);
   }
 
   @override
@@ -914,7 +952,9 @@ final class _WsSubscription implements CrdtSubscription {
     // other (it will not open again if it is already open). _announce sends
     // at most once per socket, so the two never both fire.
     t._ready().then<void>(
-      t._announce,
+      (socket) {
+        if (_connected) t._announce(socket);
+      },
       onError: (Object error) {
         if (!t._active.contains(this)) return;
         // A cancellation was reported and ended the subscription already.
@@ -932,14 +972,12 @@ final class _WsSubscription implements CrdtSubscription {
     _connected = false;
     final t = _transport;
     final wasActive = t._active.remove(this);
-    // No `unsubscribe` frame: the Go server does not handle that type and
-    // would answer with an error frame, surfacing as a spurious stream error.
-    // Dropping the subscription on this side is enough.
-    if (wasActive && t._active.isEmpty) {
-      final announced = t._announced != null;
-      t._announced = null;
-      t._wait.cancel();
-      if (announced) t._emit(const StreamDisconnected());
+    _announcedSocket = null;
+    if (wasActive) {
+      _deliver(const StreamDisconnected());
+      if (t._active.isEmpty) t._wait.cancel();
+      final socket = t._socket;
+      if (socket != null) t._announce(socket);
     }
   }
 }

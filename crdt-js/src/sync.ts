@@ -8,6 +8,7 @@
 import type { ChangeRecord, HLC, SyncReport } from "./types.js";
 import type { CRDTClient } from "./client.js";
 import type { CRDTStore } from "./store.js";
+import { hlcAfter, hlcIsZero } from "./hlc.js";
 import { isPushRejection } from "./errors.js";
 
 /** A pending change the server refused, with the error it answered. */
@@ -100,7 +101,10 @@ export class SyncEngine {
       if (resp.changes.length > 0) {
         this.store.applyChanges(resp.changes);
       }
-      if (resp.latest_hlc) this._lastPulledHLC = resp.latest_hlc;
+      if (resp.latest_hlc && !hlcIsZero(resp.latest_hlc) &&
+          (!this._lastPulledHLC || hlcAfter(resp.latest_hlc, this._lastPulledHLC))) {
+        this._lastPulledHLC = resp.latest_hlc;
+      }
       plugins.dispatchAfterPull({ ...pullEvent, changes: resp.changes });
     }
 
@@ -110,7 +114,9 @@ export class SyncEngine {
       // A beforePush plugin that returns a subset therefore loses the
       // records it withheld — see the note on this class and on the
       // beforePush hook itself.
-      const toPush = plugins.dispatchBeforePush(snapshot);
+      const pending = new Set(this.store.getPendingChanges());
+      const allowed = plugins.dispatchBeforePush(snapshot.filter((change) => pending.has(change)));
+      const toPush = allowed && this.store.markPushAttempt(allowed);
       if (toPush && toPush.length > 0) {
         try {
           const resp = await this.client.push(toPush);

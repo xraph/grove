@@ -107,7 +107,7 @@ describe("WebSocketTransport", () => {
 
     const subscribeFrames = socket().sent.filter((m) => m.type === "subscribe");
     expect(subscribeFrames.length).toBe(1);
-    expect(subscribeFrames[0].payload).toEqual({ tables: ["docs"] });
+    expect(subscribeFrames[0].payload).toEqual({ tables: ["docs"], since: { ts: 0, c: 0, node: "" } });
 
     socket().onmessage?.({ data: JSON.stringify({
       type: "change",
@@ -156,7 +156,7 @@ describe("WebSocketTransport", () => {
 
     expect(sockets.length).toBe(2);
     expect(framesSoFar().length).toBe(2);
-    expect(framesSoFar()[1].payload).toEqual({ tables: ["docs"] });
+    expect(framesSoFar()[1].payload).toEqual({ tables: ["docs"], since: { ts: 0, c: 0, node: "" } });
 
     sub.disconnect();
     transport.close();

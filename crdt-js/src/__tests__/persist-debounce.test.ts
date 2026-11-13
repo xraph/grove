@@ -17,12 +17,13 @@ describe("persistence debounce", () => {
     expect(spy.mock.calls[0][0]).toHaveLength(50);
   });
 
-  it("persistDebounceMs: 0 writes synchronously", () => {
+  it("persistDebounceMs: 0 writes synchronously after hydration", async () => {
     const storage = new MemoryStorage();
     const spy = vi.spyOn(storage, "savePendingChanges");
     const store = new CRDTStore("n1", new HybridClock("n1"), storage, {
       persistDebounceMs: 0,
     });
+    await store.ready;
     store.setField("t", "p", "f", 1);
     expect(spy).toHaveBeenCalledTimes(1);
   });

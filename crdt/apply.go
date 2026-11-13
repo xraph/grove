@@ -130,7 +130,7 @@ func setOpState(local *FieldState, c *ChangeRecord) (*FieldState, error) {
 		}
 
 	case SetOpRemove:
-		if len(c.SetOp.Tags) > 0 {
+		if c.SetOp.Tags != nil {
 			// Exact observed-remove: the op names the tags it saw, scoped
 			// to the elements it removes (a multi-element add shares one
 			// tag; scoping keeps siblings alive).

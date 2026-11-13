@@ -139,7 +139,7 @@ final class PendingChange {
         setOp: SetOperation(op.op, [
           for (var i = 0; i < texts.length; i++)
             texts[i] == null ? op.elements[i] : RawJson(texts[i]!),
-        ], tags: op.tags),
+        ], tags: op.hasTags ? op.tags : null),
       );
     }
     return PendingChange(

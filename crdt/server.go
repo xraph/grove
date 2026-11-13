@@ -755,7 +755,16 @@ func (c *SyncController) HandlePresenceUpdate(ctx context.Context, update *Prese
 		return event, nil
 	}
 
-	event := c.presence.Update(*update)
+	var event PresenceEvent
+	if c.roomManager != nil {
+		var err error
+		event, err = c.roomManager.updatePresence(*update)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		event = c.presence.Update(*update)
+	}
 	c.pluginChain.DispatchAfterPresenceEvent(ctx, &event)
 	return &event, nil
 }

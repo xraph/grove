@@ -172,7 +172,7 @@ FieldState _setOpState(FieldState? local, ChangeRecord c, SetOperation op) {
         entries[_elementKey(el)] = [tag];
       }
     case SetOpType.remove:
-      if (op.tags.isNotEmpty) {
+      if (op.hasTags) {
         // Exact observed-remove: the op names the tags it saw, scoped to the
         // elements it removes.
         for (final el in op.elements) {

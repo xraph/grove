@@ -219,13 +219,15 @@ export class CRDTStream {
     // this.abortController (or anything else downstream of it).
     if (gen !== this.generation) return;
 
-    this.abortController = new AbortController();
+    const controller = new AbortController();
+    this.abortController = controller;
     const url = this.buildStreamURL();
 
     const authHeaders = this.auth
       ? await Promise.resolve(this.auth.getHeaders())
       : {};
 
+    if (gen !== this.generation || controller.signal.aborted) return;
     const response = await this.fetchImpl(url, {
       method: "GET",
       headers: {
@@ -234,13 +236,16 @@ export class CRDTStream {
         ...this.headers,
         ...authHeaders,
       },
-      signal: this.abortController.signal,
+      signal: controller.signal,
     });
 
     // A newer generation may have taken over while the request was in
     // flight. Don't touch _connected or emit "connected"/"error" on
     // behalf of a stale generation.
-    if (gen !== this.generation) return;
+    if (gen !== this.generation || controller.signal.aborted) {
+      await response.body?.cancel().catch(() => {});
+      return;
+    }
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
@@ -309,6 +314,7 @@ export class CRDTStream {
       }
     } finally {
       this.clearIdleTimerFor(gen);
+      await reader?.cancel().catch(() => {});
       reader?.releaseLock();
     }
   }
