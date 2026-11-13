@@ -23,3 +23,9 @@ func newCommandContext(op hook.Operation, keys []string, extra map[string]any) *
 		Values:    values,
 	}
 }
+
+func (s *Store) newCommandContext(op hook.Operation, keys []string, extra map[string]any) *hook.QueryContext {
+	qc := newCommandContext(op, keys, extra)
+	qc.Values["_kv_owner"] = s
+	return qc
+}

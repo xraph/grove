@@ -34,16 +34,16 @@ func NewCache(maxEntries int, defaultTTL time.Duration) *CacheHook
 
 | Parameter | Description |
 |---|---|
-| `maxEntries` | Maximum number of entries the cache will hold before evicting |
+| `maxEntries` | Maximum number of entries; non-positive values disable caching |
 | `defaultTTL` | Default time-to-live for cached entries; `0` means no expiry |
 
 ## How It Works
 
 The cache hook implements both `PreQueryHook` and `PostQueryHook`:
 
-1. **On GET (PreQueryHook):** Checks the in-memory map for the requested key. If the entry exists and has not expired, the cached value is returned without hitting the backend driver.
-2. **On GET miss (PostQueryHook):** After the driver returns a value, the cache stores it for future reads.
-3. **On SET/DELETE:** The corresponding cache entry is evicted so subsequent reads fetch the fresh value from the backend.
+1. GET and GetRaw check the cache after all pre-query hooks have allowed the read and resolved its key. A hit avoids the backend call.
+2. A successful backend read populates the cache. Each caller receives its own byte slice.
+3. Writes evict affected keys, including multi-key writes, deletes, and TTL changes. A read that overlaps a write cannot repopulate the cache with its old value.
 
 ```
 GET "user:123"
@@ -62,6 +62,9 @@ Cache entries are automatically invalidated when:
 
 - A **SET** operation writes a new value for the key
 - A **DELETE** operation removes the key
+- **MSET**, **EXPIRE**, or a collection/script mutation affects the key
+
+Automatically cached entries are scoped to each store, even when you share a cache hook between stores. Writes outside the store are not observed. Choose a finite `defaultTTL` for values that can change or expire externally; the cache does not issue extra TTL queries.
 
 You can also manually manage the cache:
 

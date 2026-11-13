@@ -2,126 +2,127 @@ package middleware_test
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/xraph/grove/hook"
-	kv "github.com/xraph/grove/kv"
+	"github.com/xraph/grove/kv"
+	"github.com/xraph/grove/kv/kvtest"
 	"github.com/xraph/grove/kv/middleware"
 )
 
-func TestStampedeHook_OnlyGET(t *testing.T) {
-	h := middleware.NewStampede()
-
-	ctx := context.Background()
-	qc := &hook.QueryContext{
-		Operation: kv.OpSet,
-		RawQuery:  "key1",
-		Values:    make(map[string]any),
-	}
-
-	result, err := h.BeforeQuery(ctx, qc)
-	require.NoError(t, err)
-	assert.Equal(t, hook.Allow, result.Decision)
-
-	_, hasCall := qc.Values["_stampede_call"]
-	_, hasKey := qc.Values["_stampede_key"]
-	assert.False(t, hasCall, "non-GET operations should not track stampede calls")
-	assert.False(t, hasKey, "non-GET operations should not track stampede keys")
+type waitingContext struct {
+	context.Context
+	waiting chan struct{}
+	once    sync.Once
 }
 
-func TestStampedeHook_TracksFirstRequest(t *testing.T) {
-	h := middleware.NewStampede()
-
-	ctx := context.Background()
-	qc := &hook.QueryContext{
-		Operation: kv.OpGet,
-		RawQuery:  "key1",
-		Values:    make(map[string]any),
-	}
-
-	result, err := h.BeforeQuery(ctx, qc)
-	require.NoError(t, err)
-	assert.Equal(t, hook.Allow, result.Decision)
-
-	_, hasCall := qc.Values["_stampede_call"]
-	assert.True(t, hasCall, "first GET request should set _stampede_call")
-
-	key, hasKey := qc.Values["_stampede_key"].(string)
-	assert.True(t, hasKey, "first GET request should set _stampede_key")
-	assert.Equal(t, "key1", key)
-
-	// Clean up so the test does not hang.
-	h.Complete("key1")
+func (c *waitingContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.waiting) })
+	return c.Context.Done()
 }
 
-func TestStampedeHook_Complete_CleansUp(t *testing.T) {
-	h := middleware.NewStampede()
-
-	ctx := context.Background()
-	qc := &hook.QueryContext{
-		Operation: kv.OpGet,
-		RawQuery:  "key1",
-		Values:    make(map[string]any),
-	}
-
-	_, err := h.BeforeQuery(ctx, qc)
-	require.NoError(t, err)
-
-	// Complete should clean up the in-flight call.
-	h.Complete("key1")
-
-	// A new request for the same key should be tracked as the first again.
-	qc2 := &hook.QueryContext{
-		Operation: kv.OpGet,
-		RawQuery:  "key1",
-		Values:    make(map[string]any),
-	}
-
-	result, err := h.BeforeQuery(ctx, qc2)
-	require.NoError(t, err)
-	assert.Equal(t, hook.Allow, result.Decision)
-
-	_, hasCall := qc2.Values["_stampede_call"]
-	assert.True(t, hasCall, "after Complete, a new request should be the first caller again")
-
-	h.Complete("key1")
+type readResult struct {
+	raw []byte
+	err error
 }
 
-func TestStampedeHook_DifferentKeys_NoSharing(t *testing.T) {
-	h := middleware.NewStampede()
-
-	ctx := context.Background()
-
-	qc1 := &hook.QueryContext{
-		Operation: kv.OpGet,
-		RawQuery:  "key-alpha",
-		Values:    make(map[string]any),
+func TestStampedeSharesReadsAndErrors(t *testing.T) {
+	for _, readErr := range []error{nil, kv.ErrNotFound, errors.New("backend failed")} {
+		t.Run(fmtErrorName(readErr), func(t *testing.T) {
+			started, release := make(chan struct{}), make(chan struct{})
+			d := &countedReads{MockDriver: kvtest.NewMockDriver()}
+			d.get = func(context.Context, string) ([]byte, error) {
+				if d.reads.Load() == 1 {
+					close(started)
+					<-release
+				}
+				return []byte(`"value"`), readErr
+			}
+			s, err := kv.Open(d, kv.WithHook(middleware.NewStampede()))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, s.Close()) })
+			results := make(chan readResult, 9)
+			go func() { raw, resultErr := s.GetRaw(t.Context(), "key"); results <- readResult{raw, resultErr} }()
+			<-started
+			for range 8 {
+				ctx := &waitingContext{Context: t.Context(), waiting: make(chan struct{})}
+				go func() { raw, resultErr := s.GetRaw(ctx, "key"); results <- readResult{raw, resultErr} }()
+				<-ctx.waiting
+			}
+			close(release)
+			for range 9 {
+				result := <-results
+				require.ErrorIs(t, result.err, readErr)
+				if readErr == nil {
+					require.Equal(t, []byte(`"value"`), result.raw)
+					result.raw[0] = 'x'
+				}
+			}
+			require.EqualValues(t, 1, d.reads.Load())
+			_, err = s.GetRaw(t.Context(), "key")
+			require.ErrorIs(t, err, readErr)
+			require.EqualValues(t, 2, d.reads.Load())
+		})
 	}
-	_, err := h.BeforeQuery(ctx, qc1)
-	require.NoError(t, err)
+}
 
-	qc2 := &hook.QueryContext{
-		Operation: kv.OpGet,
-		RawQuery:  "key-beta",
-		Values:    make(map[string]any),
+func fmtErrorName(err error) string {
+	if err == nil {
+		return "success"
 	}
-	_, err = h.BeforeQuery(ctx, qc2)
+	return err.Error()
+}
+
+func TestStampedeCanceledWaiterLeavesLeaderRunning(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	d := &countedReads{MockDriver: kvtest.NewMockDriver()}
+	d.get = func(context.Context, string) ([]byte, error) { close(started); <-release; return []byte("value"), nil }
+	s, err := kv.Open(d, kv.WithHook(middleware.NewStampede()))
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	done := make(chan error, 1)
+	go func() { _, readErr := s.GetRaw(t.Context(), "key"); done <- readErr }()
+	<-started
+	base, cancel := context.WithCancel(t.Context())
+	ctx := &waitingContext{Context: base, waiting: make(chan struct{})}
+	waiter := make(chan error, 1)
+	go func() { _, readErr := s.GetRaw(ctx, "key"); waiter <- readErr }()
+	<-ctx.waiting
+	cancel()
+	require.ErrorIs(t, <-waiter, context.Canceled)
+	require.EqualValues(t, 1, d.reads.Load())
+	close(release)
+	require.NoError(t, <-done)
+}
 
-	// Both should be tracked as first callers (not shared).
-	_, hasCall1 := qc1.Values["_stampede_call"]
-	_, hasCall2 := qc2.Values["_stampede_call"]
-	assert.True(t, hasCall1, "key-alpha should be tracked independently")
-	assert.True(t, hasCall2, "key-beta should be tracked independently")
-
-	key1 := qc1.Values["_stampede_key"].(string)
-	key2 := qc2.Values["_stampede_key"].(string)
-	assert.Equal(t, "key-alpha", key1)
-	assert.Equal(t, "key-beta", key2)
-
-	h.Complete("key-alpha")
-	h.Complete("key-beta")
+func TestStampedePanicReleasesWaiters(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	d := &countedReads{MockDriver: kvtest.NewMockDriver()}
+	d.get = func(context.Context, string) ([]byte, error) {
+		if d.reads.Load() == 1 {
+			close(started)
+			<-release
+			panic("backend panic")
+		}
+		return []byte("value"), nil
+	}
+	s, err := kv.Open(d, kv.WithHook(middleware.NewStampede()))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	recovered := make(chan any, 1)
+	go func() { defer func() { recovered <- recover() }(); _, _ = s.GetRaw(t.Context(), "key") }()
+	<-started
+	ctx := &waitingContext{Context: t.Context(), waiting: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { _, readErr := s.GetRaw(ctx, "key"); done <- readErr }()
+	<-ctx.waiting
+	close(release)
+	require.Equal(t, "backend panic", <-recovered)
+	require.ErrorContains(t, <-done, "shared read did not complete")
+	raw, err := s.GetRaw(t.Context(), "key")
+	require.NoError(t, err)
+	require.Equal(t, []byte("value"), raw)
 }

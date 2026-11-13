@@ -10,6 +10,7 @@ import (
 
 	"github.com/xraph/grove/hook"
 	kv "github.com/xraph/grove/kv"
+	"github.com/xraph/grove/kv/internal/readhook"
 	"github.com/xraph/grove/kv/middleware"
 )
 
@@ -106,13 +107,12 @@ func TestCacheHook_BeforeQuery_CacheHit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, hook.Allow, result.Decision)
 
-	hit, ok := qc.Values["_cache_hit"].(bool)
-	require.True(t, ok, "_cache_hit should be set in Values")
-	assert.True(t, hit)
-
-	val, ok := qc.Values["_cache_value"].([]byte)
-	require.True(t, ok, "_cache_value should be set in Values")
-	assert.Equal(t, []byte("hello"), val)
+	raw, err := readhook.Run(ctx, qc, "mykey", func(context.Context, readhook.Key) ([]byte, error) {
+		t.Fatal("cache hit reached backend")
+		return nil, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []byte("hello"), raw)
 }
 
 func TestCacheHook_BeforeQuery_CacheMiss(t *testing.T) {

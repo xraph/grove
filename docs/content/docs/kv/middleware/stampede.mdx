@@ -63,20 +63,15 @@ Goroutine 4 ---> [Key in-flight, wait...]          ---> (shares result)
 ```
 
 1. The first goroutine to request a key proceeds normally to the backend.
-2. Subsequent goroutines requesting the same key while the first is still in-flight are blocked (via `sync.WaitGroup`).
+2. Subsequent goroutines requesting the same key while the first is still in-flight wait for that read or their own context cancellation.
 3. When the first request completes, all waiting goroutines are unblocked and share the result.
 4. The key is removed from the in-flight map, so the next request starts a fresh fetch.
 
 ### Completing Requests
 
-After the backend operation finishes, call `Complete` to unblock waiting goroutines and remove the key from the in-flight map:
+You don't need to call `Complete`. The store releases waiters when a backend read succeeds, fails, or panics. Waiters share raw bytes, so each caller can decode the result into its own destination. Canceling a waiter does not cancel the active read.
 
-```go
-stampede := middleware.NewStampede()
-
-// The store calls Complete after each GET finishes
-stampede.Complete("popular-key")
-```
+Sharing is scoped to the store and the final key after namespace hooks run. Writes invalidate in-flight entries so a later read does not join a fetch that started before the write. `Complete(key)` remains available to forget an entry manually; existing waiters still wait for their original read.
 
 ## Scope
 
@@ -122,4 +117,4 @@ GET "popular-key"
 | Method | Description |
 |---|---|
 | `NewStampede()` | Create a new stampede protection hook |
-| `Complete(key)` | Signal that the GET for a key has finished, unblocking waiters |
+| `Complete(key)` | Deprecated: forget an in-flight entry; completion is automatic |

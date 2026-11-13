@@ -5,6 +5,7 @@ import (
 
 	"github.com/xraph/grove/hook"
 	"github.com/xraph/grove/kv/driver"
+	"github.com/xraph/grove/kv/internal/readhook"
 )
 
 // observe runs the hook engine around one collection command.
@@ -22,7 +23,8 @@ import (
 func (s *Store) observe(
 	ctx context.Context, op hook.Operation, keys []string, fn func(resolved []string) error,
 ) error {
-	qc := newCommandContext(op, keys, nil)
+	qc := s.newCommandContext(op, keys, nil)
+	defer readhook.Finish(qc)
 
 	result, err := s.hooks.RunPreQuery(ctx, qc)
 	if err != nil {

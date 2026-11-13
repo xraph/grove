@@ -10,6 +10,7 @@ import (
 	"github.com/xraph/grove/hook"
 	"github.com/xraph/grove/kv/codec"
 	"github.com/xraph/grove/kv/driver"
+	"github.com/xraph/grove/kv/internal/readhook"
 	"github.com/xraph/grove/observability"
 )
 
@@ -61,7 +62,8 @@ func (s *Store) Get(ctx context.Context, key string, dest any) error {
 		return ErrKeyEmpty
 	}
 
-	qc := newCommandContext(OpGet, []string{key}, nil)
+	qc := s.newCommandContext(OpGet, []string{key}, nil)
+	defer readhook.Finish(qc)
 	if result, err := s.hooks.RunPreQuery(ctx, qc); err != nil {
 		return err
 	} else if result != nil && result.Decision == hook.Deny {
@@ -71,8 +73,10 @@ func (s *Store) Get(ctx context.Context, key string, dest any) error {
 	// Resolve potentially modified key from hooks.
 	resolvedKey := resolveKey(qc)
 
-	raw, err := timed(ctx, s.tel, OpGet, func(ctx context.Context) ([]byte, error) {
-		return s.drv.Get(ctx, resolvedKey)
+	raw, err := readhook.Run(ctx, qc, resolvedKey, func(ctx context.Context, key readhook.Key) ([]byte, error) {
+		return timed(ctx, s.tel, OpGet, func(ctx context.Context) ([]byte, error) {
+			return s.drv.Get(ctx, key.Name)
+		})
 	})
 	if err != nil {
 		_ = s.hooks.RunPostQuery(ctx, qc, nil)
@@ -97,7 +101,8 @@ func (s *Store) GetRaw(ctx context.Context, key string) ([]byte, error) {
 		return nil, ErrKeyEmpty
 	}
 
-	qc := newCommandContext(OpGet, []string{key}, nil)
+	qc := s.newCommandContext(OpGet, []string{key}, nil)
+	defer readhook.Finish(qc)
 	if result, err := s.hooks.RunPreQuery(ctx, qc); err != nil {
 		return nil, err
 	} else if result != nil && result.Decision == hook.Deny {
@@ -106,15 +111,19 @@ func (s *Store) GetRaw(ctx context.Context, key string) ([]byte, error) {
 
 	resolvedKey := resolveKey(qc)
 
-	raw, err := timed(ctx, s.tel, OpGet, func(ctx context.Context) ([]byte, error) {
-		return s.drv.Get(ctx, resolvedKey)
+	raw, err := readhook.Run(ctx, qc, resolvedKey, func(ctx context.Context, key readhook.Key) ([]byte, error) {
+		return timed(ctx, s.tel, OpGet, func(ctx context.Context) ([]byte, error) {
+			return s.drv.Get(ctx, key.Name)
+		})
 	})
 	if err != nil {
 		_ = s.hooks.RunPostQuery(ctx, qc, nil)
 		return nil, err
 	}
 
-	_ = s.hooks.RunPostQuery(ctx, qc, raw)
+	if err := s.hooks.RunPostQuery(ctx, qc, raw); err != nil {
+		return nil, err
+	}
 	return raw, nil
 }
 
@@ -129,9 +138,10 @@ func (s *Store) Set(ctx context.Context, key string, value any, opts ...SetOptio
 
 	so := applySetOptions(opts)
 
-	qc := newCommandContext(OpSet, []string{key}, map[string]any{
+	qc := s.newCommandContext(OpSet, []string{key}, map[string]any{
 		"_kv_ttl": so.ttl,
 	})
+	defer readhook.Finish(qc)
 	if result, err := s.hooks.RunPreQuery(ctx, qc); err != nil {
 		return err
 	} else if result != nil && result.Decision == hook.Deny {
@@ -196,9 +206,10 @@ func (s *Store) SetRaw(ctx context.Context, key string, value []byte, opts ...Se
 
 	so := applySetOptions(opts)
 
-	qc := newCommandContext(OpSet, []string{key}, map[string]any{
+	qc := s.newCommandContext(OpSet, []string{key}, map[string]any{
 		"_kv_ttl": so.ttl,
 	})
+	defer readhook.Finish(qc)
 	if result, err := s.hooks.RunPreQuery(ctx, qc); err != nil {
 		return err
 	} else if result != nil && result.Decision == hook.Deny {
@@ -262,7 +273,8 @@ func (s *Store) Delete(ctx context.Context, keys ...string) error {
 // deleteKeys is Delete returning how many keys the driver removed, which
 // Batch reports and Delete does not.
 func (s *Store) deleteKeys(ctx context.Context, keys []string) (int64, error) {
-	qc := newCommandContext(OpDelete, keys, nil)
+	qc := s.newCommandContext(OpDelete, keys, nil)
+	defer readhook.Finish(qc)
 	if result, err := s.hooks.RunPreQuery(ctx, qc); err != nil {
 		return 0, err
 	} else if result != nil && result.Decision == hook.Deny {
@@ -293,7 +305,8 @@ func (s *Store) Exists(ctx context.Context, keys ...string) (int64, error) {
 		return 0, nil
 	}
 
-	qc := newCommandContext(OpExists, keys, nil)
+	qc := s.newCommandContext(OpExists, keys, nil)
+	defer readhook.Finish(qc)
 	if result, err := s.hooks.RunPreQuery(ctx, qc); err != nil {
 		return 0, err
 	} else if result != nil && result.Decision == hook.Deny {
@@ -330,7 +343,8 @@ func (s *Store) MGet(ctx context.Context, keys []string, dest map[string]any) er
 		return ErrNotSupported
 	}
 
-	qc := newCommandContext(OpMGet, keys, nil)
+	qc := s.newCommandContext(OpMGet, keys, nil)
+	defer readhook.Finish(qc)
 	if result, err := s.hooks.RunPreQuery(ctx, qc); err != nil {
 		return err
 	} else if result != nil && result.Decision == hook.Deny {
@@ -401,7 +415,8 @@ func (s *Store) msetRaw(
 		keys = append(keys, k)
 	}
 
-	qc := newCommandContext(OpMSet, keys, nil)
+	qc := s.newCommandContext(OpMSet, keys, nil)
+	defer readhook.Finish(qc)
 	if result, err := s.hooks.RunPreQuery(ctx, qc); err != nil {
 		return err
 	} else if result != nil && result.Decision == hook.Deny {
@@ -438,7 +453,8 @@ func (s *Store) TTL(ctx context.Context, key string) (time.Duration, error) {
 		return 0, ErrNotSupported
 	}
 
-	qc := newCommandContext(OpTTL, []string{key}, nil)
+	qc := s.newCommandContext(OpTTL, []string{key}, nil)
+	defer readhook.Finish(qc)
 	if result, err := s.hooks.RunPreQuery(ctx, qc); err != nil {
 		return 0, err
 	} else if result != nil && result.Decision == hook.Deny {
@@ -467,7 +483,8 @@ func (s *Store) Expire(ctx context.Context, key string, ttl time.Duration) error
 		return ErrNotSupported
 	}
 
-	qc := newCommandContext(OpExpire, []string{key}, nil)
+	qc := s.newCommandContext(OpExpire, []string{key}, nil)
+	defer readhook.Finish(qc)
 	if result, err := s.hooks.RunPreQuery(ctx, qc); err != nil {
 		return err
 	} else if result != nil && result.Decision == hook.Deny {
@@ -494,7 +511,8 @@ func (s *Store) Scan(ctx context.Context, pattern string, fn func(key string) er
 		return ErrNotSupported
 	}
 
-	qc := newCommandContext(OpScan, []string{pattern}, nil)
+	qc := s.newCommandContext(OpScan, []string{pattern}, nil)
+	defer readhook.Finish(qc)
 	if result, err := s.hooks.RunPreQuery(ctx, qc); err != nil {
 		return err
 	} else if result != nil && result.Decision == hook.Deny {
