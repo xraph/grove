@@ -156,7 +156,7 @@ func (db *ElasticDB) Open(ctx context.Context, addresses string, opts ...EsOptio
 
 // Close releases idle connections in the driver's owned HTTP transport.
 // A transport supplied with WithTransport remains caller-owned, unless a
-// private copy was required to configure WithCACert.
+// private copy was required to configure WithCACert or WithPoolSize.
 func (db *ElasticDB) Close() error {
 	if db.transport != nil {
 		db.transport.CloseIdleConnections()

@@ -15,6 +15,7 @@ type esOptions struct {
 	CACert     []byte            // CA certificate for TLS
 	Refresh    string            // Refresh policy: "true", "false", "wait_for"
 	MaxRetries int               // Maximum number of retries
+	PoolSize   int               // Explicit connection limit per host
 	Transport  http.RoundTripper // Custom HTTP transport
 	OpenSearch bool              // Target is OpenSearch (or another ES-API server) — relax the v8 product check
 }
@@ -73,7 +74,21 @@ func WithMaxRetries(n int) EsOption {
 	}
 }
 
-// WithTransport sets a custom HTTP transport for the Elasticsearch client.
+// WithPoolSize caps HTTP connections per host, including connections being
+// dialed, active connections, and idle connections. The default transport uses
+// a cap of 10 unless http.DefaultTransport already sets a positive limit.
+// Non-positive values are ignored. A custom *http.Transport is cloned before
+// applying the limit; other custom transport types cannot use this option.
+func WithPoolSize(n int) EsOption {
+	return func(o *esOptions) {
+		if n > 0 {
+			o.PoolSize = n
+		}
+	}
+}
+
+// WithTransport sets a caller-owned HTTP transport for the Elasticsearch client.
+// WithPoolSize or WithCACert configures a private clone of a *http.Transport.
 func WithTransport(t http.RoundTripper) EsOption {
 	return func(o *esOptions) {
 		o.Transport = t

@@ -640,8 +640,20 @@ Configure the driver when calling `Open`:
 | `esdriver.WithCACert(cert)` | TLS CA certificate (PEM bytes) |
 | `esdriver.WithRefresh(policy)` | Default refresh policy: `"true"`, `"false"`, `"wait_for"` |
 | `esdriver.WithMaxRetries(n)` | Maximum retry attempts |
+| `esdriver.WithPoolSize(n)` | Maximum HTTP connections per host; default 10 |
 | `esdriver.WithTransport(t)` | Custom `http.RoundTripper` |
 | `esdriver.WithAddresses(addrs...)` | Override parsed addresses |
+
+The default HTTP transport caps each host at 10 connections. If you configured
+a positive `MaxConnsPerHost` on `http.DefaultTransport`, Grove keeps that limit.
+Requests wait for an available connection and honor their context deadline while
+waiting. Use `esdriver.WithPoolSize(n)` to set a different positive limit; zero
+and negative values leave the existing limit in place.
+
+When you supply a custom transport, you control its connection settings.
+`WithPoolSize` and `WithCACert` require a `*http.Transport` and configure a private
+copy. Closing the driver releases idle connections in that copy without closing
+connections owned by your original transport.
 
 ## Compatible Services
 

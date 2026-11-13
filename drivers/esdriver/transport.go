@@ -5,6 +5,8 @@ import (
 	"crypto/x509"
 	"fmt"
 	"net/http"
+
+	"github.com/xraph/grove/driver"
 )
 
 // Keep the actual HTTP transport so Close can release its idle connections.
@@ -18,6 +20,20 @@ func newTransport(o *esOptions) (http.RoundTripper, *http.Transport, error) {
 			return nil, nil, fmt.Errorf("esdriver: cannot clone http.DefaultTransport")
 		}
 		owned = base.Clone()
+		if owned.MaxConnsPerHost <= 0 {
+			owned.MaxConnsPerHost = driver.DefaultDriverOptions().PoolSize
+		}
+		transport = owned
+	}
+	if o.PoolSize > 0 {
+		base, ok := transport.(*http.Transport)
+		if !ok {
+			return nil, nil, fmt.Errorf("esdriver: cannot set pool size for transport of type %T", transport)
+		}
+		if owned == nil {
+			owned = base.Clone()
+		}
+		owned.MaxConnsPerHost = o.PoolSize
 		transport = owned
 	}
 	if o.CACert != nil {
@@ -36,6 +52,15 @@ func newTransport(o *esOptions) (http.RoundTripper, *http.Transport, error) {
 			return nil, nil, fmt.Errorf("esdriver: unable to add CA certificate")
 		}
 		transport = owned
+	}
+	if owned != nil && owned.MaxConnsPerHost > 0 {
+		idle := owned.MaxIdleConnsPerHost
+		if idle == 0 {
+			idle = http.DefaultMaxIdleConnsPerHost
+		}
+		if idle > owned.MaxConnsPerHost {
+			owned.MaxIdleConnsPerHost = owned.MaxConnsPerHost
+		}
 	}
 	return transport, owned, nil
 }
