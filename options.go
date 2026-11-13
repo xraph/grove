@@ -32,8 +32,11 @@ func (o *options) apply(opts []Option) {
 	}
 }
 
-// WithPoolSize sets the maximum number of connections in the pool.
-// Default: 10.
+// WithPoolSize is retained for source compatibility and has no effect on the
+// driver's pool, which is already open when grove.Open is called.
+//
+// Deprecated: pass driver.WithPoolSize to the driver's Open method, or set the
+// pool limit in its connection string.
 func WithPoolSize(n int) Option {
 	return func(o *options) {
 		if n > 0 {

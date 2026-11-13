@@ -10,6 +10,7 @@ import (
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/internal/sqlpool"
 	"github.com/xraph/grove/observability"
 	"github.com/xraph/grove/schema"
 )
@@ -68,9 +69,7 @@ func (db *ClickHouseDB) Open(ctx context.Context, dsn string, opts ...driver.Opt
 		return fmt.Errorf("clickhousedriver: open: %w", err)
 	}
 
-	if db.opts.PoolSize > 0 {
-		sqlDB.SetMaxOpenConns(db.opts.PoolSize)
-	}
+	sqlpool.Configure(sqlDB, db.opts)
 
 	db.db = sqlDB
 	db.tel.SetConnection(observability.ConnectionFromURL(dsn))

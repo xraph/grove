@@ -42,6 +42,20 @@ if err != nil {
 defer db.Close()
 ```
 
+### Connection Pool Defaults
+
+Grove defaults to **10 pooled connections per server**, no minimum warm pool,
+and a **1-minute idle timeout**. The MongoDB driver's separate monitoring
+connections are outside this pool cap. Each client and application replica has
+its own pools.
+
+URI options override these defaults; explicit `mongodriver.WithMaxPoolSize`,
+`WithMinPoolSize`, and `WithMaxConnIdleTime` options override the URI. For example,
+`mongodb://localhost/mydb?maxPoolSize=2&maxIdleTimeMS=30000` uses a cap of 2 and a
+30-second idle timeout. `maxPoolSize=0` in the URI removes the cap, while
+`WithMaxPoolSize(0)` leaves the URI setting or Grove default in place. An explicit
+zero idle timeout disables expiry.
+
 ### Overriding the Database Name
 
 If your URI does not contain a database path, or you want to target a different database, use `WithDatabase`:

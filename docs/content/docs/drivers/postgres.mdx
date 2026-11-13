@@ -124,14 +124,34 @@ listener.Close()
 
 ## Connection Pool Options
 
+By default, each driver instance allows at most **10 connections**, keeps no
+minimum connections warm, and retires connections idle for **1 minute**. Cleanup
+runs on the pool's **1-minute maintenance interval**, so retirement can take up
+to another interval. Connections are created on demand. Budget the cap across
+all application replicas and named databases, since each has its own pool.
+
+Pool settings apply in this order: Grove defaults, connection-string settings,
+then explicit `driver.With…` options. For example, `?pool_max_conns=2` stays capped
+at 2 when opened through `grove.OpenDriver` or the Forge extension. Both URL and
+keyword connection strings are supported.
+
+Configure the pool when opening the driver. The deprecated `grove.WithPoolSize`
+option on the already-open wrapper has no effect.
+
 ```go
 pgdb := pgdriver.New()
 pgdb.Open(ctx, dsn,
-    driver.WithPoolSize(20),
-    driver.WithQueryTimeout(30 * time.Second),
+    driver.WithPoolSize(5),
+    driver.WithMaxConnIdleTime(30 * time.Second),
 )
 db, err := grove.Open(pgdb)
 ```
+
+`driver.WithMinConns(n)` keeps a minimum pool warm. Increase it or the pool cap
+only when your workload needs it. `driver.WithHealthCheckPeriod(d)` controls
+pool maintenance, which retires expired connections and replenishes minimums;
+it does not periodically ping idle connections. Increasing it delays cleanup.
+Non-positive duration options retain the connection-string or default setting.
 
 ## Migrations
 

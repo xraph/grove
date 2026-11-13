@@ -14,6 +14,7 @@ import (
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/internal/sqlpool"
 	"github.com/xraph/grove/observability"
 	"github.com/xraph/grove/schema"
 )
@@ -68,18 +69,7 @@ func (db *MysqlDB) Open(ctx context.Context, dsn string, opts ...driver.Option) 
 	}
 
 	// Apply pool options.
-	if db.opts.PoolSize > 0 {
-		sqlDB.SetMaxOpenConns(db.opts.PoolSize)
-	}
-	if db.opts.MinConns > 0 {
-		sqlDB.SetMaxIdleConns(int(db.opts.MinConns))
-	}
-	if db.opts.MaxConnLifetime > 0 {
-		sqlDB.SetConnMaxLifetime(db.opts.MaxConnLifetime)
-	}
-	if db.opts.MaxConnIdleTime > 0 {
-		sqlDB.SetConnMaxIdleTime(db.opts.MaxConnIdleTime)
-	}
+	sqlpool.Configure(sqlDB, db.opts)
 
 	db.db = sqlDB
 	db.tel.SetConnection(connectionOf(dsn))

@@ -92,8 +92,14 @@ tdb.NewSelect(&users).
 | `tursodriver.WithAuthToken(token)` | Authentication token for Turso cloud |
 | `tursodriver.WithEmbeddedReplica(path)` | Enable embedded replica at local path |
 | `tursodriver.WithSyncInterval(d)` | Sync interval for embedded replicas |
-| `driver.WithPoolSize(n)` | Connection pool size |
+| `driver.WithPoolSize(n)` | Maximum connections per pool; default 10 |
+| `driver.WithMaxConnIdleTime(d)` | Idle timeout; default 1 minute for remote connections |
+| `driver.WithMaxConnLifetime(d)` | Maximum connection lifetime; default unlimited |
 | `driver.WithQueryTimeout(d)` | Default query timeout |
+
+Idle and lifetime expiry apply to remote `libsql://`, `https://`, and `http://`
+connections. Local SQLite pools retain their connections to preserve in-memory
+databases. Configure these options on the driver's `Open`, before `grove.Open`.
 
 ## Query Syntax
 

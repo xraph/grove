@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -86,52 +85,68 @@ func (db *PgDB) SupportsStreaming() bool { return true }
 // for change data capture.
 func (db *PgDB) SupportsCDC() bool { return true }
 
-// defaultMaxConns is the pool ceiling applied when neither the PoolSize
-// option nor a pool_max_conns DSN parameter is set. pgxpool's own default of
-// max(4, NumCPU) starves shared pools on small machines: polling extensions
-// (dispatch workers, relay delivery, cron scheduling, health checks) alone
-// hold around a dozen connections.
-const defaultMaxConns = 20
-
-// buildPoolConfig parses the DSN and applies driver options on top. The
-// MaxConns floor is only applied when the caller expressed no preference:
-// the PoolSize option and the DSN's pool_max_conns both win over it.
-func buildPoolConfig(dsn string, opts *driver.DriverOptions) (*pgxpool.Config, error) {
+// buildPoolConfig applies pool settings in order: Grove defaults, connection
+// string, then explicit driver options. ApplyOptions alone cannot distinguish
+// an explicit option from a default, so options must be applied last here.
+func buildPoolConfig(dsn string, opts ...driver.Option) (*pgxpool.Config, *driver.DriverOptions, error) {
 	poolCfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("pgdriver: parse dsn: %w", err)
+		return nil, nil, fmt.Errorf("pgdriver: parse dsn: %w", err)
 	}
 
-	switch {
-	case opts.PoolSize > 0:
-		poolCfg.MaxConns = int32(min(opts.PoolSize, math.MaxInt32)) //nolint:gosec // clamped above
-	case !strings.Contains(dsn, "pool_max_conns") && poolCfg.MaxConns < defaultMaxConns:
-		poolCfg.MaxConns = defaultMaxConns
+	// pgxpool removes pool parameters after parsing. Parse with pgx too to
+	// detect their presence, including keyword DSNs, escaped URL keys and
+	// service-file settings. Substring matching can mistake a database name
+	// or password for a setting.
+	connCfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("pgdriver: parse dsn: %w", err)
 	}
-	return poolCfg, nil
+	o := driver.DefaultDriverOptions()
+	if _, ok := connCfg.RuntimeParams["pool_max_conns"]; ok {
+		o.PoolSize = int(poolCfg.MaxConns)
+	}
+	if _, ok := connCfg.RuntimeParams["pool_max_conn_idle_time"]; ok {
+		o.MaxConnIdleTime = poolCfg.MaxConnIdleTime
+	}
+	o.MinConns = poolCfg.MinConns
+	o.MaxConnLifetime = poolCfg.MaxConnLifetime
+	o.HealthCheckPeriod = poolCfg.HealthCheckPeriod
+	poolCfg.MaxConnIdleTime = o.MaxConnIdleTime
+	for _, opt := range opts {
+		opt(o)
+	}
+
+	if o.PoolSize <= 0 {
+		return nil, nil, fmt.Errorf("pgdriver: pool size must be positive")
+	}
+	poolCfg.MaxConns = int32(min(o.PoolSize, math.MaxInt32))
+	if o.MinConns >= 0 {
+		poolCfg.MinConns = o.MinConns
+	}
+	// Preserve the existing treatment of non-positive duration options as
+	// unset. In pgx, a zero lifetime would expire every new connection.
+	if o.MaxConnLifetime > 0 {
+		poolCfg.MaxConnLifetime = o.MaxConnLifetime
+	}
+	if o.MaxConnIdleTime > 0 {
+		poolCfg.MaxConnIdleTime = o.MaxConnIdleTime
+	}
+	if o.HealthCheckPeriod > 0 {
+		poolCfg.HealthCheckPeriod = o.HealthCheckPeriod
+	}
+	if poolCfg.HealthCheckPeriod <= 0 {
+		return nil, nil, fmt.Errorf("pgdriver: health check period must be positive")
+	}
+	return poolCfg, o, nil
 }
 
-// Open parses the DSN, applies configuration options, creates the pgxpool
-// connection pool, and verifies connectivity.
+// Open parses the DSN, applies configuration options and creates a lazy
+// connection pool. Call Ping to verify connectivity.
 func (db *PgDB) Open(ctx context.Context, dsn string, opts ...driver.Option) error {
-	db.opts = driver.ApplyOptions(opts)
-
-	poolCfg, err := buildPoolConfig(dsn, db.opts)
+	poolCfg, driverOpts, err := buildPoolConfig(dsn, opts...)
 	if err != nil {
 		return err
-	}
-
-	if db.opts.MinConns > 0 {
-		poolCfg.MinConns = db.opts.MinConns
-	}
-	if db.opts.MaxConnLifetime > 0 {
-		poolCfg.MaxConnLifetime = db.opts.MaxConnLifetime
-	}
-	if db.opts.MaxConnIdleTime > 0 {
-		poolCfg.MaxConnIdleTime = db.opts.MaxConnIdleTime
-	}
-	if db.opts.HealthCheckPeriod > 0 {
-		poolCfg.HealthCheckPeriod = db.opts.HealthCheckPeriod
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
@@ -139,6 +154,7 @@ func (db *PgDB) Open(ctx context.Context, dsn string, opts ...driver.Option) err
 		return fmt.Errorf("pgdriver: open pool: %w", err)
 	}
 
+	db.opts = driverOpts
 	db.pool = pool
 	cc := poolCfg.ConnConfig
 	db.tel.SetConnection(cc.Database, cc.Host, int(cc.Port))

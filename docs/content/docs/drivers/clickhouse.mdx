@@ -72,7 +72,9 @@ chdb.NewSelect(&events).
 | `clickhousedriver.WithNativeProtocol()` | Use native ClickHouse protocol |
 | `clickhousedriver.WithCompression()` | Enable LZ4 compression |
 | `clickhousedriver.WithBatchSize(n)` | Batch size for bulk inserts |
-| `driver.WithPoolSize(n)` | Connection pool size |
+| `driver.WithPoolSize(n)` | Maximum connections per pool; default 10 |
+| `driver.WithMaxConnIdleTime(d)` | Idle timeout; default 1 minute for remote connections |
+| `driver.WithMaxConnLifetime(d)` | Maximum connection lifetime; default unlimited |
 
 ## Key Differences from SQL Databases
 

@@ -9,6 +9,12 @@ import (
 
 func TestDefaultDriverOptions(t *testing.T) {
 	opts := DefaultDriverOptions()
+	if opts.MaxConnIdleTime != time.Minute {
+		t.Errorf("expected default idle timeout 1m, got %v", opts.MaxConnIdleTime)
+	}
+	if opts.MinConns != 0 {
+		t.Errorf("expected no minimum connections, got %d", opts.MinConns)
+	}
 	if opts.PoolSize != 10 {
 		t.Errorf("expected default PoolSize 10, got %d", opts.PoolSize)
 	}
@@ -17,6 +23,15 @@ func TestDefaultDriverOptions(t *testing.T) {
 	}
 	if opts.Logger == nil {
 		t.Error("expected non-nil default Logger")
+	}
+}
+
+func TestWithPoolSizeIgnoresNonPositive(t *testing.T) {
+	for _, n := range []int{0, -1} {
+		opts := ApplyOptions([]Option{WithPoolSize(2), WithPoolSize(n)})
+		if opts.PoolSize != 2 {
+			t.Errorf("WithPoolSize(%d) changed the cap to %d", n, opts.PoolSize)
+		}
 	}
 }
 

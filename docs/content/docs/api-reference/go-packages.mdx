@@ -96,7 +96,7 @@ Embed in your model structs to declare them as Grove models. Tag with `grove:"ta
 ### grove.Option
 
 ```go
-func WithPoolSize(n int) Option
+func WithPoolSize(n int) Option // Deprecated: has no effect; configure the driver pool at Open
 func WithQueryTimeout(d time.Duration) Option
 func WithLogger(l log.Logger) Option // github.com/xraph/go-utils/log
 func WithMetrics(m gometrics.Metrics) Option // github.com/xraph/go-utils/metrics

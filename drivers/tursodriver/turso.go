@@ -12,6 +12,7 @@ import (
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
+	"github.com/xraph/grove/internal/sqlpool"
 	"github.com/xraph/grove/observability"
 	"github.com/xraph/grove/schema"
 )
@@ -115,6 +116,11 @@ connected:
 
 	if db.opts.PoolSize > 0 {
 		sqlDB.SetMaxOpenConns(db.opts.PoolSize)
+	}
+	// Keep local databases alive: closing the last connection can erase an
+	// in-memory SQLite database. Remote pools can safely shrink when idle.
+	if strings.HasPrefix(dsn, "libsql://") || strings.HasPrefix(dsn, "https://") || strings.HasPrefix(dsn, "http://") {
+		sqlpool.Configure(sqlDB, db.opts)
 	}
 
 	db.db = sqlDB

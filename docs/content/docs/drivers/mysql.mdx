@@ -471,6 +471,12 @@ Advisory locking via `GET_LOCK` ensures safe concurrent deployments without tabl
 
 ## Connection Pool Options
 
+Each driver instance defaults to a maximum of **10 connections** and a
+**1-minute idle timeout**, allowing the pool to drain when unused. Configure
+`driver.WithPoolSize`, `WithMaxConnIdleTime`, and `WithMaxConnLifetime` when
+opening the driver. A zero idle timeout disables expiry. The deprecated
+`grove.WithPoolSize` option does not change an already-open driver pool.
+
 ```go
 mydb := mysqldriver.New()
 err := mydb.Open(ctx, dsn,

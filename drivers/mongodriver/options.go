@@ -1,6 +1,12 @@
 package mongodriver
 
-import "time"
+import (
+	"time"
+
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+
+	"github.com/xraph/grove/driver"
+)
 
 // MongoOption configures the MongoDB driver during Open.
 type MongoOption func(*mongoOptions)
@@ -37,18 +43,18 @@ type mongoOptions struct {
 	// caller wants Open to return immediately and rely on Health() instead.
 	SkipPing bool
 
-	// MaxPoolSize caps the number of pooled connections. Zero leaves the
-	// driver default (100).
+	// MaxPoolSize overrides the cap when positive. Zero leaves the URI or
+	// Grove default in place, so an unset application config cannot uncap it.
 	MaxPoolSize uint64
 
 	// MinPoolSize keeps a baseline of pooled connections warm so chatty
 	// workloads (dispatch, polling) don't pay reconnect cost on every burst.
-	// Zero leaves the driver default (0).
-	MinPoolSize uint64
+	// The default is zero.
+	MinPoolSize *uint64
 
 	// MaxConnIdleTime is the maximum time a connection can sit idle in the
-	// pool before being closed. Zero leaves the driver default.
-	MaxConnIdleTime time.Duration
+	// pool before being closed. An explicit zero disables idle expiry.
+	MaxConnIdleTime *time.Duration
 
 	// MaxConnecting caps the number of connections being established
 	// concurrently. Zero leaves the driver default.
@@ -138,7 +144,8 @@ func WithSkipPing(skip bool) MongoOption {
 	}
 }
 
-// WithMaxPoolSize caps the pooled connection count.
+// WithMaxPoolSize caps connections per server (default 10).
+// Zero leaves the URI setting or Grove default in place.
 func WithMaxPoolSize(n uint64) MongoOption {
 	return func(o *mongoOptions) {
 		o.MaxPoolSize = n
@@ -149,14 +156,15 @@ func WithMaxPoolSize(n uint64) MongoOption {
 // workloads (e.g. dispatch dequeue loops) to avoid socket churn.
 func WithMinPoolSize(n uint64) MongoOption {
 	return func(o *mongoOptions) {
-		o.MinPoolSize = n
+		o.MinPoolSize = &n
 	}
 }
 
-// WithMaxConnIdleTime sets how long an idle pooled connection lives.
+// WithMaxConnIdleTime sets how long an idle connection lives (default one minute).
+// Zero disables idle expiry.
 func WithMaxConnIdleTime(d time.Duration) MongoOption {
 	return func(o *mongoOptions) {
-		o.MaxConnIdleTime = d
+		o.MaxConnIdleTime = &d
 	}
 }
 
@@ -165,4 +173,36 @@ func WithMaxConnecting(n uint64) MongoOption {
 	return func(o *mongoOptions) {
 		o.MaxConnecting = n
 	}
+}
+
+// clientOptions layers pool defaults, URI settings, then explicit options.
+func (o *mongoOptions) clientOptions(uri string) *options.ClientOptions {
+	defaults := driver.DefaultDriverOptions()
+	maxPoolSize := uint64(defaults.PoolSize) //nolint:gosec // DefaultDriverOptions always supplies a positive pool size.
+	clientOpts := options.Client().
+		SetMaxPoolSize(maxPoolSize).
+		SetMaxConnIdleTime(defaults.MaxConnIdleTime).
+		ApplyURI(uri)
+	if o.ServerSelectionTimeout > 0 {
+		clientOpts.SetServerSelectionTimeout(o.ServerSelectionTimeout)
+	}
+	if o.ConnectTimeout > 0 {
+		clientOpts.SetConnectTimeout(o.ConnectTimeout)
+	}
+	if o.Timeout > 0 {
+		clientOpts.SetTimeout(o.Timeout)
+	}
+	if o.MaxPoolSize > 0 {
+		clientOpts.SetMaxPoolSize(o.MaxPoolSize)
+	}
+	if o.MinPoolSize != nil {
+		clientOpts.SetMinPoolSize(*o.MinPoolSize)
+	}
+	if o.MaxConnIdleTime != nil {
+		clientOpts.SetMaxConnIdleTime(*o.MaxConnIdleTime)
+	}
+	if o.MaxConnecting > 0 {
+		clientOpts.SetMaxConnecting(o.MaxConnecting)
+	}
+	return clientOpts
 }

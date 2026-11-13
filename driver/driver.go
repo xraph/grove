@@ -63,16 +63,20 @@ type DriverOptions struct { //nolint:revive // DriverOptions is the established 
 // DefaultDriverOptions returns a DriverOptions with sensible defaults.
 func DefaultDriverOptions() *DriverOptions {
 	return &DriverOptions{
-		PoolSize:     10,
-		QueryTimeout: 30 * time.Second,
-		Logger:       log.NewNoopLogger(),
+		PoolSize:        10,
+		MaxConnIdleTime: time.Minute,
+		QueryTimeout:    30 * time.Second,
+		Logger:          log.NewNoopLogger(),
 	}
 }
 
-// WithPoolSize returns an Option that sets the connection pool size.
+// WithPoolSize sets the maximum number of connections per pool (default 10).
+// Non-positive values are ignored, so they cannot accidentally uncap the pool.
 func WithPoolSize(n int) Option {
 	return func(o *DriverOptions) {
-		o.PoolSize = n
+		if n > 0 {
+			o.PoolSize = n
+		}
 	}
 }
 
@@ -100,16 +104,17 @@ func WithMaxConnLifetime(d time.Duration) Option {
 }
 
 // WithMaxConnIdleTime returns an Option that sets the maximum time a
-// connection can sit idle before it is closed.
+// connection can sit idle before it is closed. Network database drivers default
+// to one minute. Cleanup happens on the underlying pool's maintenance interval.
 func WithMaxConnIdleTime(d time.Duration) Option {
 	return func(o *DriverOptions) {
 		o.MaxConnIdleTime = d
 	}
 }
 
-// WithHealthCheckPeriod returns an Option that sets the interval between
-// automatic health checks on idle connections. On serverless databases like
-// Neon, each health check costs bandwidth; consider setting this to 5m+.
+// WithHealthCheckPeriod sets the PostgreSQL pool's maintenance interval.
+// Maintenance retires idle/expired connections and replenishes configured
+// minimums; it does not ping idle connections. Longer intervals delay cleanup.
 func WithHealthCheckPeriod(d time.Duration) Option {
 	return func(o *DriverOptions) {
 		o.HealthCheckPeriod = d

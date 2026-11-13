@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/xraph/grove/hook"
 	"github.com/xraph/grove/observability"
@@ -59,28 +58,16 @@ func (db *MongoDB) Open(ctx context.Context, uri string, opts ...MongoOption) er
 	mopts := defaultMongoOptions()
 	mopts.apply(opts)
 
-	clientOpts := options.Client().ApplyURI(uri)
-	if mopts.ServerSelectionTimeout > 0 {
-		clientOpts.SetServerSelectionTimeout(mopts.ServerSelectionTimeout)
+	// Validate before Connect, which starts background monitoring goroutines.
+	dbName := mopts.Database
+	if dbName == "" {
+		dbName = extractDBName(uri)
 	}
-	if mopts.ConnectTimeout > 0 {
-		clientOpts.SetConnectTimeout(mopts.ConnectTimeout)
+	if dbName == "" {
+		return fmt.Errorf("mongodriver: no database name in URI or options; use WithDatabase()")
 	}
-	if mopts.Timeout > 0 {
-		clientOpts.SetTimeout(mopts.Timeout)
-	}
-	if mopts.MaxPoolSize > 0 {
-		clientOpts.SetMaxPoolSize(mopts.MaxPoolSize)
-	}
-	if mopts.MinPoolSize > 0 {
-		clientOpts.SetMinPoolSize(mopts.MinPoolSize)
-	}
-	if mopts.MaxConnIdleTime > 0 {
-		clientOpts.SetMaxConnIdleTime(mopts.MaxConnIdleTime)
-	}
-	if mopts.MaxConnecting > 0 {
-		clientOpts.SetMaxConnecting(mopts.MaxConnecting)
-	}
+
+	clientOpts := mopts.clientOptions(uri)
 
 	// Every command the client sends is traced and timed through grove's
 	// telemetry, builders and direct Client() use alike.
@@ -89,15 +76,6 @@ func (db *MongoDB) Open(ctx context.Context, uri string, opts ...MongoOption) er
 	client, err := mongo.Connect(clientOpts)
 	if err != nil {
 		return fmt.Errorf("mongodriver: connect: %w", err)
-	}
-
-	// Determine the database name.
-	dbName := mopts.Database
-	if dbName == "" {
-		dbName = extractDBName(uri)
-	}
-	if dbName == "" {
-		return fmt.Errorf("mongodriver: no database name in URI or options; use WithDatabase()")
 	}
 
 	db.client = client
