@@ -39,7 +39,9 @@ type PresenceUpdate struct {
 
 // PresenceEvent is broadcast over SSE to notify clients of presence changes.
 type PresenceEvent struct {
-	// Type is "join", "update", or "leave".
+	// Type is "join", "update", "leave", or "resync". Resync indicates
+	// subscriber overflow: discard cached peers and fetch fresh snapshots.
+	// Its NodeID, Topic and Data are empty because the loss can span topics.
 	Type string `json:"type"`
 
 	// NodeID identifies the client whose presence changed.
@@ -66,4 +68,5 @@ const (
 	PresenceJoin      = "join"
 	PresenceUpdateEvt = "update"
 	PresenceLeave     = "leave"
+	PresenceResync    = "resync"
 )

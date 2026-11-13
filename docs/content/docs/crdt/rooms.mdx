@@ -437,6 +437,12 @@ snapshots for framework adapters. If you manage streaming separately, call
 `refresh()` after reconnect. Stream events received during a presence snapshot
 request take precedence over that snapshot, including departures.
 
+Concurrent `start()` calls share one attempt. If publishing or fetching the
+initial snapshot fails, the promise rejects and a later `start()` retries with
+the latest local state. Retries reuse the existing stream listener. Failed
+publications retain pending state for the next update, `flush()`, or `refresh()`;
+they do not trigger a retry loop at the cursor publication rate.
+
 `useRoom` uses this session automatically. Its optional third argument accepts
 `updateInterval`, `typingTimeout`, and `onError`. The participant's `nodeId` must
 match the provider's client node ID. Cursor and typing updates use the sync

@@ -123,6 +123,8 @@ final class CrdtClient {
   late final StreamTransport? _streamTransport;
   final Map<String, Timer> _heartbeats = {};
   final Map<String, Object?> _lastPresence = {};
+  final Map<String, _PresenceRefresh> _presenceRefreshes = {};
+  final Set<String> _presenceResyncNeeded = {};
   final List<void Function()> _streamHandlers = [];
   CrdtStore? _store;
   bool _disposed = false;
@@ -217,6 +219,16 @@ final class CrdtClient {
   /// Applies an inbound presence event, running the `onPresenceEvent` hooks
   /// first. Prefer this to calling `presence.applyEvent` directly.
   void applyPresenceEvent(PresenceEvent event) {
+    if (event.type == 'resync') {
+      presence.clear();
+      for (final topic in _lastPresence.keys.toList()) {
+        _presenceResyncNeeded.add(topic);
+        unawaited(
+          refreshPresence(topic).then<void>((_) {}, onError: (Object _) {}),
+        );
+      }
+      return;
+    }
     _store?.pluginManager.dispatchOnPresenceEvent(event);
     presence.applyEvent(event);
   }
@@ -269,14 +281,50 @@ final class CrdtClient {
         topicGeneration != (_topicGeneration[topic] ?? 0);
     await updatePresence(topic, data);
     if (stale()) return;
-    final List<PresenceState> states;
-    try {
-      states = await _presenceTransport().getPresence(topic);
-    } on UnsupportedError {
-      return;
+    await refreshPresence(topic);
+  }
+
+  /// Refreshes joined peers, retaining stream events received during the fetch.
+  /// Repeated refresh requests coalesce into one fetch plus one pending fetch.
+  Future<void> refreshPresence(String topic) {
+    if (_disposed || !_lastPresence.containsKey(topic)) return Future.value();
+    final generation = _presenceGeneration;
+    final topicGeneration = _topicGeneration[topic] ?? 0;
+    final pending = _presenceRefreshes[topic];
+    if (pending != null &&
+        pending.generation == generation &&
+        pending.topicGeneration == topicGeneration) {
+      pending.again = true;
+      return pending.future;
     }
-    if (stale()) return;
-    presence.seed(topic, states);
+    final request = _PresenceRefresh(generation, topicGeneration);
+    _presenceRefreshes[topic] = request;
+    bool current() =>
+        !_disposed &&
+        generation == _presenceGeneration &&
+        topicGeneration == (_topicGeneration[topic] ?? 0) &&
+        _lastPresence.containsKey(topic);
+    request.future = Future<void>.value().then((_) async {
+      try {
+        do {
+          request.again = false;
+          await presence.seedFrom(
+            topic,
+            () => _presenceTransport().getPresence(topic),
+            current: () => current() && !request.again,
+          );
+        } while (request.again && current());
+        if (current()) _presenceResyncNeeded.remove(topic);
+      } on UnsupportedError {
+        // Custom transports may provide updates without snapshots.
+        if (current()) _presenceResyncNeeded.remove(topic);
+      } finally {
+        if (identical(_presenceRefreshes[topic], request)) {
+          _presenceRefreshes.remove(topic);
+        }
+      }
+    });
+    return request.future;
   }
 
   /// Leaves [topic]: stops its heartbeat and sends `data: null`.
@@ -284,6 +332,8 @@ final class CrdtClient {
     _topicGeneration[topic] = (_topicGeneration[topic] ?? 0) + 1;
     _stopHeartbeat(topic);
     _lastPresence.remove(topic);
+    _presenceRefreshes.remove(topic);
+    _presenceResyncNeeded.remove(topic);
     final t = _transport;
     if (t is PresenceTransport) {
       await (t as PresenceTransport).updatePresence(
@@ -309,6 +359,8 @@ final class CrdtClient {
       _stopHeartbeat(topic);
     }
     _lastPresence.clear();
+    _presenceRefreshes.clear();
+    _presenceResyncNeeded.clear();
     _presenceGeneration++;
     presence.clear();
     Object? failure;
@@ -381,10 +433,24 @@ final class CrdtClient {
                 data: _lastPresence[topic],
               ),
             )
-            .then<void>((_) {}, onError: (Object _) {}),
+            .then<void>((_) async {
+              if (_presenceResyncNeeded.contains(topic) &&
+                  !_presenceRefreshes.containsKey(topic)) {
+                await refreshPresence(topic);
+              }
+            })
+            .catchError((Object _) {}),
       );
     });
   }
 
   void _stopHeartbeat(String topic) => _heartbeats.remove(topic)?.cancel();
+}
+
+class _PresenceRefresh {
+  _PresenceRefresh(this.generation, this.topicGeneration);
+  final int generation;
+  final int topicGeneration;
+  bool again = false;
+  late Future<void> future;
 }

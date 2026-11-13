@@ -3,6 +3,7 @@ package crdt
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -47,7 +48,7 @@ type WebSocketConn interface {
 	ReadMessage() ([]byte, error)
 	// WriteMessage sends a message over the connection.
 	WriteMessage(data []byte) error
-	// Close closes the connection.
+	// Close must unblock concurrent ReadMessage and WriteMessage calls.
 	Close() error
 }
 
@@ -55,18 +56,74 @@ type WebSocketConn interface {
 // It provides bidirectional multiplexed communication for pull, push, presence,
 // and real-time change streaming over a single connection.
 type WebSocketTransport struct {
-	conn           WebSocketConn
+	conn           *wsClientConn
 	logger         log.Logger
 	reconnectDelay time.Duration
 	pingInterval   time.Duration
 	tables         []string
 
 	mu              sync.Mutex
-	pending         map[string]chan json.RawMessage // requestID → response channel
+	pending         map[string]chan wsReply // requestID → response channel
 	changeHandlers  []func(ChangeRecord)
 	presenceHandler func(PresenceEvent)
 	requestCounter  atomic.Int64
 	closed          atomic.Bool
+	done            chan struct{}
+}
+
+// ErrWebSocketClosed indicates a closed connection, including a disconnect
+// while waiting for a response. Requests are never replayed automatically.
+var ErrWebSocketClosed = errors.New("crdt: websocket connection closed")
+
+type wsReply struct {
+	payload json.RawMessage
+	err     error
+}
+
+type wsClientConn struct {
+	conn      WebSocketConn
+	writer    chan struct{}
+	done      chan struct{}
+	reading   atomic.Bool
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func newWSClientConn(conn WebSocketConn) *wsClientConn {
+	return &wsClientConn{conn: conn, writer: make(chan struct{}, 1), done: make(chan struct{})}
+}
+
+func (c *wsClientConn) close() error {
+	c.closeOnce.Do(func() { close(c.done); c.closeErr = c.conn.Close() })
+	return c.closeErr
+}
+
+func (c *wsClientConn) write(ctx context.Context, data []byte) error {
+	select {
+	case c.writer <- struct{}{}:
+		defer func() { <-c.writer }()
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return ErrWebSocketClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-c.done:
+		return ErrWebSocketClosed
+	default:
+	}
+	// The generic connection has no write deadline API. Closing is the only
+	// way to interrupt a blocked write once its context has been cancelled.
+	stop := context.AfterFunc(ctx, func() { _ = c.close() }) // cancellation cleanup; write reports the failure
+	err := c.conn.WriteMessage(data)
+	stop()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
 }
 
 // WebSocketOption configures a WebSocketTransport.
@@ -74,7 +131,11 @@ type WebSocketOption func(*WebSocketTransport)
 
 // WithWSLogger sets the logger.
 func WithWSLogger(l log.Logger) WebSocketOption {
-	return func(t *WebSocketTransport) { t.logger = l }
+	return func(t *WebSocketTransport) {
+		if l != nil {
+			t.logger = l
+		}
+	}
 }
 
 // WithWSReconnectDelay sets the reconnect delay.
@@ -84,7 +145,11 @@ func WithWSReconnectDelay(d time.Duration) WebSocketOption {
 
 // WithWSPingInterval sets the ping/keepalive interval.
 func WithWSPingInterval(d time.Duration) WebSocketOption {
-	return func(t *WebSocketTransport) { t.pingInterval = d }
+	return func(t *WebSocketTransport) {
+		if d > 0 {
+			t.pingInterval = d
+		}
+	}
 }
 
 // WithWSTables restricts which tables to subscribe to.
@@ -95,11 +160,12 @@ func WithWSTables(tables ...string) WebSocketOption {
 // NewWebSocketTransport creates a new WebSocket-based transport.
 func NewWebSocketTransport(conn WebSocketConn, opts ...WebSocketOption) *WebSocketTransport {
 	t := &WebSocketTransport{
-		conn:           conn,
+		conn:           newWSClientConn(conn),
 		logger:         log.NewNoopLogger(),
 		reconnectDelay: 5 * time.Second,
 		pingInterval:   30 * time.Second,
-		pending:        make(map[string]chan json.RawMessage),
+		pending:        make(map[string]chan wsReply),
+		done:           make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -109,39 +175,53 @@ func NewWebSocketTransport(conn WebSocketConn, opts ...WebSocketOption) *WebSock
 
 // Start begins the read loop for processing incoming messages.
 // Call this in a goroutine after creating the transport.
+// Cancelling ctx closes this connection and wakes pending requests.
 func (t *WebSocketTransport) Start(ctx context.Context) error {
-	// Send initial subscription if tables are configured.
+	conn := t.connection()
+	if t.closed.Load() {
+		return ErrWebSocketClosed
+	}
+	if !conn.reading.CompareAndSwap(false, true) {
+		return fmt.Errorf("crdt: websocket read loop already started")
+	}
+	streamCtx, cancel := context.WithCancel(ctx)
+	stopClose := context.AfterFunc(streamCtx, func() { t.closeConnection(conn) })
+	var pingDone chan struct{}
+	defer func() {
+		cancel()
+		t.closeConnection(conn)
+		stopClose()
+		if pingDone != nil {
+			<-pingDone
+		}
+	}()
+
 	if len(t.tables) > 0 {
-		if err := t.sendSubscribe(t.tables); err != nil {
+		if err := t.sendOn(streamCtx, conn, WSSubscribe, map[string]any{"tables": t.tables}); err != nil {
 			return fmt.Errorf("crdt: ws subscribe: %w", err)
 		}
 	}
-
-	// Start ping loop.
-	go t.pingLoop(ctx)
-
-	// Read loop.
+	pingDone = make(chan struct{})
+	go func() { defer close(pingDone); t.pingLoop(streamCtx, conn) }()
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-
-		data, err := t.conn.ReadMessage()
+		data, err := conn.conn.ReadMessage()
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if t.closed.Load() {
 				return nil
 			}
 			return fmt.Errorf("crdt: ws read: %w", err)
 		}
-
 		var msg WebSocketMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
 			t.logger.Error("crdt: ws parse error", log.String("error", err.Error()))
 			continue
 		}
-
 		t.handleMessage(msg)
 	}
 }
@@ -154,52 +234,79 @@ type WebSocketDialer func(ctx context.Context) (WebSocketConn, error)
 // disconnection using the provided dialer. It blocks until the context is
 // cancelled. Between reconnection attempts, it waits for reconnectDelay.
 func (t *WebSocketTransport) StartWithReconnect(ctx context.Context, dial WebSocketDialer) error {
+	// Explicit Close also cancels an in-flight dial and reconnect delay.
+	dialCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-t.done:
+			cancel()
+		case <-dialCtx.Done():
+		}
+	}()
 	for {
-		err := t.Start(ctx)
+		err := t.Start(dialCtx)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if t.closed.Load() {
 			return nil
 		}
-
-		t.logger.Error("crdt: ws disconnected, reconnecting",
-			log.String("error", err.Error()),
-		)
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(t.reconnectDelay):
-		}
-
-		newConn, dialErr := dial(ctx)
-		if dialErr != nil {
-			if ctx.Err() != nil {
+		t.logger.Error("crdt: ws disconnected, reconnecting", log.String("error", err.Error()))
+		for {
+			timer := time.NewTimer(t.reconnectDelay)
+			select {
+			case <-dialCtx.Done():
+				timer.Stop()
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return nil
+			case <-timer.C:
+			}
+			newConn, dialErr := dial(dialCtx)
+			if dialErr != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if t.closed.Load() {
+					return nil
+				}
+				t.logger.Error("crdt: ws reconnect dial failed", log.String("error", dialErr.Error()))
+				continue
+			}
+			conn := newWSClientConn(newConn)
+			t.mu.Lock()
+			if t.closed.Load() || ctx.Err() != nil {
+				t.mu.Unlock()
+				t.closeConnection(conn)
 				return ctx.Err()
 			}
-			t.logger.Error("crdt: ws reconnect dial failed",
-				log.String("error", dialErr.Error()),
-			)
-			continue
+			t.conn = conn
+			t.mu.Unlock()
+			break
 		}
-
-		t.mu.Lock()
-		t.conn = newConn
-		t.closed.Store(false)
-		// Clear stale pending requests — their callers already timed out.
-		for id, ch := range t.pending {
-			close(ch)
-			delete(t.pending, id)
-		}
-		t.mu.Unlock()
 	}
 }
 
-// Close closes the WebSocket connection.
+// Close closes the current connection, wakes pending requests, and prevents reconnection.
 func (t *WebSocketTransport) Close() error {
-	t.closed.Store(true)
-	return t.conn.Close()
+	if t.closed.CompareAndSwap(false, true) {
+		close(t.done)
+	}
+	return t.connection().close()
+}
+
+func (t *WebSocketTransport) connection() *wsClientConn {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.conn
+}
+
+func (t *WebSocketTransport) closeConnection(conn *wsClientConn) {
+	if err := conn.close(); err != nil {
+		t.logger.Debug("crdt: ws close", log.String("error", err.Error()))
+	}
 }
 
 // Pull requests changes from the remote node via WebSocket.
@@ -257,8 +364,13 @@ func (t *WebSocketTransport) sendRequest(ctx context.Context, msgType WSMessageT
 		RequestID: requestID,
 	}
 
-	respCh := make(chan json.RawMessage, 1)
+	respCh := make(chan wsReply, 1)
 	t.mu.Lock()
+	conn := t.conn
+	if t.closed.Load() {
+		t.mu.Unlock()
+		return nil, ErrWebSocketClosed
+	}
 	t.pending[requestID] = respCh
 	t.mu.Unlock()
 
@@ -272,51 +384,62 @@ func (t *WebSocketTransport) sendRequest(ctx context.Context, msgType WSMessageT
 	if err != nil {
 		return nil, err
 	}
-	if err := t.conn.WriteMessage(data); err != nil {
+	if err := conn.write(ctx, data); err != nil {
 		return nil, err
 	}
 
 	select {
 	case resp := <-respCh:
-		return resp, nil
+		return resp.payload, resp.err
+	case <-conn.done:
+		// A server may send its final response immediately before disconnecting.
+		// Preserve a response already delivered by the reader.
+		select {
+		case resp := <-respCh:
+			return resp.payload, resp.err
+		default:
+			return nil, ErrWebSocketClosed
+		}
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
 
-// sendMessage sends a fire-and-forget message (no response expected).
-func (t *WebSocketTransport) sendMessage(msgType WSMessageType, payload any) error {
+func (t *WebSocketTransport) sendOn(ctx context.Context, conn *wsClientConn, msgType WSMessageType, payload any) error {
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	msg := WebSocketMessage{
-		Type:    msgType,
-		Payload: payloadBytes,
-	}
-	data, err := json.Marshal(msg)
+	data, err := json.Marshal(WebSocketMessage{Type: msgType, Payload: payloadBytes})
 	if err != nil {
 		return err
 	}
-	return t.conn.WriteMessage(data)
-}
-
-func (t *WebSocketTransport) sendSubscribe(tables []string) error {
-	return t.sendMessage(WSSubscribe, map[string]any{"tables": tables})
+	return conn.write(ctx, data)
 }
 
 // handleMessage dispatches incoming messages to the appropriate handler.
 func (t *WebSocketTransport) handleMessage(msg WebSocketMessage) {
 	switch msg.Type {
-	case WSPullResponse, WSPushResponse:
-		// Correlated response — route to pending request.
-		if msg.RequestID != "" {
-			t.mu.Lock()
-			ch, ok := t.pending[msg.RequestID]
-			t.mu.Unlock()
-			if ok {
-				ch <- msg.Payload
+	case WSPullResponse, WSPushResponse, WSError:
+		reply := wsReply{payload: msg.Payload}
+		if msg.Type == WSError {
+			var detail struct {
+				Error string `json:"error"`
 			}
+			if err := json.Unmarshal(msg.Payload, &detail); err != nil || detail.Error == "" {
+				detail.Error = "invalid remote error response"
+			}
+			reply.err = fmt.Errorf("crdt: ws remote error: %s", detail.Error)
+		}
+		t.mu.Lock()
+		ch := t.pending[msg.RequestID]
+		delete(t.pending, msg.RequestID)
+		if ch != nil {
+			ch <- reply
+		} // buffered, delivered at most once; never closed
+		t.mu.Unlock()
+		if ch == nil && reply.err != nil {
+			t.logger.Error("crdt: ws remote error", log.String("error", reply.err.Error()))
 		}
 
 	case WSChange:
@@ -365,15 +488,12 @@ func (t *WebSocketTransport) handleMessage(msg WebSocketMessage) {
 	case WSPong:
 		// Pong received — connection is alive.
 
-	case WSError:
-		t.logger.Error("crdt: ws remote error", log.String("payload", string(msg.Payload)))
-
 	default:
 		t.logger.Warn("crdt: ws unknown message type", log.String("type", string(msg.Type)))
 	}
 }
 
-func (t *WebSocketTransport) pingLoop(ctx context.Context) {
+func (t *WebSocketTransport) pingLoop(ctx context.Context, conn *wsClientConn) {
 	ticker := time.NewTicker(t.pingInterval)
 	defer ticker.Stop()
 
@@ -385,7 +505,7 @@ func (t *WebSocketTransport) pingLoop(ctx context.Context) {
 			if t.closed.Load() {
 				return
 			}
-			if err := t.sendMessage(WSPing, nil); err != nil {
+			if err := t.sendOn(ctx, conn, WSPing, nil); err != nil {
 				t.logger.Error("crdt: ws ping failed", log.String("error", err.Error()))
 			}
 		}

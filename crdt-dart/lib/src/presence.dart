@@ -49,6 +49,8 @@ final class PresenceManager {
 
   final Map<String, Set<void Function()>> _topicListeners = {};
   final Set<void Function()> _globalListeners = {};
+  final Map<String, Object> _seedRequests = {};
+  final Map<String, Set<Map<String, PresenceEvent>>> _seeding = {};
 
   DateTime _now() => DateTime.fromMillisecondsSinceEpoch(_nowMs(), isUtc: true);
 
@@ -83,8 +85,16 @@ final class PresenceManager {
   ///
   /// A `join` or `update` stores the event's data (an empty object when it
   /// has none) stamped with the current time. A `leave` drops the peer. Any
-  /// other type changes nothing but still notifies, as crdt-js does.
+  /// `resync` clears stale state after server overflow. Other types notify only.
   void applyEvent(PresenceEvent event) {
+    if (event.type == 'resync') {
+      clear();
+      return;
+    }
+    for (final pending
+        in _seeding[event.topic] ?? <Map<String, PresenceEvent>>{}) {
+      pending[event.nodeId] = event;
+    }
     final topic = event.topic;
     final nodeId = event.nodeId;
     switch (event.type) {
@@ -161,6 +171,41 @@ final class PresenceManager {
     _notify([topic]);
   }
 
+  /// Fetches a snapshot while preserving concurrent stream events. Superseded
+  /// requests and requests completing after [clear] cannot restore stale peers.
+  Future<void> seedFrom(
+    String topic,
+    Future<List<PresenceState>> Function() fetch, {
+    bool Function()? current,
+  }) async {
+    final request = Object();
+    _seedRequests[topic] = request;
+    final pending = <String, PresenceEvent>{};
+    final buffers = _seeding.putIfAbsent(topic, () => {});
+    buffers.add(pending);
+    try {
+      final states = await fetch();
+      if (!(current?.call() ?? true) ||
+          !identical(_seedRequests[topic], request)) {
+        return;
+      }
+      final merged = {for (final state in states) state.nodeId: state};
+      for (final event in pending.values) {
+        if (event.type == 'leave') {
+          merged.remove(event.nodeId);
+        } else {
+          final live = getPeer(topic, event.nodeId);
+          if (live != null) merged[event.nodeId] = live;
+        }
+      }
+      seed(topic, merged.values.toList());
+    } finally {
+      buffers.remove(pending);
+      if (buffers.isEmpty) _seeding.remove(topic);
+      if (identical(_seedRequests[topic], request)) _seedRequests.remove(topic);
+    }
+  }
+
   /// Drops every peer whose last update is older than [maxAge], and notifies
   /// the topics that lost one.
   ///
@@ -192,6 +237,7 @@ final class PresenceManager {
   /// cannot read a peer of another that has not been notified yet. Listeners
   /// stay subscribed. Call it when the account changes.
   void clear() {
+    _seedRequests.clear();
     final topics = _peers.keys.toList();
     _peers.clear();
     _snapshots.clear();

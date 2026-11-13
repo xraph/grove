@@ -48,6 +48,8 @@ export class CRDTClient {
   private lastPresenceData = new Map<string, unknown>();
   private presenceWrites = new Map<string, Promise<void>>();
   private presenceEpochs = new Map<string, object>();
+  private presenceRefreshes = new Map<string, { epoch: object; again: boolean; promise: Promise<void> }>();
+  private presenceResyncNeeded = new Set<string>();
   private store: CRDTStore | null = null;
 
   constructor(config: CRDTClientConfig) {
@@ -168,6 +170,16 @@ export class CRDTClient {
    * Prefer this over calling client.presence.applyEvent() directly.
    */
   applyPresenceEvent(event: PresenceEvent): void {
+    if (event.type === "resync") {
+      this.presence.clear();
+      for (const topic of this.lastPresenceData.keys()) {
+        this.presenceResyncNeeded.add(topic);
+        // On failure the next heartbeat retries. Clear stale peers now so
+        // a dropped departure cannot leave a ghost visible during recovery.
+        void this.refreshPresence(topic).catch(() => {});
+      }
+      return;
+    }
     this.store?.pluginManager.dispatchOnPresenceEvent({
       type: event.type,
       nodeId: event.node_id,
@@ -231,8 +243,27 @@ export class CRDTClient {
   async refreshPresence(topic: string): Promise<void> {
     const epoch = this.presenceEpochs.get(topic);
     if (!epoch || !this.transport.getPresence) return;
-    await this.presence.seedFrom(topic, () => this.transport.getPresence!(topic),
-      () => this.presenceEpochs.get(topic) === epoch);
+    const pending = this.presenceRefreshes.get(topic);
+    if (pending?.epoch === epoch) {
+      // A second overflow invalidates the in-flight snapshot. Queue just
+      // one fresh fetch, rather than starting one request per cursor event.
+      pending.again = true;
+      return pending.promise;
+    }
+    const request = { epoch, again: false, promise: Promise.resolve() };
+    const refresh = async () => {
+      do {
+        request.again = false;
+        await this.presence.seedFrom(topic, () => this.transport.getPresence!(topic),
+          () => this.presenceEpochs.get(topic) === epoch && !request.again);
+      } while (request.again && this.presenceEpochs.get(topic) === epoch);
+      if (this.presenceEpochs.get(topic) === epoch) this.presenceResyncNeeded.delete(topic);
+    };
+    request.promise = refresh().finally(() => {
+      if (this.presenceRefreshes.get(topic) === request) this.presenceRefreshes.delete(topic);
+    });
+    this.presenceRefreshes.set(topic, request);
+    return request.promise;
   }
 
   /**
@@ -244,6 +275,8 @@ export class CRDTClient {
     this.stopHeartbeat(topic);
     this.lastPresenceData.delete(topic);
     this.presenceEpochs.delete(topic);
+    this.presenceRefreshes.delete(topic);
+    this.presenceResyncNeeded.delete(topic);
 
     if (this.transport.updatePresence) {
       await this.writePresence(topic, null);
@@ -286,7 +319,11 @@ export class CRDTClient {
     const timer = setInterval(() => {
       const lastData = this.lastPresenceData.get(topic);
       if (lastData !== undefined && this.transport.updatePresence && !this.presenceWrites.has(topic)) {
-        this.writePresence(topic, lastData).catch(() => {});
+        this.writePresence(topic, lastData).then(() => {
+          if (this.presenceResyncNeeded.has(topic) && !this.presenceRefreshes.has(topic)) {
+            return this.refreshPresence(topic);
+          }
+        }).catch(() => {});
       }
     }, interval);
 

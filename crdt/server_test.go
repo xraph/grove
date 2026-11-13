@@ -774,3 +774,24 @@ func TestSyncController_HandlePull_PageEdgeKeepsEveryNodesRow(t *testing.T) {
 	}
 	assert.Equal(t, map[string]bool{"a": true, "b": true}, nodes, "both nodes' rows at the edge position")
 }
+
+func TestPresenceOverflowSignalsResyncInsteadOfLosingDeparture(t *testing.T) {
+	ctrl := NewSyncController(newTestPlugin(), WithPresenceEnabled(true), WithPresenceBufferSize(1))
+	defer ctrl.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	slow, fast := ctrl.SubscribePresence(ctx), ctrl.SubscribePresence(ctx)
+	ctrl.Presence().Update(PresenceUpdate{NodeID: "peer", Topic: "room", Data: json.RawMessage(`{}`)})
+	require.Equal(t, PresenceJoin, (<-fast).Type)
+	ctrl.Presence().Remove("room", "peer")
+	require.Equal(t, PresenceLeave, (<-fast).Type)
+	require.Empty(t, ctrl.Presence().Get("room"))
+	require.Equal(t, PresenceEvent{Type: PresenceResync}, <-slow)
+	// Repeated overflow cannot evict the resync signal in favor of stale deltas.
+	for range 10 {
+		ctrl.Presence().Update(PresenceUpdate{NodeID: "new", Topic: "other", Data: json.RawMessage(`{}`)})
+	}
+	require.Equal(t, PresenceResync, (<-slow).Type)
+	ctrl.Presence().Remove("other", "new")
+	require.Equal(t, PresenceLeave, (<-slow).Type)
+}

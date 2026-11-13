@@ -103,7 +103,7 @@ final class PresenceEvent {
     this.data,
   });
 
-  /// `join`, `update` or `leave`.
+  /// `join`, `update`, `leave`, or `resync` (overflow: discard and re-fetch).
   final String type;
 
   /// The participant's node id.

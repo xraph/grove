@@ -69,7 +69,7 @@ const (
 ```json
 {
   "type": "pull_request",
-  "id": "req-1",
+  "request_id": "req-1",
   "payload": {
     "tables": ["documents"],
     "since": "1706000000000000000:0:node-1"
@@ -80,7 +80,7 @@ const (
 | Field | Type | Description |
 |-------|------|-------------|
 | `type` | `WSMessageType` | Message type for routing |
-| `id` | `string` | Optional request ID for correlating request/response pairs |
+| `request_id` | `string` | Optional request ID for correlating request/response pairs |
 | `payload` | `json.RawMessage` | Type-specific payload |
 
 ## Server Setup (Go)
@@ -161,6 +161,22 @@ http.HandleFunc("/sync/ws", func(w http.ResponseWriter, r *http.Request) {
 ```
 
 The conformance server in `crdt-dart/tool/conformance_server` uses the same pattern.
+
+## Client lifecycle (Go)
+
+`NewWebSocketTransport(conn, opts...)` wraps an established connection. Run
+`Start(ctx)` in a goroutine to receive responses and events. Pull, push,
+subscription and heartbeat writes share one writer, so the adapter does not
+need to support concurrent `WriteMessage` calls. Its `Close` must be safe during
+I/O and unblock both reads and writes.
+
+Cancelling `Start` closes that connection and stops its heartbeat. `Close()` also
+wakes pending requests and prevents reconnection. A disconnected request returns
+`ErrWebSocketClosed`; a correlated server error returns immediately to its caller.
+`StartWithReconnect(ctx, dial)` establishes a new connection after a disconnect,
+but never replays unfinished requests. If a request context expires during a
+blocked write, the connection is closed to interrupt that write; a request still
+waiting for the writer can cancel without closing the connection.
 
 ## Client Setup (TypeScript)
 
@@ -265,7 +281,9 @@ Client                                Server
 [presence_update]    ─────────────→   handlePresence
 ```
 
-Requests and responses are matched by `id`. Events (changes, presence) are pushed without an `id` and dispatched to the appropriate subscriber.
+Requests and responses are matched by `request_id` (abbreviated as `id` above).
+Events (changes, presence) are pushed without a request ID and dispatched to the
+appropriate subscriber.
 
 ## Subscribing to changes
 
@@ -288,22 +306,22 @@ WebSocket errors are delivered as error frames:
 ```json
 {
   "type": "error",
-  "id": "req-1",
+  "request_id": "req-1",
   "payload": {
-    "code": "SYNC_VERSION_MISMATCH",
-    "message": "Protocol version 2 required, got 1"
+    "error": "presence not enabled"
   }
 }
 ```
 
-On the client, these are converted to typed errors:
+Correlated error frames reject the pending request immediately. Uncorrelated
+errors are emitted to TypeScript stream listeners or logged by the Go client.
 
 ```typescript
 try {
     await client.pull();
 } catch (err) {
-    if (err instanceof SyncError) {
-        console.error("Sync error:", err.code, err.message);
+    if (err instanceof Error) {
+        console.error("Sync error:", err.message);
     }
 }
 ```

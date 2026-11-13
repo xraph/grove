@@ -77,17 +77,23 @@ export class CollaborationSession<T extends ParticipantData = ParticipantData> {
     return () => { this.listeners.delete(listener); };
   };
 
-  /** Publish initial state and discover peers already present. Idempotent. */
+  /** Publish and discover peers. Concurrent starts share a promise; failed
+   * starts may be retried without installing another stream listener. */
   start(): Promise<void> {
     if (this.closed) return Promise.reject(new Error("Collaboration session is closed"));
     if (this.starting) return this.starting;
-    this.active = true;
-    this.dirty = true;
-    this.unwatch = this.options.stream?.on(event => {
-      if (event.type === "connected") void this.refresh().catch(error => this.report(error));
+    if (!this.active) {
+      this.active = true;
+      this.unwatch = this.options.stream?.on(event => {
+        if (event.type === "connected") void this.refresh().catch(error => this.report(error));
+      });
+    }
+    const starting = this.refresh();
+    this.starting = starting;
+    void starting.catch(() => {
+      if (this.starting === starting) this.starting = null;
     });
-    this.starting = this.refresh();
-    return this.starting;
+    return starting;
   }
 
   /** Shallow-merge local presence; network writes are paced and coalesced. */
@@ -173,7 +179,12 @@ export class CollaborationSession<T extends ParticipantData = ParticipantData> {
       this.inFlight = null;
       this.schedule();
     };
-    void write.then(done, done);
+    void write.then(done, () => {
+      this.inFlight = null;
+      // Preserve the latest state for start/refresh/flush or the next update.
+      // Do not retry in a tight cursor-rate loop during an outage.
+      this.dirty = true;
+    });
     return write;
   }
 

@@ -310,7 +310,8 @@ export interface PresenceUpdate<T = Record<string, unknown>> {
 
 /** Presence event received via SSE. Mirrors Go crdt.PresenceEvent. */
 export interface PresenceEvent<T = Record<string, unknown>> {
-  type: "join" | "update" | "leave";
+  /** resync has empty node_id/topic and requires fresh presence snapshots. */
+  type: "join" | "update" | "leave" | "resync";
   node_id: string;
   topic: string;
   data?: T;

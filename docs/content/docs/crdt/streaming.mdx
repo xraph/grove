@@ -279,8 +279,16 @@ through the `presence_get` / `presence_snapshot` request exchange. This discover
 idle peers without a second HTTP connection. TypeScript `CollaborationSession`
 and `useRoom` refresh joined presence after a stream reconnect.
 
-Presence remains ephemeral and process-local. Subscriber buffers are bounded and
-can drop events under sustained overload; there is no durable presence replay.
-Use snapshots to reconcile after reconnect, and call `session.refresh()` for an
-explicit reconciliation during a long-lived connection. Document sync retains
-its separate HLC-based recovery path.
+Presence remains ephemeral and process-local. When a subscriber buffer fills,
+the server replaces its queued events with a `resync` presence event. Its topic,
+node ID and data are empty: loss may span multiple topics. TypeScript and Dart
+clients receiving this event through `applyPresenceEvent` clear cached peers
+immediately and refresh snapshots for joined topics. Repeated signals coalesce;
+a failed fetch retries on the next successful presence heartbeat. Live events
+received during the fetch take precedence over the snapshot.
+
+Custom consumers must handle `resync` by discarding cached peers and fetching
+snapshots for the topics they watch. Older clients that ignore it cannot recover
+from overflow automatically. There is no durable presence replay. Use snapshots
+after reconnect, and `session.refresh()` for explicit reconciliation. Document
+sync retains its separate HLC-based recovery path.

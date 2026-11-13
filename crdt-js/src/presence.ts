@@ -106,6 +106,10 @@ export class PresenceManager {
    * Updates local state and notifies listeners.
    */
   applyEvent(event: PresenceEvent): void {
+    if (event.type === "resync") {
+      this.clear();
+      return;
+    }
     const { topic, node_id: nodeID } = event;
     // Keep only each peer's latest event: cursor traffic must not grow an
     // unbounded replay buffer while a snapshot request is slow.

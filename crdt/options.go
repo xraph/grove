@@ -120,7 +120,8 @@ func WithPresenceTTL(d time.Duration) SyncControllerOption {
 }
 
 // WithPresenceBufferSize sets the buffer size for the presence event
-// broadcast channel. When the buffer is full, new events are dropped.
+// broadcast channel. Overflow replaces queued events with PresenceResync,
+// instructing the subscriber to discard cached peers and fetch snapshots.
 // Defaults to 256.
 func WithPresenceBufferSize(size int) SyncControllerOption {
 	return func(c *SyncController) { c.presenceBufferSize = size }

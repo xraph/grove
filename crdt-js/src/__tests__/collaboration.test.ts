@@ -167,3 +167,47 @@ it("does not starve peer discovery when movement continues during the initial wr
   expect(writes[1].data.cursor).toEqual({ x: 42, y: 0 });
   await session.close();
 });
+
+it("retries a rejected start once for concurrent callers without duplicating stream listeners", async () => {
+  vi.useFakeTimers();
+  const handlers = new Set<StreamEventHandler>();
+  const stream: StreamSubscription = {
+    connected: true, lastHLC: null, connect() {}, disconnect() {},
+    on: handler => { handlers.add(handler); return () => { handlers.delete(handler); }; },
+  };
+  const { session, transport, writes } = setup({ stream });
+  const original = transport.updatePresence!;
+  let fail = true;
+  transport.updatePresence = async update => {
+    if (fail) { fail = false; throw new Error("temporary disconnect"); }
+    await original(update);
+  };
+  const first = session.start();
+  expect(session.start()).toBe(first);
+  await expect(first).rejects.toThrow("temporary disconnect");
+  await vi.advanceTimersByTimeAsync(500);
+  expect(writes).toHaveLength(0); // no retry storm at cursor rate
+  session.updateCursor({ x: 7, y: 8 });
+  const retry = session.start();
+  expect(session.start()).toBe(retry);
+  await retry;
+  expect(writes).toHaveLength(1);
+  expect(writes[0].data.cursor).toEqual({ x: 7, y: 8 });
+  expect(transport.getPresence).toHaveBeenCalledTimes(1);
+  expect(handlers.size).toBe(1);
+  await session.close();
+  expect(handlers.size).toBe(0);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("can retry a start whose peer snapshot failed and rejects starts after close", async () => {
+  vi.useFakeTimers();
+  const { session, transport } = setup();
+  transport.getPresence = vi.fn().mockRejectedValueOnce(new Error("snapshot unavailable")).mockResolvedValue([]);
+  await expect(session.start()).rejects.toThrow("snapshot unavailable");
+  await session.start();
+  expect(transport.getPresence).toHaveBeenCalledTimes(2);
+  await session.close();
+  await expect(session.start()).rejects.toThrow("closed");
+  expect(vi.getTimerCount()).toBe(0);
+});

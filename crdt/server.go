@@ -818,7 +818,9 @@ func (c *SyncController) Logger() log.Logger {
 
 // SubscribePresence returns a channel that receives every presence event
 // until ctx is done. Each call gets its own channel, so every stream sees
-// every event. Returns nil if presence is disabled. The channel is never
+// every event until overflow. On overflow, queued events are replaced by a
+// PresenceResync marker: consumers must discard cached state and re-fetch
+// snapshots. Returns nil if presence is disabled. The channel is never
 // closed; stop reading it once ctx is done.
 func (c *SyncController) SubscribePresence(ctx context.Context) <-chan PresenceEvent {
 	if c.presence == nil {
@@ -850,8 +852,8 @@ func (c *SyncController) addPresenceSub() chan PresenceEvent {
 	return ch
 }
 
-// broadcastPresence hands event to every subscriber without blocking; a
-// subscriber whose buffer is full misses the event. The legacy shared
+// broadcastPresence hands event to every subscriber without blocking. A full
+// buffer is replaced with a resync marker so loss is never silent. The legacy shared
 // channel drops silently once full, since it may have no reader at all.
 func (c *SyncController) broadcastPresence(event PresenceEvent) {
 	select {
@@ -864,7 +866,16 @@ func (c *SyncController) broadcastPresence(event PresenceEvent) {
 		select {
 		case ch <- event:
 		default:
-			c.logger.Warn("crdt: presence event dropped (channel full)",
+			// No other producer can write while presenceMu is held. Readers
+			// can only free space, so the replacement marker cannot block.
+			for len(ch) > 0 {
+				select {
+				case <-ch:
+				default:
+				}
+			}
+			ch <- PresenceEvent{Type: PresenceResync}
+			c.logger.Warn("crdt: presence subscriber requires resync (channel full)",
 				log.String("topic", event.Topic),
 				log.String("node_id", event.NodeID),
 			)
