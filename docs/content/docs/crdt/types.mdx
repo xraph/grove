@@ -370,11 +370,14 @@ After sync: stats.viewCount = 8 (counter merge)
 
 ```go
 type DocumentCRDTState struct {
-    Fields map[string]*FieldState `json:"fields"`
+    Fields   map[string]*FieldState `json:"fields"`
+    ResetHLC *HLC                   `json:"reset_hlc,omitempty"`
 }
 ```
 
 Each entry in `Fields` is keyed by the dot-notation path and holds a standard `FieldState` with its own CRDT type (`TypeLWW`, `TypeCounter`, `TypeSet`, or `TypeList`).
+
+Assigning a document through an ORM model replaces its whole value. The snapshot carries `reset_hlc`, and merge discards path states older than that clock. This keeps removed fields from returning when an offline peer reconnects, while later path edits still merge. You need Go, TypeScript and Dart clients that preserve this marker before relying on whole-document replacements; older clients discard it.
 
 ### Usage
 

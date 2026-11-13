@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/xraph/go-utils/log"
@@ -84,11 +85,13 @@ func NewSyncController(plugin *Plugin, opts ...SyncControllerOption) *SyncContro
 		c.presenceSubs = make(map[chan PresenceEvent]struct{})
 		c.presenceLegacy = make(chan PresenceEvent, bufSize)
 		c.presence = NewPresenceManager(c.presenceTTL, c.broadcastPresence, c.logger)
+		c.presence.validation = c.validation
 	}
 
 	// Initialize room manager if enabled (requires presence).
 	if c.roomManager != nil && c.presence != nil {
 		c.roomManager = NewRoomManager(c.presence, c.logger)
+		c.roomManager.validation = c.validation
 	}
 
 	return c
@@ -222,13 +225,6 @@ func cursorSuccessor(h HLC) HLC {
 //
 // What writeMu does not cover:
 //
-//   - Local writes. Plugin.AfterMutation reads, merges and writes the
-//     server's own rows without the lock and without an allocated
-//     position, so a push merging into the same row at the same moment can
-//     still lose one of the two merges. The lost-update guarantee is
-//     between pushes (and Syncer merges) only. Taking writeMu there would
-//     deadlock any merge or metadata hook that writes a CRDT table through
-//     grove, because those hooks run under it.
 //   - Other instances. Two servers sharing one database each have their
 //     own writeMu and allocator, so their positions can interleave out of
 //     commit order, and a pull from one can pass a position the other has
@@ -244,6 +240,20 @@ type cursorAllocator struct {
 
 	mu   sync.Mutex
 	high HLC
+}
+
+// A callback may synchronously mutate another model through the same plugin.
+// Carry the active write scope through its context to avoid taking the lock twice.
+type cursorWriteScope struct{ active atomic.Bool }
+
+func (a *cursorAllocator) lock(ctx context.Context) (locked context.Context, unlock func()) {
+	if scope, ok := ctx.Value(a).(*cursorWriteScope); ok && scope.active.Load() {
+		return ctx, func() {}
+	}
+	a.writeMu.Lock()
+	scope := &cursorWriteScope{}
+	scope.active.Store(true)
+	return context.WithValue(ctx, a, scope), func() { scope.active.Store(false); a.writeMu.Unlock() }
 }
 
 // observe records a cursor position this process handed out to a client.
@@ -505,8 +515,8 @@ func (c *SyncController) mergePushedLocked(ctx context.Context, batch *cursorBat
 	// Serialize the read-merge-write with the cursor allocation, so two
 	// pushes to one field cannot lose each other's merge and positions
 	// commit in allocation order.
-	c.plugin.cursors.writeMu.Lock()
-	defer c.plugin.cursors.writeMu.Unlock()
+	ctx, unlock := c.plugin.cursors.lock(ctx)
+	defer unlock()
 
 	// A tombstoned document-type change carrying a value is a PATH
 	// delete inside the nested document, not a record delete. It
@@ -729,6 +739,12 @@ func (c *SyncController) HandlePresenceUpdate(ctx context.Context, update *Prese
 		return nil, fmt.Errorf("crdt: presence update requires topic")
 	}
 
+	if c.validation != nil && string(update.Data) != "null" {
+		if err := c.validation.ValidatePresenceData(update.Data); err != nil {
+			return nil, err
+		}
+	}
+
 	// Run BeforePresenceUpdate plugin hooks.
 	intercepted, presenceErr := c.pluginChain.DispatchBeforePresenceUpdate(ctx, update)
 	if presenceErr != nil {
@@ -738,6 +754,11 @@ func (c *SyncController) HandlePresenceUpdate(ctx context.Context, update *Prese
 		return nil, fmt.Errorf("crdt: presence update rejected by plugin")
 	}
 	update = intercepted
+	if c.validation != nil && string(update.Data) != "null" {
+		if err := c.validation.ValidatePresenceData(update.Data); err != nil {
+			return nil, err
+		}
+	}
 
 	// A null data payload means the client is leaving.
 	if update.Data == nil || string(update.Data) == "null" {

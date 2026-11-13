@@ -4,44 +4,77 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"reflect"
+	"sort"
 
 	"github.com/xraph/grove/hook"
 )
 
 // Ensure Plugin implements the hook interfaces at compile time.
 var (
+	_ hook.PreMutationHook  = (*Plugin)(nil)
 	_ hook.PostMutationHook = (*Plugin)(nil)
 	_ hook.PreQueryHook     = (*Plugin)(nil)
 )
 
+// BeforeMutation refuses expression-based writes whose resulting values are
+// unavailable to the CRDT hook. Model writes carry their schema and values.
+func (p *Plugin) BeforeMutation(_ context.Context, qc *hook.QueryContext, _ any) (*hook.HookResult, error) {
+	if qc.RawMutation {
+		model := *qc
+		model.Columns = nil
+		if len(extractCRDTFields(&model)) > 0 {
+			return nil, fmt.Errorf("crdt: expression mutations require explicit CRDT operations or model values")
+		}
+	}
+	return &hook.HookResult{Decision: hook.Allow}, nil
+}
+
 // AfterMutation is called after every INSERT, UPDATE, or DELETE on a
 // CRDT-enabled table. It writes CRDT metadata to the shadow table.
-func (p *Plugin) AfterMutation(ctx context.Context, qc *hook.QueryContext, data, _ any) error {
+func (p *Plugin) AfterMutation(ctx context.Context, qc *hook.QueryContext, data, result any) error {
 	if p.metadata == nil {
 		return nil
 	}
-
-	// Determine which fields have CRDT tags by checking PrivacyColumns
-	// (reusing the existing column metadata mechanism).
-	crdtFields := extractCRDTFields(qc)
-	if len(crdtFields) == 0 {
+	if affected, ok := result.(interface{ RowsAffected() (int64, error) }); ok {
+		if count, err := affected.RowsAffected(); err == nil && count == 0 {
+			return nil
+		}
+	}
+	value := modelValue(reflect.ValueOf(data))
+	if value.IsValid() && (value.Kind() == reflect.Slice || value.Kind() == reflect.Array) {
+		for i := 0; i < value.Len(); i++ {
+			if err := p.AfterMutation(ctx, qc, value.Index(i).Interface(), nil); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
-
-	pk := extractPK(qc)
-	if pk == "" {
+	local := *qc
+	if local.ModelType == nil && value.IsValid() {
+		local.ModelType = value.Type()
+	}
+	fields := extractCRDTFields(&local)
+	if len(fields) == 0 {
 		return nil
 	}
-
-	clock := p.clock.Now()
-
-	switch qc.Operation {
+	pk, err := extractMutationPK(&local, data, result)
+	if err != nil {
+		return err
+	}
+	ctx, unlock := p.cursors.lock(ctx)
+	defer unlock()
+	clock, err := p.newCursorBatch(p.metadata).allocate(ctx, local.Table, HLC{})
+	if err != nil {
+		return fmt.Errorf("crdt: allocate mutation clock: %w", err)
+	}
+	switch local.Operation {
 	case hook.OpInsert, hook.OpUpdate:
-		return p.writeFieldStates(ctx, qc.Table, pk, crdtFields, data, clock)
+		return p.writeFieldStates(ctx, local.Table, pk, fields, data, clock)
 	case hook.OpDelete:
-		return p.metadata.WriteTombstone(ctx, qc.Table, pk, clock, p.nodeID)
+		return p.metadata.WriteTombstoneAt(ctx, local.Table, pk, clock, p.nodeID, clock)
 	}
-
 	return nil
 }
 
@@ -62,6 +95,15 @@ func (p *Plugin) writeFieldStates(ctx context.Context, table, pk string, fields 
 
 	for fieldName, crdtType := range fields {
 		value, hasValue := values[fieldName]
+		if !hasValue {
+			continue
+		}
+		if (crdtType == TypeList || crdtType == TypeSet) && value != nil {
+			v := modelValue(reflect.ValueOf(value))
+			if v.IsValid() && v.Kind() != reflect.Slice && v.Kind() != reflect.Array {
+				return fmt.Errorf("crdt: %s field %s requires a slice value", crdtType, fieldName)
+			}
+		}
 
 		var fs *FieldState
 		switch crdtType {
@@ -92,7 +134,10 @@ func (p *Plugin) writeFieldStates(ctx context.Context, table, pk string, fields 
 			}
 
 			if hasValue {
-				delta := toInt64(value)
+				delta, err := toInt64(value)
+				if err != nil {
+					return fmt.Errorf("crdt: counter field %s: %w", fieldName, err)
+				}
 				currentValue := counter.Value()
 				diff := delta - currentValue
 				if diff > 0 {
@@ -119,8 +164,22 @@ func (p *Plugin) writeFieldStates(ctx context.Context, table, pk string, fields 
 			}
 
 			if hasValue {
-				// Add new elements from the current value.
 				elements := toSlice(value)
+				desired := make(map[string]bool, len(elements))
+				for _, elem := range elements {
+					key, err := marshalElement(elem)
+					if err != nil {
+						return fmt.Errorf("crdt: encode set element: %w", err)
+					}
+					desired[key] = true
+				}
+				for _, elem := range set.Elements() {
+					if !desired[string(elem)] {
+						if err := set.Remove(elem); err != nil {
+							return fmt.Errorf("crdt: remove set element: %w", err)
+						}
+					}
+				}
 				for _, elem := range elements {
 					if err := set.Add(elem, p.nodeID, clock); err != nil {
 						return fmt.Errorf("crdt: add set element: %w", err)
@@ -129,6 +188,66 @@ func (p *Plugin) writeFieldStates(ctx context.Context, table, pk string, fields 
 			}
 
 			fs = set.ToFieldState(clock, p.nodeID)
+
+		case TypeList:
+			existing, err := p.metadata.ReadState(ctx, table, pk)
+			if err != nil {
+				return fmt.Errorf("crdt: read list state: %w", err)
+			}
+			list := NewRGAListState()
+			if existing != nil {
+				list = ListFromFieldState(existing.Fields[fieldName])
+			}
+			if list == nil {
+				list = NewRGAListState()
+			}
+			elements := toSlice(value)
+			ids := list.NodeIDs()
+			// Preserve a common prefix so unchanged items retain their identities.
+			keep := 0
+			for keep < len(ids) && keep < len(elements) {
+				raw, err := json.Marshal(elements[keep])
+				if err != nil {
+					return fmt.Errorf("crdt: encode list element: %w", err)
+				}
+				if string(list.Nodes[rgaNodeKey(ids[keep])].Value) != string(raw) {
+					break
+				}
+				keep++
+			}
+			for _, id := range ids[keep:] {
+				list.Delete(id)
+			}
+			parent := HLC{}
+			if keep > 0 {
+				parent = ids[keep-1]
+			}
+			at := clock
+			for _, elem := range elements[keep:] {
+				at = cursorSuccessor(at)
+				if err := list.Insert(elem, parent, p.nodeID, at); err != nil {
+					return fmt.Errorf("crdt: insert list element: %w", err)
+				}
+				parent = at
+			}
+			fs = list.ToFieldState(at, p.nodeID)
+		case TypeDocument:
+			raw, err := json.Marshal(value)
+			if err != nil {
+				return fmt.Errorf("crdt: encode document: %w", err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				return fmt.Errorf("crdt: document requires an object: %w", err)
+			}
+			doc := NewDocumentCRDTState()
+			doc.ResetHLC = &clock
+			for path, v := range fields {
+				if err := doc.SetField(path, v, clock, p.nodeID); err != nil {
+					return fmt.Errorf("crdt: set document path: %w", err)
+				}
+			}
+			fs = doc.ToFieldState(clock, p.nodeID)
 
 		case TypeText:
 			// For text, read existing state and reconcile the whole-string
@@ -168,97 +287,65 @@ func (p *Plugin) writeFieldStates(ctx context.Context, table, pk string, fields 
 		}
 	}
 
-	return p.metadata.WriteFieldStatesAtomic(ctx, table, pk, pending)
+	if len(pending) == 0 {
+		return nil
+	}
+	own := clock
+	for _, fs := range pending {
+		if fs.HLC.After(own) {
+			own = fs.HLC
+		}
+	}
+	names := make([]string, 0, len(pending))
+	for name := range pending {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	cursors := make(map[string]HLC, len(pending))
+	batch := p.newCursorBatch(p.metadata)
+	for _, name := range names {
+		cursor, err := batch.allocate(ctx, table, own)
+		if err != nil {
+			return fmt.Errorf("crdt: allocate field cursor: %w", err)
+		}
+		cursors[name] = cursor
+	}
+	return p.metadata.writeFieldStatesAtomic(ctx, table, pk, pending, cursors)
 }
 
-// extractCRDTFields extracts field names and their CRDT types from the
-// query context. It uses the Values map where CRDT configuration is stored.
-func extractCRDTFields(qc *hook.QueryContext) map[string]CRDTType {
-	fields := make(map[string]CRDTType)
-	if qc.Values == nil {
-		return fields
+// toInt64 accepts integer model values and lossless JSON numbers.
+func toInt64(value any) (int64, error) {
+	if number, ok := value.(json.Number); ok {
+		return number.Int64()
 	}
-
-	if crdtMap, ok := qc.Values["_crdt_fields"]; ok {
-		if m, ok := crdtMap.(map[string]string); ok {
-			for name, typ := range m {
-				if ValidCRDTType(typ) {
-					fields[name] = CRDTType(typ)
-				}
+	v := modelValue(reflect.ValueOf(value))
+	if v.IsValid() {
+		switch v.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return v.Int(), nil
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			if n := v.Uint(); n <= math.MaxInt64 {
+				return int64(n), nil
+			}
+		case reflect.Float32, reflect.Float64:
+			n := v.Float()
+			if n >= math.MinInt64 && n < float64(math.MaxInt64) && math.Trunc(n) == n {
+				return int64(n), nil
 			}
 		}
 	}
-
-	return fields
-}
-
-// extractPK extracts the primary key value from the query context.
-func extractPK(qc *hook.QueryContext) string {
-	if qc.Values != nil {
-		if pk, ok := qc.Values["_crdt_pk"]; ok {
-			return fmt.Sprintf("%v", pk)
-		}
-	}
-	return ""
-}
-
-// extractFieldValues extracts field values from the mutation data.
-func extractFieldValues(data any) map[string]any {
-	values := make(map[string]any)
-	if data == nil {
-		return values
-	}
-
-	// Try to extract from a map.
-	if m, ok := data.(map[string]any); ok {
-		return m
-	}
-
-	// For struct types, use JSON round-trip as fallback.
-	raw, err := json.Marshal(data)
-	if err != nil {
-		return values // Non-serializable data; CRDT fields will be skipped.
-	}
-	if err := json.Unmarshal(raw, &values); err != nil {
-		return values // Struct-to-map conversion failed; CRDT fields will be skipped.
-	}
-	return values
-}
-
-// toInt64 converts a value to int64.
-func toInt64(v any) int64 {
-	switch val := v.(type) {
-	case int:
-		return int64(val)
-	case int32:
-		return int64(val)
-	case int64:
-		return val
-	case float64:
-		return int64(val)
-	case json.Number:
-		n, err := val.Int64()
-		if err != nil {
-			return 0
-		}
-		return n
-	default:
-		return 0
-	}
+	return 0, fmt.Errorf("crdt: counter requires an integer in the int64 range, got %v", value)
 }
 
 // toSlice converts a value to a slice of any.
 func toSlice(v any) []any {
-	switch val := v.(type) {
-	case []any:
-		return val
-	case []string:
-		result := make([]any, len(val))
-		for i, s := range val {
-			result[i] = s
-		}
-		return result
-	default:
+	value := modelValue(reflect.ValueOf(v))
+	if !value.IsValid() || (value.Kind() != reflect.Slice && value.Kind() != reflect.Array) {
 		return nil
 	}
+	result := make([]any, value.Len())
+	for i := range result {
+		result[i] = value.Index(i).Interface()
+	}
+	return result
 }

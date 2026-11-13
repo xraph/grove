@@ -55,6 +55,8 @@ export interface ListOperation {
 
 /** Nested document CRDT state. Mirrors Go crdt.DocumentCRDTState. */
 export interface DocumentCRDTState {
+  /** Whole-document replacement floor. Older path states cannot return on replay. */
+  reset_hlc?: HLC;
   fields: Record<string, FieldState>;
 }
 

@@ -1277,7 +1277,7 @@ final class CrdtStore {
           fields[path] = inner.copyWith(hlc: hlc, nodeId: hlc.node);
         }
         return documentFieldState(
-          DocumentCrdtState(fields),
+          DocumentCrdtState(fields, fs.docState!.resetHlc),
           fieldHlc,
           fieldNode,
         );
@@ -1544,8 +1544,9 @@ final class CrdtStore {
             next(
               list: ListOperation(
                 ListOpType.move,
-                nodeId: op.nodeId,
+                nodeId: c.hlc,
                 parentId: node.parentId,
+                value: node.value,
               ),
             ),
           ];

@@ -83,6 +83,10 @@ db.Hooks().AddHook(plugin, hook.Scope{
 Without `SetExecutor`, nothing fails loudly: mutations simply record no CRDT state, and `Inspect` and the sync controller have no store to read from. The metadata store writes PostgreSQL-style `$1` placeholders, so the adapter above works as-is on PostgreSQL. For SQLite, rewrite `$n` to `?n` in the adapter.
 </Callout>
 
+The hook reads CRDT tags, database column names and primary keys from your model. You do not need to populate private query-context values. Model updates restricted with `Column` or `OmitZero` track only the columns written to the database. An update that affects no rows creates no sync state.
+
+Use model values for tracked mutations. Raw SQL `Set` and `Value` expressions on a CRDT model are rejected before execution because the hook cannot read their result. Supply each record's primary key for bulk inserts. A single generated key can be read from `LastInsertId` when the driver supports it; otherwise, supply the key yourself.
+
 The `NodeID` must be unique across all nodes in the sync cluster. Use descriptive names like `"cloud-us-east"`, `"edge-store-42"`, or `"browser-abc123"`.
 
 ## Shadow Tables

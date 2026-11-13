@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 )
 
 // MetadataStore reads and writes CRDT metadata in shadow tables.
@@ -497,10 +498,28 @@ func rowChange(table string, row *MetadataRow) ChangeRecord {
 // WriteFieldStatesAtomic writes multiple field states in a single transaction
 // when the executor supports it. Falls back to individual writes otherwise.
 func (ms *MetadataStore) WriteFieldStatesAtomic(ctx context.Context, table, pk string, fields map[string]*FieldState) error {
+	return ms.writeFieldStatesAtomic(ctx, table, pk, fields, nil)
+}
+
+func (ms *MetadataStore) writeFieldStatesAtomic(ctx context.Context, table, pk string, fields map[string]*FieldState, cursors map[string]HLC) error {
+	write := func(store *MetadataStore, field string, fs *FieldState) error {
+		if cursor, ok := cursors[field]; ok {
+			return store.WriteFieldStateAt(ctx, table, pk, field, fs, cursor)
+		}
+		return store.WriteFieldState(ctx, table, pk, field, fs)
+	}
+
+	names := make([]string, 0, len(fields))
+	for field := range fields {
+		names = append(names, field)
+	}
+	sort.Strings(names)
+
 	if len(fields) <= 1 {
 		// Single field — no transaction needed.
-		for field, fs := range fields {
-			if err := ms.WriteFieldState(ctx, table, pk, field, fs); err != nil {
+		for _, field := range names {
+			fs := fields[field]
+			if err := write(ms, field, fs); err != nil {
 				return err
 			}
 		}
@@ -510,8 +529,9 @@ func (ms *MetadataStore) WriteFieldStatesAtomic(ctx context.Context, table, pk s
 	txExec, ok := ms.executor.(TxExecutor)
 	if !ok {
 		// Executor doesn't support transactions — fall back to individual writes.
-		for field, fs := range fields {
-			if err := ms.WriteFieldState(ctx, table, pk, field, fs); err != nil {
+		for _, field := range names {
+			fs := fields[field]
+			if err := write(ms, field, fs); err != nil {
 				return err
 			}
 		}
@@ -524,8 +544,9 @@ func (ms *MetadataStore) WriteFieldStatesAtomic(ctx context.Context, table, pk s
 	}
 
 	txStore := &MetadataStore{executor: tx}
-	for field, fs := range fields {
-		if err := txStore.WriteFieldState(ctx, table, pk, field, fs); err != nil {
+	for _, field := range names {
+		fs := fields[field]
+		if err := write(txStore, field, fs); err != nil {
 			rErr := tx.Rollback()
 			if rErr != nil {
 				return rErr

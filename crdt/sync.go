@@ -330,8 +330,8 @@ func (s *Syncer) mergeRemoteChange(ctx context.Context, batch *cursorBatch, chan
 // applyRemoteChange does mergeRemoteChange's read-merge-write under the
 // plugin's cursor write lock.
 func (s *Syncer) applyRemoteChange(ctx context.Context, batch *cursorBatch, change *ChangeRecord) error {
-	s.plugin.cursors.writeMu.Lock()
-	defer s.plugin.cursors.writeMu.Unlock()
+	ctx, unlock := s.plugin.cursors.lock(ctx)
+	defer unlock()
 
 	// A tombstoned document-type change carrying a value is a PATH delete
 	// inside the nested document, not a record delete. It falls through to

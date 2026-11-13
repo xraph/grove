@@ -19,6 +19,104 @@ final class RegressionTransport implements Transport {
 
 void main() {
   group('collaboration and sync regressions', () {
+    test('undo and redo of a list move target its replacement node', () async {
+      final store = CrdtStore('local', HybridClock('local'));
+      final peer = CrdtStore('peer', HybridClock('peer'));
+      addTearDown(store.dispose);
+      addTearDown(peer.dispose);
+      await Future.wait([store.ready, peer.ready]);
+      final a = store.insertIntoList('docs', '1', 'items', 'a')!;
+      final b = store.insertIntoList(
+        'docs',
+        '1',
+        'items',
+        'b',
+        afterId: a.hlc,
+      )!;
+      var rewrite = true;
+      store.use(
+        FnPlugin(
+          'move',
+          onBeforeWrite: (event) {
+            if (!rewrite) return event;
+            rewrite = false;
+            return WriteEvent(
+              table: event.table,
+              pk: event.pk,
+              field: event.field,
+              crdtType: event.crdtType,
+              value: 'a',
+              previousState: event.previousState,
+              change: event.change.copyWith(
+                listOp: ListOperation(
+                  ListOpType.move,
+                  nodeId: a.hlc,
+                  parentId: b.hlc,
+                  value: const JsonValue('a'),
+                ),
+              ),
+            );
+          },
+        ),
+      );
+      store.insertIntoList('docs', '1', 'items', 'ignored');
+      expect(store.getDocument('docs', '1')?['items'], ['b', 'a']);
+      expect(store.undo(), isTrue);
+      expect(store.getDocument('docs', '1')?['items'], ['a', 'b']);
+      expect(store.redo(), isTrue);
+      expect(store.getDocument('docs', '1')?['items'], ['b', 'a']);
+      peer.applyChanges(store.getPendingChanges());
+      expect(peer.getDocument('docs', '1')?['items'], ['b', 'a']);
+    });
+    test(
+      'document replacement survives stale snapshots and wire round trips',
+      () async {
+        HLC stamp(int ts) => HLC(BigInt.from(ts), 0, 'peer');
+        FieldState leaf(int ts, Object? value) => FieldState(
+          type: CrdtType.lww,
+          hlc: stamp(ts),
+          nodeId: 'peer',
+          value: JsonValue(value),
+        );
+        final old = DocumentCrdtState({
+          'gone': leaf(100, true),
+          'keep': leaf(100, 'old'),
+        });
+        final reset = DocumentCrdtState({'keep': leaf(200, 'new')}, stamp(200));
+        for (final merged in [
+          mergeDocument(old, reset),
+          mergeDocument(reset, old),
+        ]) {
+          final decoded = DocumentCrdtState.fromJson(merged.toJson());
+          expect(documentResolve(mergeDocument(decoded, old)), {'keep': 'new'});
+          expect(decoded.resetHlc, stamp(200));
+        }
+        final store = CrdtStore('local', HybridClock('local'));
+        addTearDown(store.dispose);
+        await store.ready;
+        ChangeRecord change(DocumentCrdtState state, int ts) => ChangeRecord(
+          table: 'docs',
+          pk: '1',
+          field: 'meta',
+          crdtType: CrdtType.document,
+          hlc: stamp(ts),
+          nodeId: 'peer',
+          state: FieldState(
+            type: CrdtType.document,
+            hlc: stamp(ts),
+            nodeId: 'peer',
+            docState: state,
+          ),
+        );
+        store.applyChanges([change(old, 100), change(reset, 200)]);
+        store.setDocumentField('docs', '1', 'meta', 'local', true);
+        store.applyChanges([change(old, 100)]);
+        expect(store.getDocument('docs', '1')?['meta'], {
+          'keep': 'new',
+          'local': true,
+        });
+      },
+    );
     for (final kind in ['counter', 'set', 'list', 'text', 'document']) {
       test('$kind undo and redo preserve remote edits and converge', () async {
         final local = CrdtStore('local', HybridClock('local'));

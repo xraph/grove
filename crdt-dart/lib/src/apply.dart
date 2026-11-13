@@ -308,7 +308,7 @@ FieldState _applyDocument(FieldState? local, ChangeRecord c) {
         DocumentCrdtState({
           for (final e in doc.fields.entries)
             if (e.key != op.path && !e.key.startsWith(prefix)) e.key: e.value,
-        }),
+        }, doc.resetHlc),
         hlc,
         node,
       );

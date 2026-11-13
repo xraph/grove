@@ -218,9 +218,19 @@ DocumentCrdtState mergeDocument(
   DocumentCrdtState remote,
 ) {
   final out = <String, FieldState>{};
+  final reset = local.resetHlc == null
+      ? remote.resetHlc
+      : remote.resetHlc != null && remote.resetHlc!.isAfter(local.resetHlc!)
+      ? remote.resetHlc
+      : local.resetHlc;
   for (final path in <String>{...local.fields.keys, ...remote.fields.keys}) {
-    final l = local.fields[path];
-    final r = remote.fields[path];
+    var l = local.fields[path];
+    var r = remote.fields[path];
+    if (reset != null) {
+      if (l != null && reset.isAfter(l.hlc)) l = null;
+      if (r != null && reset.isAfter(r.hlc)) r = null;
+    }
+    if (l == null && r == null) continue;
     try {
       out[path] = mergeField(l, r);
     } on CrdtMergeError {
@@ -228,7 +238,7 @@ DocumentCrdtState mergeDocument(
       out[path] = r!.hlc.isAfter(l!.hlc) ? r : l;
     }
   }
-  return DocumentCrdtState(out);
+  return DocumentCrdtState(out, reset);
 }
 
 /// The nested materialised view of a document. Port of Go `Resolve`.

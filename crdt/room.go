@@ -23,11 +23,12 @@ import (
 //   - Batch join/leave operations
 //   - Room listing and querying
 type RoomManager struct {
-	mu       sync.RWMutex
-	presence *PresenceManager
-	rooms    map[string]*Room // roomID → Room
-	hooks    []RoomHook
-	logger   log.Logger
+	validation *ValidationConfig
+	mu         sync.RWMutex
+	presence   *PresenceManager
+	rooms      map[string]*Room // roomID → Room
+	hooks      []RoomHook
+	logger     log.Logger
 }
 
 // Room represents a collaboration space with metadata and participants.
@@ -183,6 +184,12 @@ func (rm *RoomManager) CreateRoom(ctx context.Context, id, roomType string, opts
 		opt(room)
 	}
 
+	if rm.validation != nil {
+		if err := rm.validation.ValidateRoomMetadata(room.Metadata); err != nil {
+			rm.mu.Unlock()
+			return nil, err
+		}
+	}
 	rm.rooms[id] = cloneRoom(room)
 	hooks := append([]RoomHook(nil), rm.hooks...)
 	result := cloneRoom(room)
@@ -260,6 +267,11 @@ func (rm *RoomManager) ListRoomsByType(roomType string) []RoomInfo {
 
 // JoinRoom adds a participant to a room. Creates the room if it doesn't exist.
 func (rm *RoomManager) JoinRoom(ctx context.Context, roomID, nodeID string, data json.RawMessage) error {
+	if rm.validation != nil {
+		if err := rm.validation.ValidatePresenceData(data); err != nil {
+			return err
+		}
+	}
 	rm.mu.Lock()
 
 	room, ok := rm.rooms[roomID]
@@ -388,6 +400,11 @@ func (rm *RoomManager) SetRoomMetadata(roomID string, metadata any) error {
 	raw, err := json.Marshal(metadata)
 	if err != nil {
 		return fmt.Errorf("crdt: marshal metadata: %w", err)
+	}
+	if rm.validation != nil {
+		if err := rm.validation.ValidateRoomMetadata(raw); err != nil {
+			return err
+		}
 	}
 	room.Metadata = raw
 	return nil

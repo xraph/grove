@@ -8,6 +8,7 @@ import (
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/hook"
 	"github.com/xraph/grove/internal/pool"
+	"github.com/xraph/grove/internal/queryctx"
 	"github.com/xraph/grove/schema"
 )
 
@@ -228,7 +229,13 @@ func (q *UpdateQuery) buildUpdateHookContext() *hook.QueryContext {
 	if q.table != nil {
 		tableName = q.table.Name
 	}
+	var columns []string
+	if q.table != nil {
+		columns = queryctx.MutationColumns(q.updatableFields(), q.model, q.omitZero)
+	}
 	return &hook.QueryContext{
+		Columns:       columns,
+		RawMutation:   len(q.setClauses) > 0,
 		Operation:     hook.OpUpdate,
 		Table:         tableName,
 		ModelType:     modelType,

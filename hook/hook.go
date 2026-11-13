@@ -94,6 +94,10 @@ type QueryContext struct {
 	// Columns being accessed (SELECT) or mutated (INSERT/UPDATE).
 	Columns []string
 
+	// RawMutation reports that expressions, rather than model values, determine
+	// the stored values. Hooks must not treat the model as the resulting row.
+	RawMutation bool
+
 	// PrivacyColumns maps columns to their grove:",privacy:X" classification.
 	// Only populated for columns that have a privacy tag.
 	PrivacyColumns map[string]string

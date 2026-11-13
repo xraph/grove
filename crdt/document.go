@@ -14,6 +14,10 @@ type DocumentCRDTState struct {
 	// Paths use "." as the separator for nesting.
 	// Example: "address.city" → LWW, "tags" → Set, "views" → Counter.
 	Fields map[string]*FieldState `json:"fields"`
+
+	// ResetHLC marks a whole-document replacement. Older path states are
+	// discarded during merge so removed fields cannot return on replay.
+	ResetHLC *HLC `json:"reset_hlc,omitempty"`
 }
 
 // NewDocumentCRDTState creates an empty document CRDT state.
@@ -149,6 +153,10 @@ func MergeDocument(local, remote *DocumentCRDTState) (*DocumentCRDTState, error)
 	}
 
 	merged := NewDocumentCRDTState()
+	merged.ResetHLC = local.ResetHLC
+	if remote.ResetHLC != nil && (merged.ResetHLC == nil || remote.ResetHLC.After(*merged.ResetHLC)) {
+		merged.ResetHLC = remote.ResetHLC
+	}
 	engine := NewMergeEngine()
 
 	// Collect all paths.
@@ -163,6 +171,17 @@ func MergeDocument(local, remote *DocumentCRDTState) (*DocumentCRDTState, error)
 	for path := range allPaths {
 		localFS := local.Fields[path]
 		remoteFS := remote.Fields[path]
+		if merged.ResetHLC != nil {
+			if localFS != nil && merged.ResetHLC.After(localFS.HLC) {
+				localFS = nil
+			}
+			if remoteFS != nil && merged.ResetHLC.After(remoteFS.HLC) {
+				remoteFS = nil
+			}
+		}
+		if localFS == nil && remoteFS == nil {
+			continue
+		}
 
 		result, err := engine.MergeField(localFS, remoteFS)
 		if err != nil {

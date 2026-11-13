@@ -1879,6 +1879,7 @@ export class CRDTStore {
       hlc,
       node_id: this.nodeID,
       doc_state: {
+        ...docState,
         fields: withEntry(docState.fields, path, {
           type: "lww",
           hlc,
@@ -1907,6 +1908,7 @@ export class CRDTStore {
       ...existing,
       hlc,
       doc_state: {
+        ...existing.doc_state,
         fields: withoutKeys(existing.doc_state.fields, (k) => k === path),
       },
     }));

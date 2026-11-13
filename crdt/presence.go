@@ -14,15 +14,16 @@ import (
 // State is kept entirely in-memory (never persisted to the database) and
 // cleaned up automatically via TTL expiry. It is safe for concurrent use.
 type PresenceManager struct {
-	mu        sync.RWMutex
-	states    map[string]map[string]*PresenceState // topic → nodeID → state
-	ttl       time.Duration
-	onChange  func(event PresenceEvent)
-	logger    log.Logger
-	done      chan struct{}
-	closeOnce sync.Once
-	events    []PresenceEvent
-	notifying bool
+	validation *ValidationConfig
+	mu         sync.RWMutex
+	states     map[string]map[string]*PresenceState // topic → nodeID → state
+	ttl        time.Duration
+	onChange   func(event PresenceEvent)
+	logger     log.Logger
+	done       chan struct{}
+	closeOnce  sync.Once
+	events     []PresenceEvent
+	notifying  bool
 }
 
 // NewPresenceManager creates a presence manager with the given TTL and
@@ -95,6 +96,12 @@ func (pm *PresenceManager) patch(update PresenceUpdate) (PresenceEvent, error) {
 	if err != nil {
 		pm.mu.Unlock()
 		return PresenceEvent{}, fmt.Errorf("crdt: encode presence patch: %w", err)
+	}
+	if pm.validation != nil {
+		if err := pm.validation.ValidatePresenceData(raw); err != nil {
+			pm.mu.Unlock()
+			return PresenceEvent{}, err
+		}
 	}
 	update.Data = raw
 	event := pm.updateLocked(update)

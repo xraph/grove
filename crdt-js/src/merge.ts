@@ -442,14 +442,22 @@ export function mergeDocumentState(
   if (!remote) return local;
 
   const merged = newDocumentCRDTState();
+  const reset = !local.reset_hlc
+    ? remote.reset_hlc
+    : remote.reset_hlc && hlcAfter(remote.reset_hlc, local.reset_hlc)
+      ? remote.reset_hlc
+      : local.reset_hlc;
+  if (reset) merged.reset_hlc = reset;
 
   // Copy local fields.
   for (const [key, field] of Object.entries(local.fields)) {
+    if (reset && hlcAfter(reset, field.hlc)) continue;
     merged.fields[key] = { ...field };
   }
 
   // Merge remote fields.
   for (const [key, remoteField] of Object.entries(remote.fields)) {
+    if (reset && hlcAfter(reset, remoteField.hlc)) continue;
     const existing = merged.fields[key];
     if (!existing) {
       merged.fields[key] = { ...remoteField };
@@ -751,6 +759,7 @@ export function mergeFieldState(
               type: "document",
               ...pickNewer(local, change),
               doc_state: {
+                ...localDoc,
                 fields: withoutKeys(
                   localDoc.fields,
                   (k) => k === path || k.startsWith(prefix)

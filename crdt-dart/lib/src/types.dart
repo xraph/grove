@@ -638,7 +638,10 @@ final class RgaListState {
 @immutable
 final class DocumentCrdtState {
   /// Creates a document CRDT state.
-  const DocumentCrdtState([this.fields = const {}]);
+  const DocumentCrdtState([this.fields = const {}, this.resetHlc]);
+
+  /// Whole-document replacement floor. Older paths cannot return on replay.
+  final HLC? resetHlc;
 
   /// Field states keyed by dotted path.
   final Map<String, FieldState> fields;
@@ -646,11 +649,16 @@ final class DocumentCrdtState {
   /// Go wire form.
   Map<String, Object?> toJson() => {
     'fields': {for (final e in fields.entries) e.key: e.value.toJson()},
+    if (resetHlc != null) 'reset_hlc': resetHlc!.toJson(),
   };
 
   /// Decodes the Go wire form.
-  static DocumentCrdtState fromJson(Object? j) =>
-      DocumentCrdtState(wireMap(wireObj(j)['fields'], FieldState.fromJson));
+  static DocumentCrdtState fromJson(Object? j) => DocumentCrdtState(
+    wireMap(wireObj(j)['fields'], FieldState.fromJson),
+    wireObj(j)['reset_hlc'] == null
+        ? null
+        : HLC.fromJson(wireObj(j)['reset_hlc']),
+  );
 }
 
 /// The full state of one field. Mirrors Go `crdt.FieldState`.

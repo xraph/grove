@@ -208,11 +208,11 @@ func TestPlugin_AfterMutationSkipsWithoutMetadata(t *testing.T) {
 	require.NoError(t, p.AfterMutation(t.Context(), crdtQC(hook.OpInsert, "1", map[string]string{"title": "lww"}), nil, nil))
 
 	p.SetExecutor(db)
-	// No CRDT fields, an unknown CRDT type, nil Values, and no primary key
-	// are all ignored without a write.
+	// Models without CRDT fields do not write metadata. Tagged mutations
+	// without a key fail rather than silently losing replication.
 	require.NoError(t, p.AfterMutation(t.Context(), &hook.QueryContext{Table: "notes", Operation: hook.OpInsert}, nil, nil))
 	require.NoError(t, p.AfterMutation(t.Context(), crdtQC(hook.OpInsert, "1", map[string]string{"title": "bogus"}), nil, nil))
-	require.NoError(t, p.AfterMutation(t.Context(), crdtQC(hook.OpInsert, nil, map[string]string{"title": "lww"}), nil, nil))
+	require.ErrorContains(t, p.AfterMutation(t.Context(), crdtQC(hook.OpInsert, nil, map[string]string{"title": "lww"}), nil, nil), "primary key")
 	// A select is not a mutation the plugin records.
 	require.NoError(t, p.AfterMutation(t.Context(), crdtQC(hook.OpSelect, "1", map[string]string{"title": "lww"}), nil, nil))
 
@@ -245,7 +245,7 @@ func TestPlugin_AfterMutationWritesLWW(t *testing.T) {
 	assert.Equal(t, int64(1000), r.ts)
 }
 
-func TestPlugin_AfterMutationStructDataViaJSON(t *testing.T) {
+func TestPlugin_AfterMutationStructDataUsesColumns(t *testing.T) {
 	p, _ := newMemPlugin(t)
 	type note struct {
 		Title string `json:"title"`
@@ -259,17 +259,17 @@ func TestPlugin_AfterMutationStructDataViaJSON(t *testing.T) {
 	assert.JSONEq(t, `"From struct"`, string(state.Fields["title"].Value))
 }
 
-func TestPlugin_AfterMutationUnserialisableDataWritesNull(t *testing.T) {
+func TestPlugin_AfterMutationMissingFieldsPreserveState(t *testing.T) {
 	p, _ := newMemPlugin(t)
 
-	// A channel cannot be marshalled, so no field values are extracted and
-	// the LWW register records a null.
+	// Unsupported mutation data supplies no fields and must not erase state.
 	qc := crdtQC(hook.OpUpdate, "c1", map[string]string{"title": "lww"})
+	require.NoError(t, p.AfterMutation(t.Context(), qc, map[string]any{"title": "keep"}, nil))
 	require.NoError(t, p.AfterMutation(t.Context(), qc, make(chan int), nil))
 
 	state, err := p.Inspect(t.Context(), "notes", "c1")
 	require.NoError(t, err)
-	assert.JSONEq(t, `null`, string(state.Fields["title"].Value))
+	assert.JSONEq(t, `"keep"`, string(state.Fields["title"].Value))
 }
 
 func TestPlugin_AfterMutationCounterTracksDelta(t *testing.T) {
@@ -281,7 +281,8 @@ func TestPlugin_AfterMutationCounterTracksDelta(t *testing.T) {
 
 		state, err := p.Inspect(t.Context(), "notes", "c")
 		require.NoError(t, err)
-		want := toInt64(v)
+		want, convertErr := toInt64(v)
+		require.NoError(t, convertErr)
 		assert.Equal(t, want, CounterFromFieldState(state.Fields["views"]).Value(), "after writing %v", v)
 	}
 
@@ -292,7 +293,7 @@ func TestPlugin_AfterMutationCounterTracksDelta(t *testing.T) {
 	assert.Equal(t, int64(3), CounterFromFieldState(state.Fields["views"]).Value())
 }
 
-func TestPlugin_AfterMutationSetAddsElements(t *testing.T) {
+func TestPlugin_AfterMutationSetReplacesObservedElements(t *testing.T) {
 	p, _ := newMemPlugin(t)
 	fields := map[string]string{"tags": "set"}
 
@@ -305,7 +306,7 @@ func TestPlugin_AfterMutationSetAddsElements(t *testing.T) {
 	for _, want := range []string{"a", "b", "c"} {
 		ok, err := set.Contains(want)
 		require.NoError(t, err)
-		assert.True(t, ok, "set should contain %q", want)
+		assert.Equal(t, want == "c", ok, "membership for %q", want)
 	}
 
 	// An unsupported value type adds nothing.
@@ -338,11 +339,7 @@ func TestPlugin_AfterMutationTextRejectsNonString(t *testing.T) {
 func TestPlugin_AfterMutationReadErrorsAreWrapped(t *testing.T) {
 	boom := errors.New("read failed")
 
-	for typ, want := range map[string]string{
-		"counter": "read counter state",
-		"set":     "read set state",
-		"text":    "read text state",
-	} {
+	for _, typ := range []string{"counter", "set", "text"} {
 		p := New(WithNodeID("n1"))
 		p.SetExecutor(&mockExecutor{queryFn: func(context.Context, string, ...any) (Rows, error) {
 			return nil, boom
@@ -350,7 +347,7 @@ func TestPlugin_AfterMutationReadErrorsAreWrapped(t *testing.T) {
 
 		err := p.AfterMutation(t.Context(), crdtQC(hook.OpUpdate, "x", map[string]string{"f": typ}), map[string]any{"f": "v"}, nil)
 		require.ErrorIs(t, err, boom, typ)
-		assert.Contains(t, err.Error(), want)
+		assert.Contains(t, err.Error(), "crdt: allocate mutation clock")
 	}
 }
 
@@ -377,9 +374,13 @@ func TestPlugin_AfterMutationDeleteWritesTombstone(t *testing.T) {
 }
 
 func TestToInt64(t *testing.T) {
-	assert.Equal(t, int64(4), toInt64(int32(4)))
-	assert.Equal(t, int64(0), toInt64(json.Number("not-a-number")))
-	assert.Equal(t, int64(0), toInt64("7"))
+	converted, err := toInt64(int32(4))
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), converted)
+	_, err = toInt64(json.Number("not-a-number"))
+	require.Error(t, err)
+	_, err = toInt64("7")
+	require.Error(t, err)
 }
 
 // --- WriteFieldStatesAtomic ---
