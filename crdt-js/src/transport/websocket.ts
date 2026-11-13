@@ -72,6 +72,7 @@ export class WebSocketTransport implements StreamTransport {
   private nextId = 0;
   private closed = false;
   private opening: Promise<WebSocket> | null = null;
+  private connectionGeneration = 0;
   private openingReject: ((err: Error) => void) | null = null;
   private backoff: Backoff;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -197,16 +198,7 @@ export class WebSocketTransport implements StreamTransport {
     }, this.backoff.next());
   }
 
-  /**
-   * Close the socket and reject every in-flight request — including a
-   * caller still stuck inside ensureOpen() (not yet registered in
-   * `pending`, since rpc() only adds its entry after the connect settles).
-   * Without this, "construct then close before the handshake finishes" —
-   * an ordinary lifecycle, and the common case once the transport connects
-   * eagerly — would hang that caller forever: open()'s promise only ever
-   * settles from onopen/onerror, and requestTimeout doesn't start until
-   * after ensureOpen() resolves.
-   */
+  /** Close the socket and reject requests waiting for a connection or reply. */
   close(): void {
     this.closed = true;
     this.cancelReconnect();
@@ -252,7 +244,6 @@ export class WebSocketTransport implements StreamTransport {
   }
 
   private async rpc<T>(type: WSMessageType, payload: unknown): Promise<T> {
-    const socket = await this.ensureOpen();
     const id = `r${++this.nextId}`;
 
     return new Promise<T>((resolve, reject) => {
@@ -266,8 +257,15 @@ export class WebSocketTransport implements StreamTransport {
         reject,
         timer,
       });
-      try { socket.send(JSON.stringify({ type, payload, request_id: id })); }
-      catch (err) { clearTimeout(timer); this.pending.delete(id); reject(err); }
+      void this.ensureOpen().then(socket => {
+        // A timed-out or cancelled RPC must never be sent after a late open.
+        if (!this.pending.has(id)) return;
+        socket.send(JSON.stringify({ type, payload, request_id: id }));
+      }).catch(error => {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error);
+      });
     });
   }
 
@@ -275,9 +273,32 @@ export class WebSocketTransport implements StreamTransport {
     if (this.closed) throw new TransportError("WebSocket transport closed");
     if (this.socket?.readyState === 1) return this.socket;
     if (!this.opening) {
+      const generation = ++this.connectionGeneration;
       this.opening = new Promise<WebSocket>((resolve, reject) => {
-        this.openingReject = reject;
-        void this.attemptConnect(resolve, reject);
+        let settled = false;
+        const finish = (socket: WebSocket) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(socket);
+        };
+        const fail = (error: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (this.connectionGeneration === generation) {
+            this.connectionGeneration++;
+            const socket = this.socket;
+            this.socket = null;
+            socket?.close();
+          }
+          reject(error);
+        };
+        const timer = setTimeout(() => fail(new TransportError(
+          `CRDT ws connection timed out after ${this.requestTimeout}ms`
+        )), this.requestTimeout);
+        this.openingReject = fail;
+        void this.attemptConnect(finish, fail, generation);
       }).finally(() => {
         this.opening = null;
         this.openingReject = null;
@@ -298,7 +319,8 @@ export class WebSocketTransport implements StreamTransport {
 
   private async attemptConnect(
     resolve: (ws: WebSocket) => void,
-    reject: (err: Error) => void
+    reject: (err: Error) => void,
+    generation: number
   ): Promise<void> {
     let url: string;
     try {
@@ -310,8 +332,8 @@ export class WebSocketTransport implements StreamTransport {
     // close() may have fired while buildURL() (e.g. an async auth lookup)
     // was in flight — don't open a socket for a transport that's already
     // shut down.
-    if (this.closed) {
-      reject(new TransportError("WebSocket transport closed"));
+    if (this.closed || generation !== this.connectionGeneration) {
+      reject(new TransportError("WebSocket connection cancelled"));
       return;
     }
 
@@ -329,7 +351,7 @@ export class WebSocketTransport implements StreamTransport {
     this.socket = socket;
 
     socket.onopen = () => {
-      if (this.closed || this.socket !== socket) { socket.close(); return; }
+      if (this.closed || generation !== this.connectionGeneration || this.socket !== socket) { socket.close(); return; }
       this.cancelReconnect();
       this.backoff.reset();
       this.announced = null;

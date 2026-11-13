@@ -306,9 +306,9 @@ export class CRDTClient {
    */
   async leaveAllPresence(): Promise<void> {
     const topics = [...this.lastPresenceData.keys()];
-    for (const topic of topics) {
-      await this.leavePresence(topic);
-    }
+    const results = await Promise.allSettled(topics.map(topic => this.leavePresence(topic)));
+    const failed = results.find(result => result.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
   }
 
   private startHeartbeat(topic: string): void {

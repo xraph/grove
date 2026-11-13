@@ -303,7 +303,7 @@ describe("compaction", () => {
     // touches persistence or listeners, so transact()'s flush saw an empty
     // touched-set and did nothing — storage kept the UNCOMPACTED document
     // and a reload restored every tombstone that had just been dropped.
-    // persistDebounceMs: 0 makes adapter writes synchronous.
+    // Disable debounce, then await the outstanding storage writes.
     const storage = new MemoryStorage();
     const clock = new HybridClock("n1");
     const store = new CRDTStore("n1", clock, storage, { persistDebounceMs: 0 });
@@ -316,11 +316,13 @@ describe("compaction", () => {
     // Horizon strictly after the tombstone, so the node is compactable.
     const horizon = clock.now();
 
+    await store.flushPersistence();
     const saveSpy = vi.spyOn(storage, "saveDocument");
     let notified = 0;
     const unsubscribe = store.subscribeDocument("t", "p", () => { notified++; });
 
     const dropped = store.compact(horizon);
+    await store.flushPersistence();
 
     expect(dropped).toBeGreaterThan(0);
     expect(saveSpy).toHaveBeenCalledTimes(1);
@@ -346,8 +348,10 @@ describe("compaction", () => {
     }
     const horizon = clock.now();
 
+    await store.flushPersistence();
     const saveSpy = vi.spyOn(storage, "saveDocument");
     store.compact(horizon);
+    await store.flushPersistence();
 
     // Two documents, four dropped nodes, but one write each — the
     // transact() wrapper is what collapses them.

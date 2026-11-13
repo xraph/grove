@@ -6,6 +6,7 @@
  * collaborative editing scenarios (cursors, typing indicators, etc.).
  */
 
+import { TransportError } from "./errors.js";
 import type { AuthProvider, PresenceState, TextSelection } from "./types.js";
 
 // --- Types ---
@@ -127,8 +128,9 @@ export class RoomClient {
         "GET",
         `/rooms/${encodeURIComponent(roomId)}`
       );
-    } catch {
-      return null;
+    } catch (error) {
+      if (error instanceof TransportError && error.statusCode === 404) return null;
+      throw error;
     }
   }
 
@@ -231,9 +233,9 @@ export class RoomClient {
    */
   async updateMetadata(roomId: string, metadata: unknown): Promise<void> {
     await this.request<unknown>(
-      "POST",
+      "PUT",
       `/rooms/${encodeURIComponent(roomId)}/metadata`,
-      { metadata }
+      metadata
     );
   }
 
@@ -324,8 +326,9 @@ export class RoomClient {
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      throw new Error(
-        `Room API error: ${response.status} ${response.statusText}${text ? ` — ${text}` : ""}`
+      throw new TransportError(
+        `Room API error: ${response.status} ${response.statusText}${text ? `: ${text}` : ""}`,
+        response.status
       );
     }
 

@@ -13,6 +13,7 @@
  * decimal strings, and the clock generates with BigInt.
  */
 
+import { compareUTF8 } from "./utf8.js";
 import type { HLC } from "./types.js";
 
 /** The zero HLC value. */
@@ -57,9 +58,7 @@ export function hlcCompare(a: HLC, b: HLC): number {
   if (ts !== 0) return ts;
   if (a.c < b.c) return -1;
   if (a.c > b.c) return 1;
-  if (a.node < b.node) return -1;
-  if (a.node > b.node) return 1;
-  return 0;
+  return Math.sign(compareUTF8(a.node, b.node));
 }
 
 /** Returns true if a is strictly after b. */

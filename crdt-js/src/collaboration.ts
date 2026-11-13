@@ -52,6 +52,7 @@ export class CollaborationSession<T extends ParticipantData = ParticipantData> {
   private starting: Promise<void> | null = null;
   private closing: Promise<void> | null = null;
   private refreshing: Promise<void> | null = null;
+  private refreshAgain = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private typingTimer: ReturnType<typeof setTimeout> | undefined;
   private unwatch?: () => void;
@@ -85,7 +86,10 @@ export class CollaborationSession<T extends ParticipantData = ParticipantData> {
     if (!this.active) {
       this.active = true;
       this.unwatch = this.options.stream?.on(event => {
-        if (event.type === "connected") void this.refresh().catch(error => this.report(error));
+        if (event.type === "connected") {
+          this.refreshAgain = true;
+          void this.refresh().catch(error => this.report(error));
+        }
       });
     }
     const starting = this.refresh();
@@ -122,10 +126,14 @@ export class CollaborationSession<T extends ParticipantData = ParticipantData> {
   refresh(): Promise<void> {
     if (!this.active || this.closed) return Promise.resolve();
     if (this.refreshing) return this.refreshing;
-    this.dirty = true;
-    const refresh = this.flush().then(() => {
-      if (!this.closed) return this.client.refreshPresence(this.topic);
-    });
+    const refresh = (async () => {
+      do {
+        this.refreshAgain = false;
+        this.dirty = true;
+        await this.flush();
+        if (!this.closed) await this.client.refreshPresence(this.topic);
+      } while (this.refreshAgain && this.active && !this.closed);
+    })();
     this.refreshing = refresh;
     const done = () => { if (this.refreshing === refresh) this.refreshing = null; };
     void refresh.then(done, done);

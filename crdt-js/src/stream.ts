@@ -271,7 +271,7 @@ export class CRDTStream {
         throw new Error("CRDT stream: response has no body");
       }
 
-      while (true) {
+      while (gen === this.generation && !controller.signal.aborted) {
         const { done, value } = await reader.read();
         // Same as above: a newer generation may have taken over while
         // this read was pending. Stop processing without touching shared
@@ -288,6 +288,7 @@ export class CRDTStream {
         buffer = lines.pop() ?? "";
 
         for (const line of lines) {
+          if (gen !== this.generation || controller.signal.aborted) break;
           // Empty line = end of event.
           if (line === "") {
             if (dataLines.length > 0) {

@@ -180,7 +180,7 @@ export class CRDTStore {
   private txPendingDirty = false;
 
   /** Milliseconds a burst of writes is coalesced over before hitting the
-   *  storage adapter. `0` disables debouncing and writes synchronously. */
+   *  storage adapter. `0` disables debouncing; writes to the same key remain ordered. */
   private persistDebounceMs: number;
 
   /** Shared timer for the debounced document + pending-change flush. Null
@@ -203,6 +203,9 @@ export class CRDTStore {
    *  operations (undo, redo, applyChanges — none of which touch `pending`)
    *  don't re-write an unchanged pending array on every debounce window. */
   private pendingDebounceDirty = false;
+
+  private persistenceWrites = new Map<string, Promise<void>>();
+  private failedWrites = new Map<string, { save: () => Promise<void>; error: unknown }>();
 
   /**
    * Resolves when persisted state has been hydrated.
@@ -1573,20 +1576,15 @@ export class CRDTStore {
     for (const listener of this.globalListeners) listener();
   }
 
-  /**
-   * Fire-and-forget: persist a document to storage, debounced.
-   * `persistDebounceMs <= 0` writes immediately and synchronously (relative
-   * to the caller); several tests depend on that for assertions right after
-   * a mutation. Otherwise the (table, pk) is queued and a shared timer is
-   * (re)armed if one isn't already pending — the queue is a Set, so a burst
-   * of edits to the same document still produces a single saveDocument.
-   */
+  /** Queue a document snapshot. Without debounce the first write starts
+   * immediately; later writes to the same key wait for earlier writes. */
   private persistDocumentNow(table: string, pk: string): void {
     if (this.hydrated && this.persistDebounceMs <= 0) {
       const doc = this.getDoc(table, pk);
       if (doc) {
         const transformed = this.plugins.dispatchBeforePersist(table, pk, doc);
-        this.storage.saveDocument(table, pk, transformed).catch(() => {});
+        this.enqueuePersistence(JSON.stringify([table, pk]), () =>
+          this.storage.saveDocument(table, pk, transformed));
       }
       return;
     }
@@ -1601,14 +1599,15 @@ export class CRDTStore {
 
   /**
    * Fire-and-forget: persist pending changes to storage, debounced.
-   * `persistDebounceMs <= 0` writes immediately and synchronously. Otherwise
+   * `persistDebounceMs <= 0` queues an ordered write immediately. Otherwise
    * it marks `pending` dirty and arms the shared timer — the timer's own
    * callback re-reads `this.pending` when it fires, so it always captures
    * the latest array regardless of how many writes landed after scheduling.
    */
   private persistPendingNow(): void {
     if (this.hydrated && this.persistDebounceMs <= 0) {
-      this.storage.savePendingChanges([...this.pending]).catch(() => {});
+      const pending = [...this.pending];
+      this.enqueuePersistence("pending", () => this.storage.savePendingChanges(pending));
       return;
     }
     this.pendingDebounceDirty = true;
@@ -1645,54 +1644,56 @@ export class CRDTStore {
         const doc = this.getDoc(table, pk);
         if (doc) {
           const transformed = this.plugins.dispatchBeforePersist(table, pk, doc);
-          this.storage.saveDocument(table, pk, transformed).catch(() => {});
+          this.enqueuePersistence(JSON.stringify([table, pk]), () =>
+            this.storage.saveDocument(table, pk, transformed));
         }
       }
     }
     const pendingDirty = this.pendingDebounceDirty;
     this.pendingDebounceDirty = false;
     if (pendingDirty) {
-      this.storage.savePendingChanges([...this.pending]).catch(() => {});
+      const pending = [...this.pending];
+      this.enqueuePersistence("pending", () => this.storage.savePendingChanges(pending));
     }
   }
 
-  /**
-   * Force any debounced writes to storage and wait for them. Cancels the
-   * pending timer first (rather than letting it race this call) so the
-   * write happens exactly once. Call before unload, or in tests that need
-   * to assert on the adapter synchronously.
-   *
-   * Mirrors drainDebouncedPersist's gating: `savePendingChanges` is only
-   * written if `pending` actually changed since the last drain/flush. A
-   * document-only session (undo/redo/applyChanges, no local writes) that
-   * flushes before unload has nothing new to say about `pending`, so
-   * flushing does not manufacture a write for it — same reasoning as the
-   * debounce fix this method exists to support, not a special case of it.
-   */
+  /** Flush queued and outstanding writes. Storage failures reject the
+   * promise and remain available for retry on the next flush. */
   async flushPersistence(): Promise<void> {
     await this.ready;
     if (this.pendingPersistTimer) {
       clearTimeout(this.pendingPersistTimer);
       this.pendingPersistTimer = null;
     }
-    const queued = this.docPersistQueue;
-    this.docPersistQueue = new Map();
-    const writes: Promise<void>[] = [];
-    for (const [table, pks] of queued) {
-      for (const pk of pks) {
-        const doc = this.getDoc(table, pk);
-        if (doc) {
-          const transformed = this.plugins.dispatchBeforePersist(table, pk, doc);
-          writes.push(this.storage.saveDocument(table, pk, transformed));
-        }
-      }
+    for (const [key, failed] of this.failedWrites) {
+      if (!this.persistenceWrites.has(key)) this.enqueuePersistence(key, failed.save);
     }
-    const pendingDirty = this.pendingDebounceDirty;
-    this.pendingDebounceDirty = false;
-    if (pendingDirty) {
-      writes.push(this.storage.savePendingChanges([...this.pending]));
+    this.drainDebouncedPersist();
+    await Promise.allSettled([...this.persistenceWrites.values()]);
+    const failure = this.failedWrites.values().next();
+    if (!failure.done) throw failure.value.error;
+  }
+
+  // Serialize each durable key, including the pending-change journal. The
+  // first write starts immediately; subsequent writes wait for its completion.
+  private enqueuePersistence(key: string, save: () => Promise<void>): void {
+    const previous = this.persistenceWrites.get(key);
+    let write: Promise<void>;
+    try {
+      write = previous ? previous.catch(() => {}).then(save) : Promise.resolve(save());
+    } catch (error) {
+      write = Promise.reject(error);
     }
-    await Promise.allSettled(writes);
+    this.persistenceWrites.set(key, write);
+    void write.then(() => {
+      if (this.persistenceWrites.get(key) !== write) return;
+      this.persistenceWrites.delete(key);
+      this.failedWrites.delete(key);
+    }, error => {
+      if (this.persistenceWrites.get(key) !== write) return;
+      this.persistenceWrites.delete(key);
+      this.failedWrites.set(key, { save, error });
+    });
   }
 
   /**
@@ -1751,6 +1752,7 @@ export class CRDTStore {
     const doc = this.docOrEmpty(change.table, change.pk);
 
     if (change.tombstone && !isDocPathDelete) {
+      if (doc.tombstone_hlc && !hlcAfter(change.hlc, doc.tombstone_hlc)) return;
       this.setDocument(change.table, change.pk, {
         ...doc,
         tombstone: true,
