@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"context"
-	"math"
 	"math/rand/v2"
 	"time"
 
@@ -62,12 +61,21 @@ func (h *RetryHook) AfterQuery(_ context.Context, qc *hook.QueryContext, result 
 
 // BackoffDuration calculates the backoff duration for the given attempt (0-indexed).
 func (h *RetryHook) BackoffDuration(attempt int) time.Duration {
-	d := time.Duration(float64(h.initialWait) * math.Pow(2, float64(attempt)))
-	if d > h.maxWait {
-		d = h.maxWait
+	if h.initialWait <= 0 || h.maxWait <= 0 {
+		return 0
 	}
-	if h.jitter {
-		d = time.Duration(float64(d) * (0.5 + rand.Float64()*0.5))
+	d := min(h.initialWait, h.maxWait)
+	for i := 0; i < attempt && d < h.maxWait; i++ {
+		if d > h.maxWait/2 {
+			d = h.maxWait
+			break
+		}
+		d *= 2
+	}
+	if h.jitter && d > 1 {
+		// Integer jitter keeps even the largest time.Duration positive.
+		half := d / 2
+		d = d - half + time.Duration(rand.Int64N(int64(half))) //nolint:gosec // retry jitter does not need crypto-grade randomness
 	}
 	return d
 }

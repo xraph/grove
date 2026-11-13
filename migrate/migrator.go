@@ -2,8 +2,8 @@ package migrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"math"
 	"math/rand/v2"
 	"os"
 	"time"
@@ -32,6 +32,8 @@ func NewOrchestrator(executor Executor, groups ...*Group) *Orchestrator {
 }
 
 // SetLockTimeout overrides the lock-wait budget. 0 = wait until ctx deadline.
+// A diagnostic lock-holder lookup may take up to one additional second, but
+// still honors the caller's context deadline.
 func (o *Orchestrator) SetLockTimeout(d time.Duration) *Orchestrator {
 	o.lockTimeout = d
 	return o
@@ -236,13 +238,26 @@ func (o *Orchestrator) acquireLockWithRetry(ctx context.Context, lockedBy string
 		maxInterval = 2 * time.Second
 	)
 
-	var deadline time.Time
+	waitCtx := ctx
 	if o.lockTimeout > 0 {
-		deadline = time.Now().Add(o.lockTimeout)
+		var cancel context.CancelFunc
+		waitCtx, cancel = context.WithTimeout(ctx, o.lockTimeout)
+		defer cancel()
 	}
 
-	for attempt := 0; ; attempt++ {
-		err := o.executor.AcquireLock(ctx, lockedBy)
+	interval := initialWait
+	var lockErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := waitCtx.Err(); err != nil {
+			if lockErr != nil {
+				return o.enrichLockError(ctx, lockErr)
+			}
+			return err
+		}
+		err := o.executor.AcquireLock(waitCtx, lockedBy)
 		if err == nil {
 			return nil
 		}
@@ -250,24 +265,20 @@ func (o *Orchestrator) acquireLockWithRetry(ctx context.Context, lockedBy string
 		// Only retry on lock-held errors. Any other error (connection
 		// failure, permission denied, etc.) is returned immediately.
 		if !IsLockError(err) {
+			if lockErr != nil && ctx.Err() == nil && waitCtx.Err() != nil && errors.Is(err, waitCtx.Err()) {
+				return o.enrichLockError(ctx, lockErr)
+			}
 			return err
 		}
+		lockErr = err
 
-		// Check if we have exceeded the time budget.
-		if !deadline.IsZero() && time.Now().After(deadline) {
-			return o.enrichLockError(ctx, err)
-		}
-
-		// Exponential backoff with jitter (matches kv/middleware/retry.go).
-		backoff := time.Duration(float64(initialWait) * math.Pow(2, float64(attempt)))
-		if backoff > maxInterval {
-			backoff = maxInterval
-		}
-		backoff = time.Duration(float64(backoff) * (0.5 + rand.Float64()*0.5)) //nolint:gosec // jitter does not need crypto-grade randomness
+		// Cap the interval before it grows, so a long wait cannot overflow
+		// time.Duration and turn retries into a tight database query loop.
+		backoff := time.Duration(float64(interval) * (0.5 + rand.Float64()*0.5)) //nolint:gosec // jitter does not need crypto-grade randomness
+		interval = min(interval*2, maxInterval)
 
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-waitCtx.Done():
 		case <-time.After(backoff):
 		}
 	}
@@ -280,7 +291,11 @@ func (o *Orchestrator) enrichLockError(ctx context.Context, err error) error {
 	if !ok {
 		return err
 	}
-	info, ierr := insp.LockInfo(context.WithoutCancel(ctx))
+	// Diagnostic queries must not keep a connection busy indefinitely or
+	// outlive the caller's deadline after the lock wait has already failed.
+	infoCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	info, ierr := insp.LockInfo(infoCtx)
 	if ierr != nil || info == nil || !info.Held {
 		return err
 	}
