@@ -2,8 +2,12 @@ package mongodriver
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
+
+	"github.com/xraph/grove/driver"
 )
 
 // MongoTx wraps a MongoDB session with an active transaction.
@@ -12,22 +16,46 @@ import (
 type MongoTx struct {
 	session *mongo.Session
 	db      *MongoDB
+	ctx     context.Context
 }
 
-// Commit commits the transaction and ends the session.
-func (tx *MongoTx) Commit() error {
-	ctx := context.Background()
-	err := tx.session.CommitTransaction(ctx)
-	tx.session.EndSession(ctx)
-	return err
+// Commit honors the transaction's caller context and configured operation
+// timeout, then ends the session with a separate, bounded cleanup context.
+func (tx *MongoTx) Commit() (err error) {
+	ctx, cancel := context.WithTimeout(tx.ctx, transactionTimeout(&tx.db.txTimeout))
+	defer cancel()
+	defer func() {
+		cleanCtx, cleanCancel := tx.cleanupContext()
+		defer cleanCancel()
+		tx.session.EndSession(cleanCtx)
+		err = errors.Join(err, cleanCtx.Err())
+	}()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return tx.session.CommitTransaction(ctx)
 }
 
 // Rollback aborts the transaction and ends the session.
 func (tx *MongoTx) Rollback() error {
-	ctx := context.Background()
+	ctx, cancel := tx.cleanupContext()
+	defer cancel()
 	err := tx.session.AbortTransaction(ctx)
 	tx.session.EndSession(ctx)
-	return err
+	// The SDK deliberately suppresses abort command failures, including
+	// timeouts. Report an expired cleanup budget to the caller.
+	return errors.Join(err, ctx.Err())
+}
+
+func (tx *MongoTx) cleanupContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(tx.ctx), min(transactionTimeout(&tx.db.txTimeout), 5*time.Second))
+}
+
+func transactionTimeout(configured *time.Duration) time.Duration {
+	if configured != nil && *configured > 0 {
+		return *configured
+	}
+	return driver.DefaultDriverOptions().QueryTimeout
 }
 
 // Session returns the underlying MongoDB session.

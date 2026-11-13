@@ -495,6 +495,12 @@ err := mdb.NewAggregate("orders").
 
 ## Transactions
 
+`Commit` honors the context passed to `BeginTx` and the operation timeout from
+`WithTimeout` or the URI's `timeoutMS`. Without a positive configured timeout,
+commit has a 30-second limit. Rollback and session cleanup use a fresh context
+so they can run after cancellation, with a limit of five seconds or the shorter
+configured timeout. Cleanup timeouts are returned to the caller.
+
 MongoDB transactions require a replica set or sharded cluster. The driver wraps sessions and transactions into `MongoTx`.
 
 ```go

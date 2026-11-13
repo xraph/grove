@@ -95,20 +95,39 @@ Pass driver options when opening the connection:
 ```go
 import "github.com/xraph/grove/kv/driver"
 
-store, err := kv.Open(memcacheddriver.New(), "localhost:11211",
+mdb := memcacheddriver.New()
+err := mdb.Open(ctx, "localhost:11211",
+    driver.WithPoolSize(10),
     memcacheddriver.WithTimeout(2 * time.Second),
-    memcacheddriver.WithMaxIdleConns(10),
+    memcacheddriver.WithMaxIdleConns(2),
 )
+if err != nil {
+    return err
+}
+store, err := kv.Open(mdb)
 ```
 
 | Option | Description |
 |--------|-------------|
+| `driver.WithPoolSize(n)` | Maximum concurrent Grove operations; default 10 |
 | `memcacheddriver.WithTimeout(d)` | Socket read/write timeout for Memcached operations |
 | `memcacheddriver.WithMaxIdleConns(n)` | Maximum number of idle connections per server |
+
+Grove reuses idle connections and keeps at most two per server by default.
+Positive idle limits are capped by the pool size. Zero or negative pool sizes
+keep the default limit of ten. Requests waiting for a slot honor cancellation,
+and canceling an active request closes its sockets without interrupting other
+requests. `Close` interrupts active requests and closes their connections too.
+
+`Exists` groups keys by server and sends one multi-get request per server.
+Repeated keys are fetched once and still count once per occurrence in the result.
 
 ## Unwrap for Native Client
 
 Access the underlying gomemcache `Client` for operations not exposed by the Grove KV interface:
+
+Direct client calls bypass Grove's concurrency limit and request cancellation.
+The driver still tracks those sockets and closes them during shutdown.
 
 ```go
 // Get the MemcachedDB driver

@@ -33,11 +33,12 @@ import (
 // Go MongoDB driver v2. It also implements the grove adapter interfaces
 // (txBeginner, queryBuilder) for integration with grove.DB.
 type MongoDB struct {
-	client   *mongo.Client
-	database *mongo.Database
-	dbName   string
-	hooks    *hook.Engine
-	tel      *observability.Telemetry
+	txTimeout time.Duration
+	client    *mongo.Client
+	database  *mongo.Database
+	dbName    string
+	hooks     *hook.Engine
+	tel       *observability.Telemetry
 }
 
 // New creates a new unconnected MongoDB driver. Call Open to establish
@@ -73,6 +74,7 @@ func (db *MongoDB) Open(ctx context.Context, uri string, opts ...MongoOption) er
 	}
 
 	clientOpts := mopts.clientOptions(uri)
+	db.txTimeout = transactionTimeout(clientOpts.Timeout)
 
 	// Every command the client sends is traced and timed through grove's
 	// telemetry, builders and direct Client() use alike.
@@ -225,6 +227,9 @@ func (db *MongoDB) DatabaseName() string {
 // GroveTx starts a MongoDB session-based transaction. This is the adapter
 // method for grove.DB.BeginTx().
 func (db *MongoDB) GroveTx(ctx context.Context, isolationLevel int, readOnly bool) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	session, err := db.client.StartSession()
 	if err != nil {
 		return nil, fmt.Errorf("mongodriver: start session: %w", err)
@@ -235,7 +240,7 @@ func (db *MongoDB) GroveTx(ctx context.Context, isolationLevel int, readOnly boo
 		return nil, fmt.Errorf("mongodriver: start transaction: %w", err)
 	}
 
-	return &MongoTx{session: session, db: db}, nil
+	return &MongoTx{session: session, db: db, ctx: ctx}, nil
 }
 
 // GroveSelect is the adapter method for grove.DB.NewSelect().
