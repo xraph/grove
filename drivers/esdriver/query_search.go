@@ -233,7 +233,8 @@ func (q *SearchQuery) GetFrom() int {
 
 // Scan executes the search query and decodes results into the model.
 // For slice pointers, it decodes all matching documents.
-// For struct pointers, it decodes the first matching document.
+// For struct pointers, it requests at most one matching document.
+// An explicit Size(0) still requests no hits.
 func (q *SearchQuery) Scan(ctx context.Context) error {
 	if q.err != nil {
 		return q.err
@@ -244,17 +245,31 @@ func (q *SearchQuery) Scan(ctx context.Context) error {
 		return fmt.Errorf("esdriver: Scan requires a model; pass a model to NewSearch")
 	}
 
+	targetValue := reflect.ValueOf(target)
+	if targetValue.Kind() != reflect.Pointer || targetValue.IsNil() {
+		return fmt.Errorf("esdriver: Scan requires a non-nil pointer to a struct or slice")
+	}
+	isSlice := targetValue.Elem().Kind() == reflect.Slice
+	modelType := targetValue.Type().Elem()
+	for modelType.Kind() == reflect.Pointer {
+		modelType = modelType.Elem()
+	}
+	if !isSlice && modelType.Kind() != reflect.Struct {
+		return fmt.Errorf("esdriver: Scan requires a non-nil pointer to a struct or slice")
+	}
+	if !isSlice && q.size != 0 {
+		copyQuery := *q
+		copyQuery.size = 1
+		q = &copyQuery
+	}
+
 	result, err := q.execute(ctx)
 	if err != nil {
 		return err
 	}
 
-	targetType := reflect.TypeOf(target)
-	if targetType.Kind() == reflect.Ptr {
-		innerType := targetType.Elem()
-		if innerType.Kind() == reflect.Slice {
-			return q.scanMany(result, target)
-		}
+	if isSlice {
+		return q.scanMany(result, target)
 	}
 
 	return q.scanOne(result, target)

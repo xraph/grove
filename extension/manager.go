@@ -1,6 +1,7 @@
 package extension
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
@@ -13,6 +14,8 @@ type DBManager struct {
 	mu         sync.RWMutex
 	dbs        map[string]*grove.DB
 	defaultKey string
+	closed     bool
+	closeErr   error
 }
 
 // NewDBManager creates an empty DBManager.
@@ -23,15 +26,31 @@ func NewDBManager() *DBManager {
 }
 
 // Add registers a named database. The first database added becomes the
-// default unless SetDefault is called explicitly.
+// default unless SetDefault is called explicitly. Ownership transfers to the
+// manager. Replacing a name closes the previous handle once no other name
+// refers to it. Close reports replacement errors. After Close, Add immediately
+// closes any incoming handle.
 func (m *DBManager) Add(name string, db *grove.DB) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
+	if m.closed {
+		m.closeHandle(name, db)
+		return
+	}
+	previous := m.dbs[name]
 	m.dbs[name] = db
 	if m.defaultKey == "" {
 		m.defaultKey = name
 	}
+	if previous == nil || previous == db {
+		return
+	}
+	for _, registered := range m.dbs {
+		if registered == previous {
+			return
+		}
+	}
+	m.closeHandle(name, previous)
 }
 
 // Get returns the database registered under name.
@@ -100,16 +119,32 @@ func (m *DBManager) Len() int {
 	return len(m.dbs)
 }
 
-// Close closes all registered databases and returns the first error encountered.
+// Close closes each owned database once and reports shutdown or replacement
+// errors. Repeated calls do not close handles again.
 func (m *DBManager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	var firstErr error
-	for name, db := range m.dbs {
-		if err := db.Close(); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("grove: close database %q: %w", name, err)
+	if m.closed {
+		return m.closeErr
+	}
+	m.closed = true
+	seen := make(map[*grove.DB]bool)
+	for name, handle := range m.dbs {
+		if !seen[handle] {
+			seen[handle] = true
+			m.closeHandle(name, handle)
 		}
 	}
-	return firstErr
+	clear(m.dbs)
+	m.defaultKey = ""
+	return m.closeErr
+}
+
+func (m *DBManager) closeHandle(name string, handle *grove.DB) {
+	if handle == nil {
+		return
+	}
+	if err := handle.Close(); err != nil && !errors.Is(err, grove.ErrDriverClosed) {
+		m.closeErr = errors.Join(m.closeErr, fmt.Errorf("grove: close database %q: %w", name, err))
+	}
 }

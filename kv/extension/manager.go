@@ -1,6 +1,7 @@
 package extension
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
@@ -13,6 +14,8 @@ type StoreManager struct {
 	mu         sync.RWMutex
 	stores     map[string]*kv.Store
 	defaultKey string
+	closed     bool
+	closeErr   error
 }
 
 // NewStoreManager creates an empty StoreManager.
@@ -23,15 +26,31 @@ func NewStoreManager() *StoreManager {
 }
 
 // Add registers a named store. The first store added becomes the
-// default unless SetDefault is called explicitly.
+// default unless SetDefault is called explicitly. Ownership transfers to the
+// manager. Replacing a name closes the previous handle once no other name
+// refers to it. Close reports replacement errors. After Close, Add immediately
+// closes any incoming handle.
 func (m *StoreManager) Add(name string, s *kv.Store) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
+	if m.closed {
+		m.closeHandle(name, s)
+		return
+	}
+	previous := m.stores[name]
 	m.stores[name] = s
 	if m.defaultKey == "" {
 		m.defaultKey = name
 	}
+	if previous == nil || previous == s {
+		return
+	}
+	for _, registered := range m.stores {
+		if registered == previous {
+			return
+		}
+	}
+	m.closeHandle(name, previous)
 }
 
 // Get returns the store registered under name.
@@ -100,16 +119,32 @@ func (m *StoreManager) Len() int {
 	return len(m.stores)
 }
 
-// Close closes all registered stores and returns the first error encountered.
+// Close closes each owned store once and reports shutdown or replacement
+// errors. Repeated calls do not close handles again.
 func (m *StoreManager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	var firstErr error
-	for name, s := range m.stores {
-		if err := s.Close(); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("kv: close store %q: %w", name, err)
+	if m.closed {
+		return m.closeErr
+	}
+	m.closed = true
+	seen := make(map[*kv.Store]bool)
+	for name, handle := range m.stores {
+		if !seen[handle] {
+			seen[handle] = true
+			m.closeHandle(name, handle)
 		}
 	}
-	return firstErr
+	clear(m.stores)
+	m.defaultKey = ""
+	return m.closeErr
+}
+
+func (m *StoreManager) closeHandle(name string, handle *kv.Store) {
+	if handle == nil {
+		return
+	}
+	if err := handle.Close(); err != nil && !errors.Is(err, kv.ErrStoreClosed) {
+		m.closeErr = errors.Join(m.closeErr, fmt.Errorf("kv: close store %q: %w", name, err))
+	}
 }
