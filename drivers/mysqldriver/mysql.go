@@ -3,6 +3,7 @@ package mysqldriver
 import (
 	"context"
 	"database/sql"
+	sqldriver "database/sql/driver"
 	"errors"
 	"fmt"
 	"net"
@@ -274,6 +275,15 @@ func (c *mysqlDedicatedConn) Release() {
 	if c.conn != nil {
 		_ = c.conn.Close()
 		c.conn = nil
+	}
+}
+
+func (c *mysqlDedicatedConn) Discard() {
+	if c.conn != nil {
+		// Raw discards the physical connection when the callback returns
+		// ErrBadConn, instead of returning a still-locked session to the pool.
+		_ = c.conn.Raw(func(any) error { return sqldriver.ErrBadConn }) //nolint:errcheck // ErrBadConn is the requested discard signal.
+		c.Release()
 	}
 }
 

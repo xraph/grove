@@ -68,6 +68,24 @@ func (e *Extension) isMultiStore() bool {
 
 // Register implements [forge.Extension].
 func (e *Extension) Register(fapp forge.App) error {
+	if e.store != nil || e.manager != nil {
+		return errors.New("kv: extension already registered")
+	}
+	err := e.register(fapp)
+	if err != nil {
+		if e.manager != nil {
+			err = errors.Join(err, e.manager.Close())
+		} else if e.store != nil {
+			err = errors.Join(err, e.store.Close())
+			e.driver = nil
+		}
+		e.manager = nil
+		e.store = nil
+	}
+	return err
+}
+
+func (e *Extension) register(fapp forge.App) error {
 	// 1. BaseExtension.Register stores app, logger, metrics.
 	if err := e.BaseExtension.Register(fapp); err != nil {
 		return err
@@ -120,9 +138,20 @@ func (e *Extension) registerSingleStore(fapp forge.App) error {
 // registerMultiStore handles the multi-store path.
 func (e *Extension) registerMultiStore(fapp forge.App) error {
 	mgr := NewStoreManager()
+	e.manager = mgr // Retain ownership during partial initialization.
 
 	// Merge programmatic entries with config entries.
 	entries := e.buildStoreEntries()
+	seen := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		if entry.name == "" {
+			return errors.New("kv: store name is required")
+		}
+		if seen[entry.name] {
+			return fmt.Errorf("kv: duplicate store name %q", entry.name)
+		}
+		seen[entry.name] = true
+	}
 
 	// Open each store.
 	for _, entry := range entries {
@@ -170,8 +199,6 @@ func (e *Extension) registerMultiStore(fapp forge.App) error {
 			return fmt.Errorf("kv: set default store: %w", err)
 		}
 	}
-
-	e.manager = mgr
 
 	// Set e.store to the default for backward-compatible Store() accessor.
 	defaultStore, err := mgr.Default()

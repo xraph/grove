@@ -7,6 +7,7 @@ replace github.com/xraph/grove => ../../
 replace github.com/xraph/grove/kv => ../
 
 require (
+	github.com/stretchr/testify v1.11.1
 	github.com/xraph/forge v1.13.1
 	github.com/xraph/grove v1.10.0
 	github.com/xraph/grove/kv v1.9.0
@@ -84,7 +85,6 @@ require (
 	github.com/quic-go/webtransport-go v0.12.0 // indirect
 	github.com/redis/go-redis/v9 v9.21.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/uptrace/bunrouter v1.0.23 // indirect
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect

@@ -44,19 +44,38 @@ func Filter[T any](s *Stream[T], fn func(T) bool) *Stream[T] {
 
 // Take yields at most n elements then marks the stream as done.
 func Take[T any](s *Stream[T], n int) *Stream[T] {
-	count := 0
+	cursor := &takeCursor{Cursor: s.cursor, remaining: n}
 	original := s.decode
 	return &Stream[T]{
-		cursor: s.cursor,
+		cursor: cursor,
 		decode: func(c Cursor) (T, error) {
-			count++
-			if count > n {
-				var zero T
-				return zero, errEndOfStream
-			}
-			return original(c)
+			val, err := original(c)
+			cursor.remaining--
+			return val, err
 		},
 	}
+}
+
+// takeCursor checks the limit before advancing, including advances made by
+// downstream transforms. Decode counts output elements so upstream Filter or
+// Chunk can still consume all rows needed for one element.
+type takeCursor struct {
+	Cursor
+	remaining int
+}
+
+func (c *takeCursor) Next() bool {
+	return c.remaining > 0 && c.Cursor.Next()
+}
+
+func (c *takeCursor) NextContext(ctx context.Context) bool {
+	if c.remaining <= 0 {
+		return false
+	}
+	if contextual, ok := c.Cursor.(ContextCursor); ok {
+		return contextual.NextContext(ctx)
+	}
+	return c.Cursor.Next()
 }
 
 // Reduce accumulates a value over the entire stream.

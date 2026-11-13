@@ -258,13 +258,14 @@ func (q *InsertQuery) execPrepared(ctx context.Context, qc *hook.QueryContext) (
 	if err != nil {
 		return nil, fmt.Errorf("clickhousedriver: bulk insert begin tx: %w", err)
 	}
+	// Roll back on every unfinished exit, including a panic while extracting a row.
+	defer func() { _ = tx.Rollback() }() //nolint:errcheck // Safe after Commit; preserve the original error or panic.
 
 	stx := &ClickHouseTx{db: q.db, tx: tx}
 	txdb := stx.txDB()
 
 	result, execErr := q.execPreparedWith(ctx, txdb, fields, singleRowSQL)
 	if execErr != nil {
-		_ = tx.Rollback()
 		return nil, execErr
 	}
 

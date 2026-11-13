@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -28,17 +31,25 @@ func stmtName(prefix string) string {
 // pgPoolStmt wraps a pgxpool.Conn with a prepared statement for repeated execution.
 // It holds the acquired connection and releases it on Close.
 type pgPoolStmt struct {
-	opts  *driver.DriverOptions
-	conn  *pgxpool.Conn
-	sd    *pgconn.StatementDescription
-	query string // the statement's text, for its span name and labels
-	tel   *observability.Telemetry
+	mu       sync.Mutex
+	closed   bool
+	closeErr error
+	opts     *driver.DriverOptions
+	conn     *pgxpool.Conn
+	sd       *pgconn.StatementDescription
+	query    string // the statement's text, for its span name and labels
+	tel      *observability.Telemetry
 }
 
 var _ driver.Stmt = (*pgPoolStmt)(nil)
 
 // Exec executes the prepared statement with the given arguments.
 func (s *pgPoolStmt) Exec(ctx context.Context, args ...any) (driver.Result, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, fmt.Errorf("pgdriver: statement is closed")
+	}
 	ctx, cancel := queryctx.WithTimeout(ctx, s.opts)
 	defer cancel()
 	ctx, op := s.tel.StartSQL(ctx, s.query)
@@ -54,11 +65,29 @@ func (s *pgPoolStmt) Exec(ctx context.Context, args ...any) (driver.Result, erro
 // Deallocating through pgx, rather than running DEALLOCATE as SQL, keeps
 // pgx's own record of the connection's statements in step with the server.
 func (s *pgPoolStmt) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return s.closeErr
+	}
+	s.closed = true
 	ctx, cancel := queryctx.WithTimeout(context.Background(), s.opts)
 	defer cancel()
-	err := s.conn.Conn().Deallocate(ctx, s.sd.Name)
+	s.closeErr = s.conn.Conn().Deallocate(ctx, s.sd.Name)
+	if s.closeErr != nil {
+		// A deadline can expire before pgx sends Close, leaving a healthy
+		// session with an orphaned statement. Do not return it to the pool.
+		discardConn(s.conn.Conn())
+	}
 	s.conn.Release()
-	return err
+	return s.closeErr
+}
+
+// Closing the session also frees any statements that could not be deallocated.
+func discardConn(conn *pgx.Conn) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = conn.Close(ctx) // The connection is discarded even when shutdown reports an error.
 }
 
 // pgTxStmt wraps a pgx transaction prepared statement for repeated execution.

@@ -188,3 +188,11 @@ type DedicatedConn interface {
 	QueryRow(ctx context.Context, query string, args ...any) Row
 	Release()
 }
+
+// DiscardableConn optionally allows a dedicated connection to be removed from
+// its pool when session cleanup fails. Discard releases the connection's pool
+// slot and closes the physical connection instead of making it reusable.
+type DiscardableConn interface {
+	DedicatedConn
+	Discard()
+}

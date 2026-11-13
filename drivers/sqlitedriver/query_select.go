@@ -480,6 +480,12 @@ func (q *SelectQuery) Scan(ctx context.Context, dest ...any) error {
 		}
 	}
 
+	// A struct destination consumes one row. Bound the server result as well,
+	// so QueryRow does not execute and discard the rest of an unbounded SELECT.
+	if targetType := reflect.TypeOf(target); targetType != nil && targetType.Kind() == reflect.Pointer && targetType.Elem().Kind() == reflect.Struct {
+		q.limit = 1
+	}
+
 	sqlStr, args, err := q.Build()
 	if err != nil {
 		return err

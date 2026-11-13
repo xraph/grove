@@ -209,17 +209,23 @@ func (t *pgTx) Prepare(ctx context.Context, query string) (driver.Stmt, error) {
 // pgx so pgx forgets the name too, and it uses the protocol's Close
 // message, which the server accepts even in an aborted transaction.
 func (t *pgTx) deallocateStmt(name string) error {
-	delete(t.stmts, name)
 	ctx, cancel := queryctx.WithTimeout(context.Background(), t.opts)
 	defer cancel()
-	return t.tx.Conn().Deallocate(ctx, name)
+	if err := t.tx.Conn().Deallocate(ctx, name); err != nil {
+		return err
+	}
+	delete(t.stmts, name)
+	return nil
 }
 
-// deallocateStmts drops every statement the caller didn't close. It's best
-// effort: a failure here means the connection is broken, and the Commit or
-// Rollback that follows reports that.
+// deallocateStmts drops every statement the caller didn't close. If cleanup
+// fails, discard the session so no orphaned statements return to the pool.
+// The following Commit/Rollback reports the failure and releases the pool slot.
 func (t *pgTx) deallocateStmts() {
 	for name := range t.stmts {
-		_ = t.deallocateStmt(name) //nolint:errcheck // a broken connection fails the Commit or Rollback next
+		if err := t.deallocateStmt(name); err != nil {
+			discardConn(t.tx.Conn())
+			return
+		}
 	}
 }

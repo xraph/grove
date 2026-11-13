@@ -341,10 +341,13 @@ func (q *SearchQuery) Scroll(ctx context.Context, keepAlive string) (*EsCursor, 
 	}
 
 	return &EsCursor{
-		db:       q.db,
-		scrollID: result.ScrollID,
-		hits:     result.Hits.Hits,
-		size:     size,
+		db:        q.db,
+		ctx:       ctx,
+		keepAlive: parseDuration(keepAlive),
+		scrollID:  result.ScrollID,
+		hits:      result.Hits.Hits,
+		pos:       -1,
+		size:      size,
 	}, nil
 }
 

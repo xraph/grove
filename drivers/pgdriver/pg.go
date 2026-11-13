@@ -371,6 +371,13 @@ func (c *pgDedicatedConn) Release() {
 	}
 }
 
+func (c *pgDedicatedConn) Discard() {
+	if c.conn != nil {
+		discardConn(c.conn.Conn())
+		c.Release()
+	}
+}
+
 // mapIsolationLevel converts a driver.IsolationLevel to the corresponding
 // pgx.TxIsoLevel string constant.
 func mapIsolationLevel(level driver.IsolationLevel) pgx.TxIsoLevel {

@@ -4,7 +4,9 @@ package mysqlmigrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/migrate"
@@ -37,6 +39,7 @@ const (
 type Executor struct {
 	drv       driver.Driver
 	dedicated driver.DedicatedConn // non-nil while migration lock is held
+	locked    bool
 }
 
 var (
@@ -77,15 +80,24 @@ func (e *Executor) queryRow(ctx context.Context, query string, args ...any) driv
 	return e.drv.QueryRow(ctx, query, args...)
 }
 
-func (e *Executor) releaseDedicated() {
-	if e.dedicated != nil {
-		// Safety net: release the named advisory lock before returning the
-		// connection to the pool. This prevents lock leaks if RELEASE_LOCK
-		// failed or was skipped for any reason.
-		_, _ = e.dedicated.Exec(context.Background(), "SELECT RELEASE_LOCK(?)", advisoryLockName) //nolint:errcheck // best-effort cleanup
-		e.dedicated.Release()
-		e.dedicated = nil
+func (e *Executor) releaseDedicated(ctx context.Context) error {
+	e.locked = false
+	if e.dedicated == nil {
+		return nil
 	}
+	conn := e.dedicated
+	e.dedicated = nil
+	cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_, err := conn.Exec(cleanCtx, "SELECT RELEASE_LOCK(?)", advisoryLockName)
+	if err != nil {
+		if discardable, ok := conn.(driver.DiscardableConn); ok {
+			discardable.Discard()
+			return err
+		}
+	}
+	conn.Release()
+	return err
 }
 
 // Exec executes a SQL statement that does not return rows.
@@ -132,6 +144,9 @@ func (e *Executor) EnsureLockTable(ctx context.Context) error {
 // operations share the same session. This prevents lock leaks when using
 // connection pools.
 func (e *Executor) AcquireLock(ctx context.Context, lockedBy string) error {
+	if e.locked || e.dedicated != nil {
+		return fmt.Errorf("mysqlmigrate: %w", migrate.ErrLockHeld)
+	}
 	// Acquire a dedicated connection if the driver supports it.
 	if acq, ok := e.drv.(driver.ConnAcquirer); ok {
 		conn, err := acq.AcquireConn(ctx)
@@ -146,12 +161,10 @@ func (e *Executor) AcquireLock(ctx context.Context, lockedBy string) error {
 	row := e.queryRow(ctx, "SELECT GET_LOCK(?, 0)", advisoryLockName)
 	var acquired int
 	if err := row.Scan(&acquired); err != nil {
-		e.releaseDedicated()
-		return fmt.Errorf("mysqlmigrate: advisory lock: %w", err)
+		return errors.Join(fmt.Errorf("mysqlmigrate: advisory lock: %w", err), e.releaseDedicated(ctx))
 	}
 	if acquired != 1 {
-		e.releaseDedicated()
-		return fmt.Errorf("mysqlmigrate: %w", migrate.ErrLockHeld)
+		return errors.Join(fmt.Errorf("mysqlmigrate: %w", migrate.ErrLockHeld), e.releaseDedicated(ctx))
 	}
 
 	// Record who holds the lock for debugging.
@@ -160,13 +173,16 @@ func (e *Executor) AcquireLock(ctx context.Context, lockedBy string) error {
 		"ON DUPLICATE KEY UPDATE `locked_at` = NOW(6), `locked_by` = ?",
 		lockTableName)
 	if _, err := e.exec(ctx, query, lockedBy, lockedBy); err != nil {
-		// Best-effort unlock before releasing the connection. Use a
-		// background context so the unlock succeeds even if ctx is cancelled.
-		_, _ = e.exec(context.Background(), "SELECT RELEASE_LOCK(?)", advisoryLockName) //nolint:errcheck // best-effort cleanup on error path
-		e.releaseDedicated()
-		return err
+		if e.dedicated != nil {
+			return errors.Join(err, e.releaseDedicated(ctx))
+		}
+		cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_, unlockErr := e.exec(cleanCtx, "SELECT RELEASE_LOCK(?)", advisoryLockName)
+		return errors.Join(err, unlockErr)
 	}
 
+	e.locked = true
 	return nil
 }
 
@@ -175,21 +191,25 @@ func (e *Executor) AcquireLock(ctx context.Context, lockedBy string) error {
 // is released on that same connection before the connection is returned to
 // the pool.
 func (e *Executor) ReleaseLock(ctx context.Context) error {
+	if !e.locked && e.dedicated == nil {
+		return nil
+	}
 	// Use an uncancellable context so the advisory lock is always released,
 	// even if the caller's context was cancelled mid-migration.
-	cleanCtx := context.WithoutCancel(ctx)
+	cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 
 	// Clear the lock record.
 	query := fmt.Sprintf("UPDATE `%s` SET `locked_at` = NULL, `locked_by` = NULL WHERE `id` = 1",
 		lockTableName)
 	_, _ = e.exec(cleanCtx, query) //nolint:errcheck // best-effort lock record clearing
 
-	// Release the advisory lock (on the SAME connection that acquired it).
+	// Release on the owning session exactly once; retire it if unlock fails.
+	if e.dedicated != nil {
+		return e.releaseDedicated(cleanCtx)
+	}
+	e.locked = false
 	_, err := e.exec(cleanCtx, "SELECT RELEASE_LOCK(?)", advisoryLockName)
-
-	// Release the dedicated connection back to the pool.
-	e.releaseDedicated()
-
 	return err
 }
 

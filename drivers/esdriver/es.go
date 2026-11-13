@@ -61,6 +61,7 @@ func (t productHeaderTransport) RoundTrip(req *http.Request) (*http.Response, er
 // integration with grove.DB.
 type ElasticDB struct {
 	client       *elasticsearch.Client
+	transport    *http.Transport // owned HTTP pool; custom transports remain caller-owned
 	defaultIndex string
 	refresh      string // "true", "false", "wait_for"
 	hooks        *hook.Engine
@@ -83,8 +84,20 @@ func (db *ElasticDB) Name() string { return "elasticsearch" }
 //	esdb := esdriver.New()
 //	err := esdb.Open(ctx, "http://localhost:9200")
 func (db *ElasticDB) Open(ctx context.Context, addresses string, opts ...EsOption) error {
+	if db.client != nil {
+		return fmt.Errorf("esdriver: already opened; use New for another connection")
+	}
 	o := defaultEsOptions()
 	o.apply(opts)
+	transport, owned, err := newTransport(o)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if db.client == nil && owned != nil {
+			owned.CloseIdleConnections()
+		}
+	}()
 
 	addrs := o.Addresses
 	if len(addrs) == 0 {
@@ -93,6 +106,7 @@ func (db *ElasticDB) Open(ctx context.Context, addresses string, opts ...EsOptio
 
 	cfg := elasticsearch.Config{
 		Addresses: addrs,
+		Transport: transport,
 		// Every API call is traced and timed through grove's telemetry.
 		Instrumentation: instrumentation{tel: db.tel},
 	}
@@ -109,14 +123,8 @@ func (db *ElasticDB) Open(ctx context.Context, addresses string, opts ...EsOptio
 	if o.CloudID != "" {
 		cfg.CloudID = o.CloudID
 	}
-	if o.CACert != nil {
-		cfg.CACert = o.CACert
-	}
 	if o.MaxRetries > 0 {
 		cfg.MaxRetries = o.MaxRetries
-	}
-	if o.Transport != nil {
-		cfg.Transport = o.Transport
 	}
 	if o.OpenSearch {
 		// Wrap whatever transport is configured (custom or default) so the
@@ -141,13 +149,18 @@ func (db *ElasticDB) Open(ctx context.Context, addresses string, opts ...EsOptio
 	}
 
 	db.client = client
+	db.transport = owned
 	db.refresh = o.Refresh
 	return nil
 }
 
-// Close is a no-op for Elasticsearch since the HTTP client does not
-// require explicit cleanup.
+// Close releases idle connections in the driver's owned HTTP transport.
+// A transport supplied with WithTransport remains caller-owned, unless a
+// private copy was required to configure WithCACert.
 func (db *ElasticDB) Close() error {
+	if db.transport != nil {
+		db.transport.CloseIdleConnections()
+	}
 	return nil
 }
 

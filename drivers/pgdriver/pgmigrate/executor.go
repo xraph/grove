@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -47,7 +48,8 @@ const (
 type Executor struct {
 	drv       driver.Driver
 	dedicated driver.DedicatedConn // non-nil while migration lock is held
-	inTx      bool                 // a BEGIN on dedicated has not been committed or rolled back
+	locked    bool
+	inTx      bool // a BEGIN on dedicated has not been committed or rolled back
 }
 
 var (
@@ -85,16 +87,25 @@ func (e *Executor) queryRow(ctx context.Context, query string, args ...any) driv
 	return e.drv.QueryRow(ctx, query, args...)
 }
 
-func (e *Executor) releaseDedicated() {
+func (e *Executor) releaseDedicated(ctx context.Context) error {
 	e.inTx = false
-	if e.dedicated != nil {
-		// Safety net: release ALL advisory locks held on this session before
-		// returning the connection to the pool. This prevents lock leaks if
-		// pg_advisory_unlock(1) failed or was skipped for any reason.
-		_, _ = e.dedicated.Exec(context.Background(), "SELECT pg_advisory_unlock_all()") //nolint:errcheck // best-effort cleanup
-		e.dedicated.Release()
-		e.dedicated = nil
+	e.locked = false
+	if e.dedicated == nil {
+		return nil
 	}
+	conn := e.dedicated
+	e.dedicated = nil
+	cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_, err := conn.Exec(cleanCtx, "SELECT pg_advisory_unlock_all()")
+	if err != nil {
+		if discardable, ok := conn.(driver.DiscardableConn); ok {
+			discardable.Discard()
+			return err
+		}
+	}
+	conn.Release()
+	return err
 }
 
 // DriverName reports the driver this executor runs on. The builders use it to
@@ -285,6 +296,9 @@ var concurrentCreateCodes = []string{"23505", "42P07", "42710"}
 // operations share the same session. This prevents lock leaks when using
 // connection pools.
 func (e *Executor) AcquireLock(ctx context.Context, lockedBy string) error {
+	if e.locked || e.dedicated != nil {
+		return fmt.Errorf("pgmigrate: %w", migrate.ErrLockHeld)
+	}
 	// Acquire a dedicated connection if the driver supports it.
 	if acq, ok := e.drv.(driver.ConnAcquirer); ok {
 		conn, err := acq.AcquireConn(ctx)
@@ -299,12 +313,10 @@ func (e *Executor) AcquireLock(ctx context.Context, lockedBy string) error {
 	row := e.queryRow(ctx, "SELECT pg_try_advisory_lock(1)")
 	var acquired bool
 	if err := row.Scan(&acquired); err != nil {
-		e.releaseDedicated()
-		return fmt.Errorf("pgmigrate: advisory lock: %w", err)
+		return errors.Join(fmt.Errorf("pgmigrate: advisory lock: %w", err), e.releaseDedicated(ctx))
 	}
 	if !acquired {
-		e.releaseDedicated()
-		return fmt.Errorf("pgmigrate: %w", migrate.ErrLockHeld)
+		return errors.Join(fmt.Errorf("pgmigrate: %w", migrate.ErrLockHeld), e.releaseDedicated(ctx))
 	}
 
 	// Record who holds the lock for debugging.
@@ -313,13 +325,16 @@ func (e *Executor) AcquireLock(ctx context.Context, lockedBy string) error {
 		ON CONFLICT (id) DO UPDATE SET locked_at = NOW(), locked_by = $1`,
 		lockTableName)
 	if _, err := e.exec(ctx, query, lockedBy); err != nil {
-		// Best-effort unlock before releasing the connection. Use a
-		// background context so the unlock succeeds even if ctx is cancelled.
-		_, _ = e.exec(context.Background(), "SELECT pg_advisory_unlock(1)") //nolint:errcheck // best-effort cleanup on error path
-		e.releaseDedicated()
-		return err
+		if e.dedicated != nil {
+			return errors.Join(err, e.releaseDedicated(ctx))
+		}
+		cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_, unlockErr := e.exec(cleanCtx, "SELECT pg_advisory_unlock(1)")
+		return errors.Join(err, unlockErr)
 	}
 
+	e.locked = true
 	return nil
 }
 
@@ -328,9 +343,13 @@ func (e *Executor) AcquireLock(ctx context.Context, lockedBy string) error {
 // is released on that same connection before the connection is returned to
 // the pool.
 func (e *Executor) ReleaseLock(ctx context.Context) error {
+	if !e.locked && e.dedicated == nil {
+		return nil
+	}
 	// Use an uncancellable context so the advisory lock is always released,
 	// even if the caller's context was cancelled mid-migration.
-	cleanCtx := context.WithoutCancel(ctx)
+	cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 
 	// A transaction nobody settled would swallow the record update below and
 	// hand a dirty connection back to the pool. The orchestrator always ends
@@ -342,12 +361,12 @@ func (e *Executor) ReleaseLock(ctx context.Context) error {
 		lockTableName)
 	_, _ = e.exec(cleanCtx, query) //nolint:errcheck // best-effort lock record clearing
 
-	// Release the advisory lock (on the SAME connection that acquired it).
+	// Release on the owning session exactly once; retire it if unlock fails.
+	if e.dedicated != nil {
+		return e.releaseDedicated(cleanCtx)
+	}
+	e.locked = false
 	_, err := e.exec(cleanCtx, "SELECT pg_advisory_unlock(1)")
-
-	// Release the dedicated connection back to the pool.
-	e.releaseDedicated()
-
 	return err
 }
 

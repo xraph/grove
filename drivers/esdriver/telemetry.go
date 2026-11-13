@@ -72,6 +72,10 @@ func callFrom(ctx context.Context) *call {
 }
 
 func (i instrumentation) Start(ctx context.Context, name string) context.Context {
+	// Native client methods pass nil when WithContext was omitted.
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ctx, op := i.tel.Start(ctx, name, "")
 	return context.WithValue(ctx, callKey{}, &call{op: op, endpoint: name})
 }

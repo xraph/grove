@@ -40,6 +40,9 @@ func (db *BadgerDB) Name() string { return "badger" }
 // Open opens a Badger database at the given path.
 // Use "memory://" for an in-memory database.
 func (db *BadgerDB) Open(_ context.Context, dsn string, opts ...driver.Option) error {
+	if db.db != nil {
+		return fmt.Errorf("badgerdriver: already opened; use New for another database")
+	}
 	db.opts = driver.ApplyOptions(opts)
 
 	var badgerOpts badger.Options

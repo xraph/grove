@@ -26,6 +26,7 @@ type pgCursor struct {
 	ownerTx    bool // if true, commit/rollback tx on Close
 
 	currentRows    driver.Rows // current batch of rows from FETCH
+	batchRows      int
 	releaseContext context.CancelFunc
 	done           bool
 	err            error
@@ -81,6 +82,7 @@ func (c *pgCursor) fetchBatch(ctx context.Context) error {
 
 	c.releaseContext = release
 	c.currentRows = rows
+	c.batchRows = 0
 	return nil
 }
 
@@ -116,12 +118,18 @@ func (c *pgCursor) NextContext(ctx context.Context) bool {
 
 	// Try to advance within the current batch.
 	if c.currentRows.Next() {
+		c.batchRows++
 		return true
 	}
 
 	// Check for errors in the current batch.
 	if c.currentRows.Err() != nil {
 		c.err = c.currentRows.Err()
+		c.done = true
+		return false
+	}
+	// A short FETCH already proves exhaustion, including an empty first batch.
+	if c.batchRows < c.fetchSize {
 		c.done = true
 		return false
 	}
@@ -135,6 +143,7 @@ func (c *pgCursor) NextContext(ctx context.Context) bool {
 
 	// Try to advance in the new batch.
 	if c.currentRows.Next() {
+		c.batchRows++
 		return true
 	}
 
@@ -184,16 +193,14 @@ func (c *pgCursor) Close() error {
 		c.closeErr = errors.Join(c.closeErr, c.tx.Rollback())
 		return c.closeErr
 	}
+	if c.ownerTx {
+		// COMMIT closes non-holdable cursors; a separate CLOSE costs a round trip.
+		c.closeErr = c.tx.Commit()
+		return c.closeErr
+	}
 	closeSQL := fmt.Sprintf("CLOSE %s", c.cursorName)
 	_, closeErr := c.tx.Exec(context.Background(), closeSQL)
 	c.closeErr = errors.Join(c.closeErr, closeErr)
-	if c.ownerTx {
-		if c.closeErr != nil {
-			c.closeErr = errors.Join(c.closeErr, c.tx.Rollback())
-		} else {
-			c.closeErr = c.tx.Commit()
-		}
-	}
 	return c.closeErr
 }
 

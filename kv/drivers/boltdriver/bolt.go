@@ -47,6 +47,9 @@ func (b *BoltDB) Name() string { return "bbolt" }
 
 // Open opens a bbolt database at the path specified by dsn.
 func (b *BoltDB) Open(_ context.Context, dsn string, opts ...driver.Option) error {
+	if b.db != nil {
+		return fmt.Errorf("boltdriver: already opened; use New for another database")
+	}
 	b.opts = driver.ApplyOptions(opts)
 
 	cfg := defaultConfig()
