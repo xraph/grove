@@ -15,11 +15,6 @@ import (
 	"sync"
 )
 
-// errEndOfStream is returned by a decode function that has run out of rows
-// before the cursor has, such as Filter rejecting the last rows or Take
-// reaching its limit. Stream.Next ends iteration cleanly when it sees it.
-var errEndOfStream = errors.New("stream: end of stream")
-
 // HookRunner is an optional interface for per-row hook execution.
 // This avoids importing the hook package directly.
 type HookRunner interface {
@@ -28,14 +23,17 @@ type HookRunner interface {
 
 // Stream is a lazy, pull-based iterator over database results.
 type Stream[T any] struct {
-	cursor  Cursor
-	decode  DecodeFunc[T]
-	hooks   HookRunner // optional, nil means no hooks
-	qc      any        // *hook.QueryContext, stored as any to avoid import cycle
-	current T
-	done    bool
-	err     error
-	once    sync.Once
+	pull        func(context.Context) (T, bool, error)
+	closeSource func() error
+	closeErr    error
+	cursor      Cursor
+	decode      DecodeFunc[T]
+	hooks       HookRunner // optional, nil means no hooks
+	qc          any        // *hook.QueryContext, stored as any to avoid import cycle
+	current     T
+	done        bool
+	err         error
+	once        sync.Once
 }
 
 // New creates a new Stream from a cursor and a decode function.
@@ -81,11 +79,6 @@ func (s *Stream[T]) Next(ctx context.Context) bool {
 	if s.done {
 		return false
 	}
-	cursor := s.cursor
-	if contextual, ok := cursor.(ContextCursor); ok {
-		cursor = contextualCursor{ContextCursor: contextual, ctx: ctx}
-	}
-
 	for {
 		// Check context cancellation.
 		if ctx.Err() != nil {
@@ -94,20 +87,10 @@ func (s *Stream[T]) Next(ctx context.Context) bool {
 			return false
 		}
 
-		if !cursor.Next() {
+		val, ok, err := s.advance(ctx)
+		if !ok {
 			s.done = true
-			s.err = s.cursor.Err()
-			return false
-		}
-
-		val, err := s.decode(cursor)
-		if err != nil {
-			s.done = true
-			if errors.Is(err, errEndOfStream) {
-				s.err = s.cursor.Err()
-			} else {
-				s.err = err
-			}
+			s.err = err
 			return false
 		}
 
@@ -134,6 +117,24 @@ func (s *Stream[T]) Next(ctx context.Context) bool {
 	}
 }
 
+// advance reads one value. Pipeline stages use their source's Next so its
+// hooks, terminal state, and consumer context remain part of the pipeline.
+func (s *Stream[T]) advance(ctx context.Context) (value T, more bool, err error) {
+	if s.pull != nil {
+		return s.pull(ctx)
+	}
+	cursor := s.cursor
+	if contextual, ok := cursor.(ContextCursor); ok {
+		cursor = contextualCursor{ContextCursor: contextual, ctx: ctx}
+	}
+	if !cursor.Next() {
+		var zero T
+		return zero, false, cursor.Err()
+	}
+	value, err = s.decode(cursor)
+	return value, err == nil, err
+}
+
 // Value returns the current decoded row. Only valid after Next() returns true.
 func (s *Stream[T]) Value() T {
 	return s.current
@@ -147,12 +148,15 @@ func (s *Stream[T]) Err() error {
 // Close releases the server-side cursor and underlying connection.
 // Always defer this.
 func (s *Stream[T]) Close() error {
-	var err error
 	s.once.Do(func() {
 		s.done = true
-		err = s.cursor.Close()
+		if s.closeSource != nil {
+			s.closeErr = s.closeSource()
+		} else {
+			s.closeErr = s.cursor.Close()
+		}
 	})
-	return err
+	return s.closeErr
 }
 
 // All returns a range-over-func iterator for use with Go 1.23+ for-range.
@@ -169,17 +173,15 @@ func (s *Stream[T]) All(yield func(T, error) bool) {
 			return
 		}
 	}
-	if s.Err() != nil {
+	if err := errors.Join(s.Err(), s.Close()); err != nil {
 		var zero T
-		yield(zero, s.Err())
+		yield(zero, err)
 	}
 }
 
 // Collect drains the stream into a slice.
-func (s *Stream[T]) Collect(ctx context.Context) ([]T, error) {
-	defer func() { _ = s.Close() }()
-
-	var result []T
+func (s *Stream[T]) Collect(ctx context.Context) (result []T, err error) {
+	defer func() { err = errors.Join(err, s.Close()) }()
 	for s.Next(ctx) {
 		result = append(result, s.Value())
 	}
@@ -189,11 +191,9 @@ func (s *Stream[T]) Collect(ctx context.Context) ([]T, error) {
 	return result, nil
 }
 
-// Count drains the stream counting rows without allocating models.
-func (s *Stream[T]) Count(ctx context.Context) (int64, error) {
-	defer func() { _ = s.Close() }()
-
-	var count int64
+// Count drains the stream and returns the number of yielded values.
+func (s *Stream[T]) Count(ctx context.Context) (count int64, err error) {
+	defer func() { err = errors.Join(err, s.Close()) }()
 	for s.Next(ctx) {
 		count++
 	}

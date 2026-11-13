@@ -1,87 +1,65 @@
 package stream
 
-import "context"
+import (
+	"context"
+	"errors"
+	"fmt"
+)
 
 // Map transforms each element in the stream.
 func Map[T, U any](s *Stream[T], fn func(T) (U, error)) *Stream[U] {
 	return &Stream[U]{
-		cursor: s.cursor,
-		decode: func(c Cursor) (U, error) {
-			// Stream.Next has already advanced the cursor to this row.
-			val, err := s.decode(c)
-			if err != nil {
+		closeSource: s.Close,
+		pull: func(ctx context.Context) (U, bool, error) {
+			if !s.Next(ctx) {
 				var zero U
-				return zero, err
+				return zero, false, s.Err()
 			}
-			return fn(val)
+			value, err := fn(s.Value())
+			return value, err == nil, err
 		},
 	}
 }
 
 // Filter yields only elements where the predicate returns true.
 func Filter[T any](s *Stream[T], fn func(T) bool) *Stream[T] {
-	original := s.decode
 	return &Stream[T]{
-		cursor: s.cursor,
-		decode: func(c Cursor) (T, error) {
-			for {
-				val, err := original(c)
-				if err != nil {
-					return val, err
-				}
-				if fn(val) {
-					return val, nil
-				}
-				// Skip this value, try next.
-				if !c.Next() {
-					var zero T
-					return zero, errEndOfStream
+		closeSource: s.Close,
+		pull: func(ctx context.Context) (T, bool, error) {
+			for s.Next(ctx) {
+				value := s.Value()
+				if fn(value) {
+					return value, true, nil
 				}
 			}
+			var zero T
+			return zero, false, s.Err()
 		},
 	}
 }
 
-// Take yields at most n elements then marks the stream as done.
+// Take yields at most n elements without fetching another row after the limit.
 func Take[T any](s *Stream[T], n int) *Stream[T] {
-	cursor := &takeCursor{Cursor: s.cursor, remaining: n}
-	original := s.decode
 	return &Stream[T]{
-		cursor: cursor,
-		decode: func(c Cursor) (T, error) {
-			val, err := original(c)
-			cursor.remaining--
-			return val, err
+		closeSource: s.Close,
+		pull: func(ctx context.Context) (T, bool, error) {
+			var zero T
+			if n <= 0 {
+				return zero, false, nil
+			}
+			if !s.Next(ctx) {
+				return zero, false, s.Err()
+			}
+			n--
+			return s.Value(), true, nil
 		},
 	}
-}
-
-// takeCursor checks the limit before advancing, including advances made by
-// downstream transforms. Decode counts output elements so upstream Filter or
-// Chunk can still consume all rows needed for one element.
-type takeCursor struct {
-	Cursor
-	remaining int
-}
-
-func (c *takeCursor) Next() bool {
-	return c.remaining > 0 && c.Cursor.Next()
-}
-
-func (c *takeCursor) NextContext(ctx context.Context) bool {
-	if c.remaining <= 0 {
-		return false
-	}
-	if contextual, ok := c.Cursor.(ContextCursor); ok {
-		return contextual.NextContext(ctx)
-	}
-	return c.Cursor.Next()
 }
 
 // Reduce accumulates a value over the entire stream.
-func Reduce[T, A any](s *Stream[T], initial A, fn func(A, T) A) (A, error) {
+func Reduce[T, A any](s *Stream[T], initial A, fn func(A, T) A) (result A, err error) {
 	ctx := context.Background()
-	defer func() { _ = s.Close() }()
+	defer func() { err = errors.Join(err, s.Close()) }()
 
 	acc := initial
 	for s.Next(ctx) {
@@ -90,42 +68,38 @@ func Reduce[T, A any](s *Stream[T], initial A, fn func(A, T) A) (A, error) {
 	return acc, s.Err()
 }
 
-// ForEach processes every element with a callback. Returns first error.
-func ForEach[T any](s *Stream[T], fn func(T) error) error {
+// ForEach processes every element with a callback. It reports iteration,
+// callback, and cursor cleanup errors.
+func ForEach[T any](s *Stream[T], fn func(T) error) (err error) {
 	ctx := context.Background()
-	defer func() { _ = s.Close() }()
+	defer func() { err = errors.Join(err, s.Close()) }()
 
 	for s.Next(ctx) {
-		if err := fn(s.Value()); err != nil {
-			return err
+		if callbackErr := fn(s.Value()); callbackErr != nil {
+			return callbackErr
 		}
 	}
 	return s.Err()
 }
 
-// Chunk groups elements into fixed-size batches.
+// Chunk groups elements into fixed-size batches. A non-positive size returns
+// an error without fetching. A partial batch is followed by any source error.
 func Chunk[T any](s *Stream[T], size int) *Stream[[]T] {
-	return &Stream[[]T]{
-		cursor: s.cursor,
-		decode: func(c Cursor) ([]T, error) {
-			batch := make([]T, 0, size)
-			for len(batch) < size {
-				val, err := s.decode(c)
-				if err != nil {
-					if len(batch) > 0 {
-						return batch, nil
-					}
-					return nil, err
-				}
-				batch = append(batch, val)
-				if len(batch) < size && !c.Next() {
-					break
-				}
-			}
-			if len(batch) == 0 {
-				return nil, c.Err()
-			}
-			return batch, nil
-		},
+	out := &Stream[[]T]{closeSource: s.Close}
+	if size <= 0 {
+		out.done = true
+		out.err = fmt.Errorf("stream: chunk size must be positive")
+		return out
 	}
+	out.pull = func(ctx context.Context) ([]T, bool, error) {
+		batch := make([]T, 0, size)
+		for len(batch) < size && s.Next(ctx) {
+			batch = append(batch, s.Value())
+		}
+		if len(batch) > 0 {
+			return batch, true, nil
+		}
+		return nil, false, s.Err()
+	}
+	return out
 }
