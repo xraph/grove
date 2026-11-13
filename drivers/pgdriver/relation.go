@@ -2,8 +2,11 @@ package pgdriver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/xraph/grove/internal/pool"
 	"github.com/xraph/grove/scan"
@@ -82,9 +85,12 @@ func (q *SelectQuery) loadHasOne(ctx context.Context, target any, rel *schema.Re
 
 		sqlStr, args := buildRelationQuery(q.db.dialect, relTable, rel.JoinColumn, baseVal.Interface())
 
-		row := q.db.QueryRow(ctx, sqlStr, args...)
+		row := q.db.QueryRow(ctx, sqlStr+" LIMIT 1", args...)
 		if err := scan.ScanRow(row, relModel, relTable); err != nil {
-			return nil // No related row found is not an error for HasOne.
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			return err
 		}
 
 		if relFieldVal.Kind() == reflect.Ptr {
@@ -263,9 +269,12 @@ func (q *SelectQuery) loadBelongsTo(ctx context.Context, target any, rel *schema
 
 	sqlStr, args := buildRelationQuery(q.db.dialect, relTable, rel.JoinColumn, fkVal.Interface())
 
-	row := q.db.QueryRow(ctx, sqlStr, args...)
+	row := q.db.QueryRow(ctx, sqlStr+" LIMIT 1", args...)
 	if err := scan.ScanRow(row, relModel, relTable); err != nil {
-		return nil // Not found is not an error for BelongsTo.
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
 	}
 
 	if relFieldVal.Kind() == reflect.Ptr {

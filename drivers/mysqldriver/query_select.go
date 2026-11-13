@@ -191,6 +191,11 @@ func (q *SelectQuery) ForShare() *SelectQuery {
 
 // Relation marks a relation for eager loading.
 func (q *SelectQuery) Relation(name string) *SelectQuery {
+	for _, existing := range q.relations {
+		if existing == name {
+			return q
+		}
+	}
 	q.relations = append(q.relations, name)
 	return q
 }
