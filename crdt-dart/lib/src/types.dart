@@ -951,3 +951,68 @@ final class DocumentState {
     );
   }
 }
+
+/// Side of a stable character address. Mirrors Go `crdt.TextSide`.
+enum TextSide {
+  /// Resolve before the right neighbor, following inserts at the gap.
+  before,
+
+  /// Resolve after the left neighbor, preceding inserts at the gap.
+  after,
+}
+
+/// An edit-stable gap. No ref means end for before, start for after.
+@immutable
+final class TextPosition {
+  /// Creates a position.
+  const TextPosition({this.ref, required this.side});
+
+  /// Stable character address, absent for a document boundary.
+  final TextRef? ref;
+
+  /// Side of the character to resolve.
+  final TextSide side;
+
+  /// Go wire form.
+  Map<String, Object?> toJson() => {
+    if (ref != null) 'ref': ref!.toJson(),
+    'side': side.name,
+  };
+
+  /// Decodes the Go wire form; invalid sides are rejected.
+  static TextPosition fromJson(Object? j) {
+    final m = wireObj(j);
+    return TextPosition(
+      ref: m['ref'] == null ? null : TextRef.fromJson(m['ref']),
+      side: TextSide.values.byName(wireStr(m, 'side')),
+    );
+  }
+}
+
+/// Direction-preserving selection using two independently anchored gaps.
+@immutable
+final class TextSelection {
+  /// Creates a selection.
+  const TextSelection({required this.anchor, required this.focus});
+
+  /// Fixed endpoint.
+  final TextPosition anchor;
+
+  /// Moving endpoint.
+  final TextPosition focus;
+
+  /// Go wire form.
+  Map<String, Object?> toJson() => {
+    'anchor': anchor.toJson(),
+    'focus': focus.toJson(),
+  };
+
+  /// Decodes the Go wire form.
+  static TextSelection fromJson(Object? j) {
+    final m = wireObj(j);
+    return TextSelection(
+      anchor: TextPosition.fromJson(m['anchor']),
+      focus: TextPosition.fromJson(m['focus']),
+    );
+  }
+}

@@ -283,3 +283,14 @@ describe("WebSocketTransport", () => {
     transport.close();
   });
 });
+
+it("seeds presence through a correlated snapshot on the existing socket", async () => {
+  const { transport, socket } = mkTransport();
+  await new Promise((r) => queueMicrotask(r as () => void));
+  socket().respond = msg => ({ type: "presence_snapshot", request_id: msg.request_id,
+    payload: { topic: "room", states: [{ node_id: "idle", topic: "room", data: { x: 1 }, updated_at: 0 }] } });
+  const states = await transport.getPresence("room");
+  expect(states[0].node_id).toBe("idle");
+  expect(socket().sent[0].type).toBe("presence_get");
+  transport.close();
+});

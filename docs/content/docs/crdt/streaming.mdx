@@ -264,3 +264,23 @@ The `SyncController` handles errors in the poll loop:
 - **Database errors**: Logged, poll continues on next tick
 - **Hook errors**: Logged, changes for that batch are skipped
 - **Client disconnect**: Context cancelled, goroutine exits cleanly
+
+## Presence over WebSocket
+
+The WebSocket handler broadcasts presence independently of table subscriptions.
+A canvas or lobby can receive participant updates with an empty table list, and
+unsubscribing from database changes does not stop presence. Cancelling the handler
+context closes the connection and releases its presence subscription; a remote
+disconnect also stops its background streams. Outbound frames are serialized for
+WebSocket implementations that permit only one writer.
+
+Both the TypeScript and Dart WebSocket transports support `getPresence(topic)`
+through the `presence_get` / `presence_snapshot` request exchange. This discovers
+idle peers without a second HTTP connection. TypeScript `CollaborationSession`
+and `useRoom` refresh joined presence after a stream reconnect.
+
+Presence remains ephemeral and process-local. Subscriber buffers are bounded and
+can drop events under sustained overload; there is no durable presence replay.
+Use snapshots to reconcile after reconnect, and call `session.refresh()` for an
+explicit reconciliation during a long-lived connection. Document sync retains
+its separate HLC-based recovery path.

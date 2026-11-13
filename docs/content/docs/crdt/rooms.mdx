@@ -390,3 +390,128 @@ function CollaborativeEditor({ docId }: { docId: string }) {
     );
 }
 ```
+
+## Paced collaboration sessions (TypeScript)
+
+`CollaborationSession` manages a local participant's presence lifecycle. It
+publishes at most once every 50 ms by default, keeps one write in flight, and
+replaces pending movement with the latest state. A slow connection cannot build
+up a queue of old cursor positions. Typing clears after 1.5 seconds without a
+new `setTyping(true)` call.
+
+```ts
+import { CRDTClient, CollaborationSession } from "@grove-js/crdt";
+
+const client = new CRDTClient({ baseURL: "/sync", nodeID: "browser-1" });
+const stream = client.stream();
+const unwatch = stream.on(event => {
+  if (event.type === "presence") client.applyPresenceEvent(event.data);
+});
+const session = new CollaborationSession(client, "documents:doc-1", {
+  name: "Alice", color: "#3b82f6",
+}, {
+  stream, // observes reconnects; does not connect or disconnect this stream
+  updateInterval: 50,
+  typingTimeout: 1500,
+  onError: error => console.error("Collaboration update failed", error),
+});
+
+stream.connect();
+await session.start(); // publish and discover idle peers already present
+session.updateCursor({ x: 120, y: 340, field: "canvas" });
+session.setTyping(true);
+session.update({ status: "editing" });
+
+// At an interaction boundary, force the latest pending state out.
+await session.flush();
+// On teardown, cancel queued movement and leave after outstanding writes.
+await session.close();
+unwatch();
+stream.disconnect();
+```
+
+Use one session per client and topic. Sessions send full presence snapshots;
+`update()` shallow-merges fields locally before sending. `updateCursor(null)`
+hides the cursor. `getSnapshot()` and `subscribe()` expose immutable local
+snapshots for framework adapters. If you manage streaming separately, call
+`refresh()` after reconnect. Stream events received during a presence snapshot
+request take precedence over that snapshot, including departures.
+
+`useRoom` uses this session automatically. Its optional third argument accepts
+`updateInterval`, `typingTimeout`, and `onError`. The participant's `nodeId` must
+match the provider's client node ID. Cursor and typing updates use the sync
+transport once per publication; they do not also call the room HTTP endpoints.
+With HTTP, room admission completes before presence starts, using the same fetch
+implementation and credentials as sync. `leave()` stops the session immediately;
+unmount also leaves and cleans up timers.
+
+## Selections that follow edits
+
+Absolute offsets drift when another participant inserts or deletes text. Capture
+`TextPosition` endpoints instead, and resolve them against the latest text state:
+
+```ts
+import { textPositionAt, textResolvePosition } from "@grove-js/crdt";
+
+const anchor = textPositionAt(textState, selectionStart, "before");
+const focus = textPositionAt(textState, selectionEnd, "before");
+if (anchor && focus) {
+  session.updateCursor({ field: "body", selection: { anchor, focus } });
+}
+
+// Resolve the remote selection after applying incoming document changes.
+const remote = peer.data.cursor?.selection;
+if (remote) {
+  const start = textResolvePosition(textState, remote.anchor);
+  const end = textResolvePosition(textState, remote.focus);
+  if (start !== null && end !== null) {
+    renderSelection(start, end); // preserves forward or backward selection
+  }
+}
+```
+
+All offsets count Unicode code points, matching Go runes. Convert DOM/editor
+UTF-16 offsets before capturing, and convert back after resolving. `before`
+anchors to the right neighbor and moves after insertions at the gap; `after`
+anchors to the left neighbor and stays before those insertions. Deleted anchors
+collapse to their former gap. An unknown anchor returns `null` (or `false` in
+Go), so callers can wait for the referenced edit instead of rendering a wrong
+position. Keep the text's address/tombstone information while anchors are in use.
+
+| Runtime | Capture | Resolve |
+| --- | --- | --- |
+| Go | `state.PositionAt(offset, crdt.TextBefore)` | `state.ResolvePosition(position)` |
+| TypeScript | `textPositionAt(state, offset, "before")` | `textResolvePosition(state, position)` |
+| Dart | `textPositionAt(state, offset, TextSide.before)` | `textResolvePosition(state, position)` |
+
+`CursorPosition.selection` carries the same JSON representation in all three
+runtimes. The existing absolute cursor fields remain available.
+
+## Smooth pointer rendering
+
+`CursorSmoother` decouples rendering from the network update rate. Feed received
+coordinates into it, then sample on animation frames. It uses local monotonic
+arrival times and settles at the latest point without predicting movement past
+it. Changing `field` snaps to the new coordinate space.
+
+```ts
+import { CursorSmoother } from "@grove-js/crdt";
+
+const cursors = new CursorSmoother(80); // interpolation duration in milliseconds
+// In your presence event handler:
+cursors.push(peer.node_id, {
+  x: peer.data.cursor.x ?? 0,
+  y: peer.data.cursor.y ?? 0,
+  field: peer.data.cursor.field,
+});
+// In your requestAnimationFrame renderer:
+const point = cursors.sample(peer.node_id);
+if (point) drawCursor(point.x, point.y);
+// On leave or a hidden cursor:
+cursors.remove(peer.node_id);
+```
+
+On the Go server, cursor and typing helpers now patch presence atomically,
+preserving custom top-level fields even during concurrent updates. Applications
+can use `PresenceManager.Patch` for their own atomic object patches; explicit
+JSON null values are retained, and invalid patches leave the previous state intact.

@@ -60,6 +60,9 @@ export type {
   ListOperation,
   DocumentCRDTState,
   TextRef,
+  TextSide,
+  TextPosition,
+  TextSelection,
   TextSpan,
   AttrState,
   TextFragment,
@@ -132,6 +135,8 @@ export {
   textLength,
   textDelta,
   textRefAt,
+  textPositionAt,
+  textResolvePosition,
   textIndexOf,
   resolveTextSpans,
   applyTextOp,
@@ -154,6 +159,8 @@ export {
 
 // Client
 export { CRDTClient } from "./client.js";
+export { CollaborationSession, CursorSmoother } from "./collaboration.js";
+export type { CollaborationOptions, CursorPoint } from "./collaboration.js";
 
 // SSE streaming
 export type { CRDTStreamEvent } from "./stream.js";

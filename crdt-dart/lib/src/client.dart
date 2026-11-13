@@ -254,9 +254,8 @@ final class CrdtClient {
   /// Joins [topic]: publishes presence, then seeds [presence] from the
   /// server's snapshot, so peers already present show at once.
   ///
-  /// The seed needs [PresenceTransport.getPresence]. The WebSocket transport
-  /// cannot answer it (the Go server has no `presence_get` handler), so over
-  /// a socket this is [updatePresence] alone, as in crdt-js.
+  /// The seed uses [PresenceTransport.getPresence], supported by both HTTP
+  /// and WebSocket. Custom transports may decline with [UnsupportedError].
   ///
   /// A snapshot that arrives after [leavePresence] for [topic],
   /// [leaveAllPresence] or [dispose] is dropped, so it cannot bring back

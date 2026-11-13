@@ -10,6 +10,8 @@
 import type {
   HLC,
   TextRef,
+  TextPosition,
+  TextSide,
   TextSpan,
   TextFragment,
   TextState,
@@ -671,4 +673,33 @@ export function mergeText(
     merged.frags[k] = mergeOriginFrags(local.frags[k], remote.frags[k]);
   }
   return merged;
+}
+
+/** Capture a gap in [0, textLength]. Before sticks to its right neighbor;
+ * after sticks to its left neighbor. Returns null for invalid input. */
+export function textPositionAt(state: TextState, index: number, side: TextSide = "before"): TextPosition | null {
+  if (!Number.isInteger(index) || index < 0 || index > textLength(state) ||
+      (side !== "before" && side !== "after")) return null;
+  const ref = textRefAt(state, side === "after" ? index - 1 : index);
+  return ref ? { ref: { origin: { ...ref.origin }, offset: ref.offset }, side } : { side };
+}
+
+/** Resolve an edit-stable gap, collapsing deleted anchors. Unknown addresses
+ * return null until their edits arrive. Retain tombstones while anchors live. */
+export function textResolvePosition(state: TextState, position: TextPosition): number | null {
+  if (position.side !== "before" && position.side !== "after") return null;
+  const ref = position.ref;
+  if (!ref) return position.side === "before" ? textLength(state) : 0;
+  if (isHeadRef(ref) || !Number.isInteger(ref.offset) || ref.offset < 0) return null;
+  let n = 0;
+  for (const seg of textWalk(state)) {
+    const visible = segVisible(seg);
+    if (textOriginKey(seg.frag.origin) === textOriginKey(ref.origin) &&
+        ref.offset >= seg.frag.start + seg.from && ref.offset < seg.frag.start + seg.to) {
+      if (visible) n += ref.offset - seg.frag.start - seg.from + (position.side === "after" ? 1 : 0);
+      return n;
+    }
+    if (visible) n += seg.to - seg.from;
+  }
+  return null;
 }

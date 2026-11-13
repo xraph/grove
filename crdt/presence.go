@@ -1,7 +1,9 @@
 package crdt
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -12,12 +14,15 @@ import (
 // State is kept entirely in-memory (never persisted to the database) and
 // cleaned up automatically via TTL expiry. It is safe for concurrent use.
 type PresenceManager struct {
-	mu       sync.RWMutex
-	states   map[string]map[string]*PresenceState // topic → nodeID → state
-	ttl      time.Duration
-	onChange func(event PresenceEvent)
-	logger   log.Logger
-	done     chan struct{}
+	mu        sync.RWMutex
+	states    map[string]map[string]*PresenceState // topic → nodeID → state
+	ttl       time.Duration
+	onChange  func(event PresenceEvent)
+	logger    log.Logger
+	done      chan struct{}
+	closeOnce sync.Once
+	events    []PresenceEvent
+	notifying bool
 }
 
 // NewPresenceManager creates a presence manager with the given TTL and
@@ -46,8 +51,50 @@ func NewPresenceManager(ttl time.Duration, onChange func(PresenceEvent), logger 
 // the resulting event ("join" for new entries, "update" for existing).
 func (pm *PresenceManager) Update(update PresenceUpdate) PresenceEvent {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
+	event := pm.updateLocked(update)
+	pm.mu.Unlock()
+	pm.notify()
+	return event
+}
 
+// Patch atomically merges an object into a participant's presence data.
+// Only supplied top-level keys change; null values are retained. It creates
+// an entry when absent and rejects non-object payloads without changing state.
+func (pm *PresenceManager) Patch(update PresenceUpdate) (PresenceEvent, error) {
+	var patch map[string]json.RawMessage
+	if err := json.Unmarshal(update.Data, &patch); err != nil {
+		return PresenceEvent{}, fmt.Errorf("crdt: decode presence patch: %w", err)
+	}
+	if patch == nil {
+		return PresenceEvent{}, fmt.Errorf("crdt: presence patch must be an object")
+	}
+	pm.mu.Lock()
+	data := make(map[string]json.RawMessage)
+	if state := pm.states[update.Topic][update.NodeID]; state != nil && time.Now().Before(state.ExpiresAt) {
+		if err := json.Unmarshal(state.Data, &data); err != nil {
+			pm.mu.Unlock()
+			return PresenceEvent{}, fmt.Errorf("crdt: decode existing presence: %w", err)
+		}
+	}
+	if data == nil {
+		data = make(map[string]json.RawMessage)
+	}
+	for key, value := range patch {
+		data[key] = value
+	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		pm.mu.Unlock()
+		return PresenceEvent{}, fmt.Errorf("crdt: encode presence patch: %w", err)
+	}
+	update.Data = raw
+	event := pm.updateLocked(update)
+	pm.mu.Unlock()
+	pm.notify()
+	return event, nil
+}
+
+func (pm *PresenceManager) updateLocked(update PresenceUpdate) PresenceEvent {
 	now := time.Now()
 	topic := update.Topic
 	nodeID := update.NodeID
@@ -59,14 +106,14 @@ func (pm *PresenceManager) Update(update PresenceUpdate) PresenceEvent {
 	}
 
 	eventType := PresenceJoin
-	if _, exists := topicMap[nodeID]; exists {
+	if state := topicMap[nodeID]; state != nil && now.Before(state.ExpiresAt) {
 		eventType = PresenceUpdateEvt
 	}
 
 	topicMap[nodeID] = &PresenceState{
 		NodeID:    nodeID,
 		Topic:     topic,
-		Data:      update.Data,
+		Data:      bytes.Clone(update.Data),
 		UpdatedAt: now,
 		ExpiresAt: now.Add(pm.ttl),
 	}
@@ -75,12 +122,9 @@ func (pm *PresenceManager) Update(update PresenceUpdate) PresenceEvent {
 		Type:   eventType,
 		NodeID: nodeID,
 		Topic:  topic,
-		Data:   update.Data,
+		Data:   bytes.Clone(update.Data),
 	}
-
-	if pm.onChange != nil {
-		pm.onChange(event)
-	}
+	pm.enqueueLocked(event)
 
 	return event
 }
@@ -89,16 +133,16 @@ func (pm *PresenceManager) Update(update PresenceUpdate) PresenceEvent {
 // "leave" event. No-op if the entry doesn't exist.
 func (pm *PresenceManager) Remove(topic, nodeID string) *PresenceEvent {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
-
-	return pm.removeLocked(topic, nodeID)
+	event := pm.removeLocked(topic, nodeID)
+	pm.mu.Unlock()
+	pm.notify()
+	return event
 }
 
 // RemoveNode removes all presence entries for the given node (e.g., on
 // SSE disconnect). Broadcasts a "leave" event for each removed entry.
 func (pm *PresenceManager) RemoveNode(nodeID string) []PresenceEvent {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
 
 	var events []PresenceEvent
 	for topic := range pm.states {
@@ -106,6 +150,8 @@ func (pm *PresenceManager) RemoveNode(nodeID string) []PresenceEvent {
 			events = append(events, *ev)
 		}
 	}
+	pm.mu.Unlock()
+	pm.notify()
 	return events
 }
 
@@ -120,8 +166,13 @@ func (pm *PresenceManager) Get(topic string) []PresenceState {
 	}
 
 	result := make([]PresenceState, 0, len(topicMap))
+	now := time.Now()
 	for _, state := range topicMap {
-		result = append(result, *state)
+		if now.Before(state.ExpiresAt) {
+			copyState := *state
+			copyState.Data = bytes.Clone(state.Data)
+			result = append(result, copyState)
+		}
 	}
 	return result
 }
@@ -133,7 +184,7 @@ func (pm *PresenceManager) GetTopicsForNode(nodeID string) []string {
 
 	var topics []string
 	for topic, topicMap := range pm.states {
-		if _, ok := topicMap[nodeID]; ok {
+		if state := topicMap[nodeID]; state != nil && time.Now().Before(state.ExpiresAt) {
 			topics = append(topics, topic)
 		}
 	}
@@ -142,7 +193,7 @@ func (pm *PresenceManager) GetTopicsForNode(nodeID string) []string {
 
 // Close stops the background cleanup goroutine.
 func (pm *PresenceManager) Close() {
-	close(pm.done)
+	pm.closeOnce.Do(func() { close(pm.done) })
 }
 
 // removeLocked removes a single entry. Must be called with pm.mu held.
@@ -166,9 +217,7 @@ func (pm *PresenceManager) removeLocked(topic, nodeID string) *PresenceEvent {
 		Topic:  topic,
 	}
 
-	if pm.onChange != nil {
-		pm.onChange(*event)
-	}
+	pm.enqueueLocked(*event)
 
 	return event
 }
@@ -197,7 +246,6 @@ func (pm *PresenceManager) cleanupLoop() {
 // cleanup removes all expired entries and broadcasts leave events.
 func (pm *PresenceManager) cleanup() {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
 
 	now := time.Now()
 
@@ -211,19 +259,59 @@ func (pm *PresenceManager) cleanup() {
 					log.String("node_id", nodeID),
 				)
 
-				if pm.onChange != nil {
-					pm.onChange(PresenceEvent{
-						Type:   PresenceLeave,
-						NodeID: nodeID,
-						Topic:  topic,
-					})
-				}
+				pm.enqueueLocked(PresenceEvent{
+					Type:   PresenceLeave,
+					NodeID: nodeID,
+					Topic:  topic,
+				})
 			}
 		}
 		if len(topicMap) == 0 {
 			delete(pm.states, topic)
 		}
 	}
+	pm.mu.Unlock()
+	pm.notify()
+}
+
+func (pm *PresenceManager) enqueueLocked(event PresenceEvent) {
+	if pm.onChange != nil {
+		event.Data = bytes.Clone(event.Data)
+		pm.events = append(pm.events, event)
+	}
+}
+
+// Drain callbacks in mutation order, outside the state lock. A callback may
+// read or update presence; reentrant updates are drained by the outer caller.
+func (pm *PresenceManager) notify() {
+	pm.mu.Lock()
+	if pm.notifying {
+		pm.mu.Unlock()
+		return
+	}
+	pm.notifying = true
+	completed := false
+	defer func() {
+		// A caller may recover a callback panic. Keep future notifications
+		// usable in that case; callbacks always execute with mu unlocked.
+		if !completed {
+			pm.mu.Lock()
+			pm.notifying = false
+			pm.mu.Unlock()
+		}
+	}()
+	for len(pm.events) > 0 {
+		event := pm.events[0]
+		pm.events[0] = PresenceEvent{}
+		pm.events = pm.events[1:]
+		pm.mu.Unlock()
+		pm.onChange(event)
+		pm.mu.Lock()
+	}
+	pm.events = nil
+	pm.notifying = false
+	completed = true
+	pm.mu.Unlock()
 }
 
 // MarshalEvent serializes a PresenceEvent to JSON bytes for SSE transport.

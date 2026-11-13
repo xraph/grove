@@ -403,3 +403,18 @@ export interface StorageAdapter {
 export interface AuthProvider {
   getHeaders(): Record<string, string> | Promise<Record<string, string>>;
 }
+
+/** Side of a stable character address; mirrors Go crdt.TextSide. */
+export type TextSide = "before" | "after";
+
+/** Edit-stable gap. No ref means end for before, start for after. */
+export interface TextPosition {
+  ref?: TextRef;
+  side: TextSide;
+}
+
+/** Direction-preserving selection in Unicode code points, not UTF-16 units. */
+export interface TextSelection {
+  anchor: TextPosition;
+  focus: TextPosition;
+}

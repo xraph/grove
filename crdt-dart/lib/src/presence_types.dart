@@ -269,6 +269,7 @@ final class CursorPosition {
     this.selectionStart = 0,
     this.selectionEnd = 0,
     this.field = '',
+    this.selection,
   });
 
   /// Pointer x coordinate.
@@ -295,6 +296,9 @@ final class CursorPosition {
   /// The field the cursor is in.
   final String field;
 
+  /// Edit-stable text selection endpoints.
+  final TextSelection? selection;
+
   /// Go wire form: each key only when non-zero.
   Map<String, Object?> toJson() => {
     if (x != 0) 'x': x,
@@ -305,6 +309,7 @@ final class CursorPosition {
     if (selectionStart != 0) 'selection_start': selectionStart,
     if (selectionEnd != 0) 'selection_end': selectionEnd,
     if (field.isNotEmpty) 'field': field,
+    if (selection != null) 'selection': selection!.toJson(),
   };
 
   /// Decodes the Go wire form.
@@ -319,6 +324,9 @@ final class CursorPosition {
       selectionStart: wireInt(m, 'selection_start'),
       selectionEnd: wireInt(m, 'selection_end'),
       field: wireStr(m, 'field'),
+      selection: m['selection'] == null
+          ? null
+          : TextSelection.fromJson(m['selection']),
     );
   }
 }

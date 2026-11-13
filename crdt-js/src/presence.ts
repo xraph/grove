@@ -56,6 +56,8 @@ export class PresenceManager {
 
   /** Global listeners notified on any presence change. */
   private globalListeners = new Set<Listener>();
+  private seeding = new Map<string, Set<Map<string, PresenceEvent>>>();
+  private seedRequests = new Map<string, object>();
 
   /** The local node ID (excluded from getPresence results). */
   private localNodeID: string;
@@ -105,6 +107,9 @@ export class PresenceManager {
    */
   applyEvent(event: PresenceEvent): void {
     const { topic, node_id: nodeID } = event;
+    // Keep only each peer's latest event: cursor traffic must not grow an
+    // unbounded replay buffer while a snapshot request is slow.
+    for (const pending of this.seeding.get(topic) ?? []) pending.set(nodeID, event);
 
     switch (event.type) {
       case "join":
@@ -195,6 +200,34 @@ export class PresenceManager {
     this.notifyListeners(topic);
   }
 
+  /** Fetch a snapshot without overwriting concurrent stream events. */
+  async seedFrom(topic: string, fetch: () => Promise<PresenceState[]>, current: () => boolean = () => true): Promise<void> {
+    const request = {};
+    this.seedRequests.set(topic, request);
+    const pending = new Map<string, PresenceEvent>();
+    let buffers = this.seeding.get(topic);
+    if (!buffers) this.seeding.set(topic, buffers = new Set());
+    buffers.add(pending);
+    try {
+      const states = await fetch();
+      if (!current() || this.seedRequests.get(topic) !== request) return;
+      // Merge before publishing so observers never see the stale snapshot.
+      const merged = new Map(states.map(state => [state.node_id, state]));
+      for (const event of pending.values()) {
+        if (event.type === "leave") merged.delete(event.node_id);
+        else {
+          const live = this.getPeer(topic, event.node_id);
+          if (live) merged.set(event.node_id, live);
+        }
+      }
+      this.seed(topic, [...merged.values()]);
+    } finally {
+      buffers.delete(pending);
+      if (!buffers.size) this.seeding.delete(topic);
+      if (this.seedRequests.get(topic) === request) this.seedRequests.delete(topic);
+    }
+  }
+
   /**
    * Drop peers whose last update is older than maxAgeMs.
    *
@@ -221,6 +254,7 @@ export class PresenceManager {
    * Clear all presence state and notify listeners.
    */
   clear(): void {
+    this.seedRequests.clear();
     const topics = [...this.peers.keys()];
     this.peers.clear();
     for (const topic of topics) {

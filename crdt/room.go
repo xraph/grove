@@ -79,6 +79,9 @@ type CursorPosition struct {
 
 	// Field identifies which field/element the cursor is in.
 	Field string `json:"field,omitempty"`
+
+	// Selection holds edit-stable text endpoints instead of absolute offsets.
+	Selection *TextSelection `json:"selection,omitempty"`
 }
 
 // ParticipantData is the standard presence payload for room participants.
@@ -268,7 +271,14 @@ func (rm *RoomManager) JoinRoom(ctx context.Context, roomID, nodeID string, data
 	// to prevent TOCTOU races where two goroutines both pass the check.
 	if room.MaxParticipants > 0 {
 		current := rm.presence.Get(roomID)
-		if len(current) >= room.MaxParticipants {
+		alreadyJoined := false
+		for _, state := range current {
+			if state.NodeID == nodeID {
+				alreadyJoined = true
+				break
+			}
+		}
+		if !alreadyJoined && len(current) >= room.MaxParticipants {
 			rm.mu.Unlock()
 			return fmt.Errorf("crdt: room %s is full (%d/%d)", roomID, len(current), room.MaxParticipants)
 		}
@@ -344,49 +354,23 @@ func (rm *RoomManager) LeaveAllRooms(ctx context.Context, nodeID string) {
 
 // UpdateCursor is a convenience method to update a participant's cursor position.
 func (rm *RoomManager) UpdateCursor(roomID, nodeID string, cursor CursorPosition) {
-	// Read current presence data.
-	states := rm.presence.Get(roomID)
-	var existingData ParticipantData
-	for _, s := range states {
-		if s.NodeID == nodeID {
-			if s.Data != nil {
-				json.Unmarshal(s.Data, &existingData) //nolint:errcheck // best-effort read of existing presence data
-			}
-			break
-		}
-	}
-
-	existingData.Cursor = &cursor
-	data, _ := json.Marshal(existingData) //nolint:errcheck // serialization of known struct won't fail
-
-	rm.presence.Update(PresenceUpdate{
-		NodeID: nodeID,
-		Topic:  roomID,
-		Data:   data,
-	})
+	rm.patchParticipant(roomID, nodeID, map[string]any{"cursor": cursor})
 }
 
-// UpdateTypingStatus is a convenience method to update a participant's typing state.
+// UpdateTypingStatus atomically updates typing without replacing cursor or custom fields.
 func (rm *RoomManager) UpdateTypingStatus(roomID, nodeID string, isTyping bool) {
-	states := rm.presence.Get(roomID)
-	var existingData ParticipantData
-	for _, s := range states {
-		if s.NodeID == nodeID {
-			if s.Data != nil {
-				json.Unmarshal(s.Data, &existingData) //nolint:errcheck // best-effort read of existing presence data
-			}
-			break
-		}
+	rm.patchParticipant(roomID, nodeID, map[string]any{"is_typing": isTyping})
+}
+
+func (rm *RoomManager) patchParticipant(roomID, nodeID string, patch map[string]any) {
+	data, err := json.Marshal(patch)
+	if err != nil {
+		rm.logger.Error("crdt: encode participant patch", log.String("error", err.Error()))
+		return
 	}
-
-	existingData.IsTyping = isTyping
-	data, _ := json.Marshal(existingData) //nolint:errcheck // serialization of known struct won't fail
-
-	rm.presence.Update(PresenceUpdate{
-		NodeID: nodeID,
-		Topic:  roomID,
-		Data:   data,
-	})
+	if _, err := rm.presence.Patch(PresenceUpdate{NodeID: nodeID, Topic: roomID, Data: data}); err != nil {
+		rm.logger.Error("crdt: patch participant", log.String("error", err.Error()))
+	}
 }
 
 // SetRoomMetadata updates the metadata for a room.

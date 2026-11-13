@@ -35,6 +35,8 @@ import {
 import type { ReactNode } from "react";
 
 import { CRDTClient } from "./client.js";
+import { CollaborationSession } from "./collaboration.js";
+import type { CollaborationOptions } from "./collaboration.js";
 import { CRDTStore } from "./store.js";
 import { SyncEngine } from "./sync.js";
 import {
@@ -46,6 +48,7 @@ import type {
   CursorPosition,
   ParticipantData,
   RoomInfo,
+  RoomClientConfig,
 } from "./room.js";
 import type {
   CRDTClientConfig,
@@ -1131,7 +1134,7 @@ export interface UseRoomReturn<T extends ParticipantData = ParticipantData> {
   /** Number of participants including self. */
   count: number;
   /** Update your cursor position. */
-  updateCursor: (cursor: CursorPosition) => void;
+  updateCursor: (cursor: CursorPosition | null) => void;
   /** Update your typing status. */
   setTyping: (isTyping: boolean) => void;
   /** Update arbitrary presence data. */
@@ -1176,141 +1179,101 @@ export interface UseRoomReturn<T extends ParticipantData = ParticipantData> {
  */
 export function useRoom<T extends ParticipantData = ParticipantData>(
   roomId: string,
-  participant: {
-    nodeId: string;
-    name?: string;
-    color?: string;
-    avatar?: string;
-  }
+  participant: { nodeId: string; name?: string; color?: string; avatar?: string },
+  options: Omit<CollaborationOptions, "stream"> = {},
 ): UseRoomReturn<T> {
-  const { client } = useCRDTContext();
-
+  const { client, stream } = useCRDTContext();
+  if (participant.nodeId !== client.nodeID) {
+    throw new Error("useRoom participant.nodeId must match the CRDTClient nodeID");
+  }
   const [room, setRoom] = useState<RoomInfo | null>(null);
   const [selfData, setSelfData] = useState<T | null>(null);
-
-  // Build a RoomClient from the client's base URL.
-  // We derive the base URL from the existing transport config.
-  const roomClientRef = useRef<RoomClient | null>(null);
-  if (!roomClientRef.current) {
-    // The CRDTClient always has a baseURL-backed transport when used with
-    // the default setup. Extract it for the RoomClient.
-    const config = (client as unknown as { nodeID: string }).nodeID
-      ? extractBaseURL(client)
-      : undefined;
-    if (config) {
-      roomClientRef.current = new RoomClient(config);
-    }
-  }
-
-  const roomClient = roomClientRef.current;
-
-  // Initial participant data.
+  const sessionRef = useRef<CollaborationSession<T> | null>(null);
+  const lifecycle = useRef<Promise<unknown>>(Promise.resolve());
+  const leaveRef = useRef<(() => void) | null>(null);
+  const onError = useRef(options.onError);
+  onError.current = options.onError;
   const initialData = useRef<ParticipantData>({
-    name: participant.name,
-    color: participant.color ?? randomColor(),
-    avatar: participant.avatar,
+    name: participant.name, color: participant.color ?? randomColor(), avatar: participant.avatar,
   });
 
-  // Join the room and update presence on mount.
   useEffect(() => {
-    const data = initialData.current as T;
-    setSelfData(data);
-
-    // Join via presence (works even without RoomClient).
-    client.updatePresence(roomId, data).catch(() => {});
-
-    // Also join via RoomClient if available (registers with room manager).
-    if (roomClient) {
-      roomClient
-        .joinRoom(roomId, participant.nodeId, initialData.current)
-        .then((info) => setRoom(info))
-        .catch(() => {
-          // Fall back to fetching room info.
-          roomClient
-            .getRoom(roomId)
-            .then((info) => setRoom(info))
-            .catch(() => {});
-        });
-    }
-
-    return () => {
-      // Leave presence.
-      client.leavePresence(roomId).catch(() => {});
-
-      // Leave room via RoomClient.
-      if (roomClient) {
-        roomClient.leaveRoom(roomId, participant.nodeId).catch(() => {});
+    let mounted = true;
+    let joined = false;
+    const report = (error: unknown) => onError.current?.(error);
+    const config = extractBaseURL(client);
+    const rooms = config ? new RoomClient(config) : null;
+    const session = new CollaborationSession(client, roomId, initialData.current as T, {
+      updateInterval: options.updateInterval, typingTimeout: options.typingTimeout, onError: report,
+    });
+    sessionRef.current = session;
+    setRoom(null);
+    setSelfData(session.getSnapshot());
+    const unsubscribe = session.subscribe(() => setSelfData(session.getSnapshot()));
+    // Serialize join/leave across effect cleanup, including React StrictMode.
+    // Register first so a room capacity rejection never publishes presence.
+    const join = lifecycle.current.catch(report).then(async () => {
+      if (!mounted) return;
+      if (rooms) {
+        const info = await rooms.joinRoom(roomId, client.nodeID, session.getSnapshot());
+        joined = true;
+        if (mounted) setRoom(info);
       }
+      if (mounted) await session.start();
+    });
+    lifecycle.current = join.catch(error => {
+      if (rooms && !joined) {
+        if (mounted) setSelfData(null);
+        void session.close();
+      }
+      report(error);
+    });
+    const stop = () => {
+      if (!mounted) return;
+      mounted = false;
+      unsubscribe();
+      if (sessionRef.current === session) sessionRef.current = null;
+      const leave = session.close();
+      lifecycle.current = Promise.allSettled([join, leave]).then(async results => {
+        if (rooms && joined) await rooms.leaveRoom(roomId, client.nodeID);
+        if (results[1].status === "rejected") report(results[1].reason);
+      }).catch(report);
     };
-  }, [client, roomClient, roomId, participant.nodeId]);
+    leaveRef.current = stop;
+    return () => {
+      stop();
+      if (leaveRef.current === stop) leaveRef.current = null;
+    };
+  }, [client, roomId, options.updateInterval, options.typingTimeout]);
 
-  // Subscribe to presence updates for this room via PresenceManager.
+  useEffect(() => stream?.on(event => {
+    if (event.type === "connected") {
+      void sessionRef.current?.refresh().catch(error => onError.current?.(error));
+    }
+  }), [stream]);
+
   const others = useSyncExternalStore(
     (cb) => client.presence.subscribe(roomId, cb),
     () => client.presence.getPresence<T>(roomId),
-    () => EMPTY_ARRAY as PresenceState<T>[]
+    () => EMPTY_ARRAY as PresenceState<T>[],
   );
-
-  const updateCursor = useCallback(
-    (cursor: CursorPosition) => {
-      setSelfData((prev) => {
-        const next = { ...prev, cursor } as T;
-        client.updatePresence(roomId, next).catch(() => {});
-        if (roomClient) {
-          roomClient
-            .updateCursor(roomId, participant.nodeId, cursor)
-            .catch(() => {});
-        }
-        return next;
-      });
-    },
-    [client, roomClient, roomId, participant.nodeId]
-  );
-
-  const setTyping = useCallback(
-    (isTyping: boolean) => {
-      setSelfData((prev) => {
-        const next = { ...prev, is_typing: isTyping } as T;
-        client.updatePresence(roomId, next).catch(() => {});
-        if (roomClient) {
-          roomClient
-            .updateTyping(roomId, participant.nodeId, isTyping)
-            .catch(() => {});
-        }
-        return next;
-      });
-    },
-    [client, roomClient, roomId, participant.nodeId]
-  );
-
-  const updatePresenceData = useCallback(
-    (data: Partial<T>) => {
-      setSelfData((prev) => {
-        const next = { ...prev, ...data } as T;
-        client.updatePresence(roomId, next).catch(() => {});
-        return next;
-      });
-    },
-    [client, roomId]
-  );
-
+  const updateCursor = useCallback((cursor: CursorPosition | null) => {
+    sessionRef.current?.updateCursor(cursor);
+  }, []);
+  const setTyping = useCallback((typing: boolean) => {
+    sessionRef.current?.setTyping(typing);
+  }, []);
+  const updatePresenceData = useCallback((data: Partial<T>) => {
+    sessionRef.current?.update(data);
+  }, []);
   const leave = useCallback(() => {
-    client.leavePresence(roomId).catch(() => {});
-    if (roomClient) {
-      roomClient.leaveRoom(roomId, participant.nodeId).catch(() => {});
-    }
-  }, [client, roomClient, roomId, participant.nodeId]);
+    setSelfData(null);
+    setRoom(null);
+    leaveRef.current?.();
+  }, []);
 
-  return {
-    others,
-    self: selfData,
-    count: others.length + (selfData ? 1 : 0),
-    updateCursor,
-    setTyping,
-    updatePresence: updatePresenceData,
-    leave,
-    room,
-  };
+  return { others, self: selfData, count: others.length + (selfData ? 1 : 0),
+    updateCursor, setTyping, updatePresence: updatePresenceData, leave, room };
 }
 
 // --- useDocumentRoom ---
@@ -1517,7 +1480,7 @@ export function useConflicts(
  */
 function extractBaseURL(
   client: CRDTClient
-): { baseURL: string; headers?: Record<string, string> } | null {
+): RoomClientConfig | null {
   // Access the internal transport — this is intentionally coupled to the
   // HttpTransport implementation that stores baseURL as a protected field.
   const transport = (client as unknown as Record<string, unknown>)[
@@ -1527,6 +1490,8 @@ function extractBaseURL(
     return {
       baseURL: transport["baseURL"] as string,
       headers: transport["headers"] as Record<string, string> | undefined,
+      fetch: transport["fetchImpl"] as typeof fetch | undefined,
+      auth: transport["auth"] as RoomClientConfig["auth"],
     };
   }
   return null;

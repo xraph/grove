@@ -99,3 +99,33 @@ describe("presence", () => {
     await client.leaveAllPresence();
   });
 });
+
+it("merges stream updates and departures arriving while a snapshot is fetched", async () => {
+  const pm = new PresenceManager("me");
+  let resolve!: (states: PresenceState[]) => void;
+  const seed = pm.seedFrom("t", () => new Promise(done => { resolve = done; }));
+  pm.applyEvent({ type: "update", node_id: "moving", topic: "t", data: { x: 99 } });
+  pm.applyEvent({ type: "leave", node_id: "gone", topic: "t" });
+  resolve([
+    { node_id: "moving", topic: "t", data: { x: 1 }, updated_at: 0 },
+    { node_id: "gone", topic: "t", data: {}, updated_at: 0 },
+  ]);
+  await seed;
+  expect(pm.getPresence("t")).toHaveLength(1);
+  expect(pm.getPeer("t", "moving")?.data).toEqual({ x: 99 });
+});
+
+it("ignores superseded snapshots and snapshots completing after clear", async () => {
+  const pm = new PresenceManager("me");
+  let resolveOld!: (states: PresenceState[]) => void;
+  const old = pm.seedFrom("t", () => new Promise(done => { resolveOld = done; }));
+  await pm.seedFrom("t", async () => [{ node_id: "new", topic: "t", data: {}, updated_at: Date.now() }]);
+  resolveOld([{ node_id: "old", topic: "t", data: {}, updated_at: 0 }]);
+  await old;
+  expect(pm.getPresence("t").map(peer => peer.node_id)).toEqual(["new"]);
+  const pending = pm.seedFrom("t", () => new Promise(done => { resolveOld = done; }));
+  pm.clear();
+  resolveOld([{ node_id: "old", topic: "t", data: {}, updated_at: 0 }]);
+  await pending;
+  expect(pm.getPresence("t")).toEqual([]);
+});

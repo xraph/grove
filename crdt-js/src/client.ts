@@ -46,6 +46,8 @@ export class CRDTClient {
   private presenceConfig: PresenceConfig | undefined;
   private heartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
   private lastPresenceData = new Map<string, unknown>();
+  private presenceWrites = new Map<string, Promise<void>>();
+  private presenceEpochs = new Map<string, object>();
   private store: CRDTStore | null = null;
 
   constructor(config: CRDTClientConfig) {
@@ -198,15 +200,13 @@ export class CRDTClient {
     if (hooked === null) return;
 
     this.lastPresenceData.set(topic, hooked);
+    if (!this.presenceEpochs.has(topic)) this.presenceEpochs.set(topic, {});
+    const epoch = this.presenceEpochs.get(topic);
 
-    await this.transport.updatePresence({
-      node_id: this.nodeID,
-      topic,
-      data: hooked as Record<string, unknown>,
-    });
+    await this.writePresence(topic, hooked);
 
     // Start or reset heartbeat for this topic.
-    this.startHeartbeat(topic);
+    if (this.presenceEpochs.get(topic) === epoch) this.startHeartbeat(topic);
   }
 
   /**
@@ -216,23 +216,23 @@ export class CRDTClient {
    * Prefer this over updatePresence() when first entering a topic, and call
    * it again after a stream reconnect to re-seed.
    *
-   * HALF OF THIS SILENTLY NO-OPS ON MOST TRANSPORTS. The seeding leg needs
-   * `transport.getPresence`, and only HttpTransport has it — the Go server
-   * exposes no `presence_get` handler, so WebSocketTransport cannot
-   * implement one. Over WebSocket this method is exactly
-   * `updatePresence()`: your presence is published, but peers who were
-   * already idle stay invisible until they next move. There is no error;
-   * the seeding step is skipped.
+   * HTTP and WebSocket both support snapshots. Custom transports without
+   * getPresence publish without seeding.
    */
   async joinPresence<T = Record<string, unknown>>(
     topic: string,
     data: T
   ): Promise<void> {
     await this.updatePresence(topic, data);
-    if (this.transport.getPresence) {
-      const states = await this.transport.getPresence(topic);
-      this.presence.seed(topic, states);
-    }
+    await this.refreshPresence(topic);
+  }
+
+  /** Refresh joined peers, preserving stream events received during the fetch. */
+  async refreshPresence(topic: string): Promise<void> {
+    const epoch = this.presenceEpochs.get(topic);
+    if (!epoch || !this.transport.getPresence) return;
+    await this.presence.seedFrom(topic, () => this.transport.getPresence!(topic),
+      () => this.presenceEpochs.get(topic) === epoch);
   }
 
   /**
@@ -243,13 +243,10 @@ export class CRDTClient {
   async leavePresence(topic: string): Promise<void> {
     this.stopHeartbeat(topic);
     this.lastPresenceData.delete(topic);
+    this.presenceEpochs.delete(topic);
 
     if (this.transport.updatePresence) {
-      await this.transport.updatePresence({
-        node_id: this.nodeID,
-        topic,
-        data: null as unknown as Record<string, unknown>,
-      });
+      await this.writePresence(topic, null);
     }
   }
 
@@ -275,7 +272,7 @@ export class CRDTClient {
    * Leave all topics and stop all heartbeats. Call on cleanup/unmount.
    */
   async leaveAllPresence(): Promise<void> {
-    const topics = [...this.heartbeatTimers.keys()];
+    const topics = [...this.lastPresenceData.keys()];
     for (const topic of topics) {
       await this.leavePresence(topic);
     }
@@ -288,14 +285,8 @@ export class CRDTClient {
 
     const timer = setInterval(() => {
       const lastData = this.lastPresenceData.get(topic);
-      if (lastData !== undefined && this.transport.updatePresence) {
-        this.transport
-          .updatePresence({
-            node_id: this.nodeID,
-            topic,
-            data: lastData as Record<string, unknown>,
-          })
-          .catch(() => {});
+      if (lastData !== undefined && this.transport.updatePresence && !this.presenceWrites.has(topic)) {
+        this.writePresence(topic, lastData).catch(() => {});
       }
     }, interval);
 
@@ -308,5 +299,21 @@ export class CRDTClient {
       clearInterval(timer);
       this.heartbeatTimers.delete(topic);
     }
+  }
+
+  // A leave must follow pending writes, and a slow heartbeat must never
+  // arrive after a newer cursor. Different topics remain independent.
+  private writePresence(topic: string, data: unknown): Promise<void> {
+    const previous = this.presenceWrites.get(topic);
+    const send = () => this.transport.updatePresence!({
+      node_id: this.nodeID, topic, data: data as Record<string, unknown>,
+    });
+    const write = previous ? previous.catch(() => {}).then(send) : Promise.resolve().then(send);
+    this.presenceWrites.set(topic, write);
+    const cleanup = () => {
+      if (this.presenceWrites.get(topic) === write) this.presenceWrites.delete(topic);
+    };
+    void write.then(cleanup, cleanup);
+    return write;
   }
 }

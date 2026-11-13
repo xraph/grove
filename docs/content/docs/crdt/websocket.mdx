@@ -211,7 +211,7 @@ stream.connect();
 
 ### Connection Lifecycle
 
-The transport connects on first use and reconnects with backoff. It exposes `pull`, `push`, `updatePresence`, `subscribe` and `close`:
+The transport connects on first use and reconnects with backoff. It exposes `pull`, `push`, `updatePresence`, `getPresence`, `subscribe` and `close`:
 
 ```typescript
 const ws = new WebSocketTransport({ url: "wss://api.example.com/sync/ws" });
@@ -277,7 +277,7 @@ Send `subscribe` with the tables you want. If you already hold a cursor, pass it
 
 Leave `since` out and the first subscribe starts from the beginning of each table. A second `subscribe` on the same connection replaces the first. Without `since` it carries on from the last change you were sent. Each poll arrives as one `changes` frame holding an array of change records.
 
-Send `unsubscribe` to stop the stream. The server doesn't reply, and you can subscribe again on the same connection.
+Send `unsubscribe` to stop database changes. The server doesn't reply, and you can subscribe again on the same connection. Presence broadcasts continue independently, including for connections with no table subscription.
 
 To see who's in a topic right now, send `presence_get` with `{"topic": "documents:doc-1"}` and a `request_id`. You get back a `presence_snapshot` with the same `request_id`, or an `error` frame if presence is disabled.
 

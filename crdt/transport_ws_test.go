@@ -479,8 +479,8 @@ func TestWebSocketTransport_Options(t *testing.T) {
 	assert.Equal(t, []string{"t1", "t2"}, transport.tables)
 }
 
-// readWS waits for the next frame the handler wrote, skipping types in skip.
-func readWS(t *testing.T, conn *mockWSConn, skip ...WSMessageType) WebSocketMessage {
+// readWS waits for the next frame the handler wrote.
+func readWS(t *testing.T, conn *mockWSConn) WebSocketMessage {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
 	for {
@@ -488,13 +488,7 @@ func readWS(t *testing.T, conn *mockWSConn, skip ...WSMessageType) WebSocketMess
 		case raw := <-conn.writeCh:
 			var msg WebSocketMessage
 			require.NoError(t, json.Unmarshal(raw, &msg))
-			skipped := false
-			for _, s := range skip {
-				skipped = skipped || msg.Type == s
-			}
-			if !skipped {
-				return msg
-			}
+			return msg
 		case <-deadline:
 			t.Fatal("timeout waiting for a websocket frame")
 		}
@@ -578,4 +572,64 @@ func TestWebSocketHandler_Unsubscribe_StopsStreamWithoutError(t *testing.T) {
 		t.Fatalf("unexpected frame after unsubscribe: %s %s", msg.Type, msg.Payload)
 	case <-time.After(150 * time.Millisecond):
 	}
+}
+
+func TestWebSocketHandlerPresenceWithoutTablesAndDisconnectCleanup(t *testing.T) {
+	ctrl := NewSyncController(newTestPlugin(), WithPresenceEnabled(true))
+	defer ctrl.Close()
+	conn := newMockWSConn()
+	handler := NewWebSocketHandler(ctrl, conn, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- handler.Serve(ctx) }()
+	require.Eventually(t, func() bool {
+		ctrl.presenceMu.Lock()
+		defer ctrl.presenceMu.Unlock()
+		return len(ctrl.presenceSubs) == 1
+	}, time.Second, time.Millisecond)
+	_, err := ctrl.HandlePresenceUpdate(ctx, &PresenceUpdate{NodeID: "remote", Topic: "canvas", Data: json.RawMessage(`{"x":42}`)})
+	require.NoError(t, err)
+	frame := readWS(t, conn)
+	require.Equal(t, WSPresenceEvent, frame.Type)
+	var event PresenceEvent
+	require.NoError(t, json.Unmarshal(frame.Payload, &event))
+	require.Equal(t, "canvas", event.Topic)
+	cancel() // Must unblock ReadMessage, not wait for another frame.
+	select {
+	case err = <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not stop on cancellation")
+	}
+	require.Eventually(t, func() bool {
+		ctrl.presenceMu.Lock()
+		defer ctrl.presenceMu.Unlock()
+		return len(ctrl.presenceSubs) == 0
+	}, time.Second, time.Millisecond)
+}
+
+func TestWebSocketHandlerDisconnectCancelsPresenceSubscription(t *testing.T) {
+	ctrl := NewSyncController(newTestPlugin(), WithPresenceEnabled(true))
+	defer ctrl.Close()
+	conn := newMockWSConn()
+	handler := NewWebSocketHandler(ctrl, conn, nil)
+	done := make(chan error, 1)
+	go func() { done <- handler.Serve(context.Background()) }()
+	require.Eventually(t, func() bool {
+		ctrl.presenceMu.Lock()
+		defer ctrl.presenceMu.Unlock()
+		return len(ctrl.presenceSubs) == 1
+	}, time.Second, time.Millisecond)
+	require.NoError(t, conn.Close())
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not stop on disconnect")
+	}
+	require.Eventually(t, func() bool {
+		ctrl.presenceMu.Lock()
+		defer ctrl.presenceMu.Unlock()
+		return len(ctrl.presenceSubs) == 0
+	}, time.Second, time.Millisecond)
 }

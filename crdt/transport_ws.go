@@ -456,9 +456,10 @@ func (f *ForgeWSConn) ID() string {
 // It wraps a SyncController and handles pull/push/subscribe requests
 // received over WebSocket.
 type WebSocketHandler struct {
-	ctrl   *SyncController
-	conn   WebSocketConn
-	logger log.Logger
+	ctrl    *SyncController
+	conn    WebSocketConn
+	logger  log.Logger
+	writeMu sync.Mutex // WebSocket implementations commonly require a single writer.
 
 	mu            sync.Mutex
 	subscribing   bool
@@ -471,6 +472,9 @@ type WebSocketHandler struct {
 
 // NewWebSocketHandler creates a new server-side WebSocket handler.
 func NewWebSocketHandler(ctrl *SyncController, conn WebSocketConn, logger log.Logger) *WebSocketHandler {
+	if logger == nil {
+		logger = log.NewNoopLogger()
+	}
 	return &WebSocketHandler{
 		ctrl:          ctrl,
 		conn:          conn,
@@ -482,7 +486,19 @@ func NewWebSocketHandler(ctrl *SyncController, conn WebSocketConn, logger log.Lo
 // Serve reads messages from the WebSocket connection and processes them.
 // Call this in a goroutine per client connection.
 func (h *WebSocketHandler) Serve(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stopClose := context.AfterFunc(ctx, func() {
+		if err := h.conn.Close(); err != nil {
+			h.logger.Debug("crdt: ws close", log.String("error", err.Error()))
+		}
+	})
+	defer stopClose()
 	defer h.conn.Close()
+	// Presence has its own lifetime: a canvas or lobby needs no DB tables.
+	if events := h.ctrl.SubscribePresence(ctx); events != nil {
+		go h.presenceLoop(ctx, events)
+	}
 
 	for {
 		select {
@@ -493,6 +509,9 @@ func (h *WebSocketHandler) Serve(ctx context.Context) error {
 
 		data, err := h.conn.ReadMessage()
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if h.closed.Load() {
 				return nil
 			}
@@ -506,6 +525,17 @@ func (h *WebSocketHandler) Serve(ctx context.Context) error {
 		}
 
 		h.handleMessage(ctx, msg)
+	}
+}
+
+func (h *WebSocketHandler) presenceLoop(ctx context.Context, events <-chan PresenceEvent) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-events:
+			h.sendResponse("", WSPresenceEvent, event)
+		}
 	}
 }
 
@@ -621,7 +651,6 @@ func (h *WebSocketHandler) signalResubscribe() {
 }
 
 func (h *WebSocketHandler) streamLoop(ctx context.Context) {
-	presenceCh := h.ctrl.SubscribePresence(ctx)
 	lastHLC := HLC{}
 
 	for {
@@ -680,11 +709,6 @@ func (h *WebSocketHandler) streamLoop(ctx context.Context) {
 					}
 				}
 				h.mu.Unlock()
-			case event, ok := <-presenceCh:
-				if !ok {
-					continue
-				}
-				h.sendResponse("", WSPresenceEvent, event)
 			}
 		}
 		cancel()
@@ -699,6 +723,8 @@ func (h *WebSocketHandler) sendResponse(requestID string, msgType WSMessageType,
 		RequestID: requestID,
 	}
 	data, _ := json.Marshal(msg) //nolint:errcheck // serialization of known struct won't fail
+	h.writeMu.Lock()
+	defer h.writeMu.Unlock()
 	if err := h.conn.WriteMessage(data); err != nil {
 		h.logger.Error("crdt: ws write error", log.String("error", err.Error()))
 	}

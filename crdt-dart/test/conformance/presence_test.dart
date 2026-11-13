@@ -52,6 +52,45 @@ Future<Completer<void>> _awaitConnected(CrdtSubscription sub) {
 }
 
 void main() {
+  test('WebSocket snapshots and live presence work without tables', () async {
+    final server = await ConformanceServer.start();
+    addTearDown(server.stop);
+    final httpTransport = HttpTransport(baseUrl: server.syncUrl);
+    addTearDown(httpTransport.close);
+    await httpTransport.updatePresence(
+      const PresenceUpdate(
+        nodeId: 'idle-peer',
+        topic: 'canvas',
+        data: {'x': 1},
+      ),
+    );
+    final ws = WebSocketTransport(
+      url: server.syncUrl.replace(scheme: 'ws', path: '/sync/ws'),
+    );
+    addTearDown(ws.close);
+    final got = Completer<PresenceEvent>();
+    final sub = ws.subscribe(const StreamConfig());
+    sub.on((event) {
+      if (event is StreamPresence &&
+          event.event.nodeId == 'idle-peer' &&
+          !got.isCompleted) {
+        got.complete(event.event);
+      }
+    });
+    sub.connect();
+    final states = await ws.getPresence('canvas');
+    expect(states.single.nodeId, 'idle-peer');
+    await httpTransport.updatePresence(
+      const PresenceUpdate(
+        nodeId: 'idle-peer',
+        topic: 'canvas',
+        data: {'x': 42},
+      ),
+    );
+    final event = await got.future.timeout(const Duration(seconds: 5));
+    expect(event.data?.value, {'x': 42});
+  }, skip: ConformanceServer.skipReason());
+
   group(
     'presence over the SSE stream',
     skip: ConformanceServer.skipReason(),

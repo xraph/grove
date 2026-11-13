@@ -6,7 +6,7 @@
  * collaborative editing scenarios (cursors, typing indicators, etc.).
  */
 
-import type { PresenceState } from "./types.js";
+import type { AuthProvider, PresenceState, TextSelection } from "./types.js";
 
 // --- Types ---
 
@@ -20,6 +20,8 @@ export interface CursorPosition {
   selection_start?: number;
   selection_end?: number;
   field?: string;
+  /** Edit-stable endpoints for collaborative text. */
+  selection?: TextSelection;
 }
 
 /** Data associated with a participant in a room. */
@@ -27,7 +29,7 @@ export interface ParticipantData {
   name?: string;
   color?: string;
   avatar?: string;
-  cursor?: CursorPosition;
+  cursor?: CursorPosition | null;
   is_typing?: boolean;
   active_field?: string;
   status?: string;
@@ -60,6 +62,8 @@ export interface RoomClientConfig {
   fetch?: typeof fetch;
   /** Static headers to include in all room requests. */
   headers?: Record<string, string>;
+  /** Dynamic credentials, shared with the sync transport. */
+  auth?: AuthProvider;
 }
 
 // --- RoomClient ---
@@ -91,11 +95,13 @@ export class RoomClient {
   private baseURL: string;
   private fetchImpl: typeof fetch;
   private headers: Record<string, string>;
+  private auth?: AuthProvider;
 
   constructor(config: RoomClientConfig) {
     this.baseURL = config.baseURL.replace(/\/+$/, "");
     this.fetchImpl = config.fetch ?? globalThis.fetch.bind(globalThis);
     this.headers = config.headers ?? {};
+    this.auth = config.auth;
   }
 
   /**
@@ -306,6 +312,7 @@ export class RoomClient {
       headers: {
         "Content-Type": "application/json",
         ...this.headers,
+        ...(await this.auth?.getHeaders()),
       },
     };
 

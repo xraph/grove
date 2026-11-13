@@ -139,9 +139,8 @@ final class _Pending {
 ///
 /// [updatePresence] sends `presence_update` with no request id. The server's
 /// reply is an uncorrelated `presence_event`, delivered to subscribers as a
-/// [StreamPresence]. [getPresence] throws [UnsupportedError]: the Go server
-/// answers `presence_get` with an `error` frame. Use the HTTP presence
-/// endpoint.
+/// [StreamPresence]. [getPresence] uses the correlated `presence_get` /
+/// `presence_snapshot` exchange to discover idle peers.
 ///
 /// The transport connects at construction (a failure is swallowed and the
 /// next call retries) and, while a subscription is active, reconnects with
@@ -282,17 +281,12 @@ final class WebSocketTransport implements StreamTransport, PresenceTransport {
     if (!sent) throw NetworkError('CRDT ws presence_update could not be sent');
   }
 
-  /// Not supported over the socket: the Go server answers `presence_get` with
-  /// an `error` frame ("unknown message type"). Use the HTTP presence
-  /// endpoint instead.
-  ///
-  /// Throws [UnsupportedError] at once, not as a failed future.
+  /// Fetches idle peers over the existing socket using `presence_get`.
   @override
-  Future<List<PresenceState>> getPresence(
-    String topic,
-  ) => throw UnsupportedError(
-    'presence snapshots are not available over the WebSocket transport; use '
-    'the HTTP presence endpoint',
+  Future<List<PresenceState>> getPresence(String topic) => _rpc(
+    WsMessageType.presenceGet,
+    {'topic': topic},
+    (payload) => PresenceSnapshot.fromJson(payload).states,
   );
 
   // --- StreamTransport ---

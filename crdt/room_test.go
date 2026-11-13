@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	log "github.com/xraph/go-utils/log"
 )
 
@@ -259,4 +260,16 @@ func TestDocumentRoomID(t *testing.T) {
 	if DocumentRoomID("documents", "doc-1") != "documents:doc-1" {
 		t.Error("unexpected document room ID format")
 	}
+}
+
+func TestRoomRejoinAtCapacity(t *testing.T) {
+	pm := NewPresenceManager(time.Minute, nil, nil)
+	defer pm.Close()
+	rm := NewRoomManager(pm, nil)
+	_, err := rm.CreateRoom(context.Background(), "full", "document", WithMaxParticipants(1))
+	require.NoError(t, err)
+	require.NoError(t, rm.JoinRoom(context.Background(), "full", "a", json.RawMessage(`{}`)))
+	require.NoError(t, rm.JoinRoom(context.Background(), "full", "a", json.RawMessage(`{"name":"updated"}`)))
+	require.Error(t, rm.JoinRoom(context.Background(), "full", "b", json.RawMessage(`{}`)))
+	require.Equal(t, 1, rm.ParticipantCount("full"))
 }

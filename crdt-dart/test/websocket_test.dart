@@ -515,13 +515,31 @@ void main() {
       },
     );
 
-    test('getPresence is unsupported over the socket', () {
+    test('getPresence fetches a correlated snapshot over the socket', () async {
+      final ws = FakeWs();
+      ws.respond = (frame) => {
+        'type': 'presence_snapshot',
+        'request_id': frame['request_id'],
+        'payload': {
+          'topic': 'topic',
+          'states': [
+            {
+              'node_id': 'idle',
+              'topic': 'topic',
+              'data': {'x': 1},
+              'updated_at': '2026-01-01T00:00:00Z',
+            },
+          ],
+        },
+      };
       final t = WebSocketTransport(
         url: Uri.parse('ws://x/sync/ws'),
-        connect: (u, h, p) async => FakeWs(),
+        connect: (u, h, p) async => ws,
       );
-      expect(() => t.getPresence('topic'), throwsUnsupportedError);
-      t.close();
+      final states = await t.getPresence('topic');
+      expect(states.single.nodeId, 'idle');
+      expect(ws.sent.single['type'], 'presence_get');
+      await t.close();
     });
 
     test('never sends unsubscribe', () async {

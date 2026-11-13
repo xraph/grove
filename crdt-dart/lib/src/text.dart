@@ -796,3 +796,45 @@ List<TextOperation> textSetString(
   }
   return ops;
 }
+
+/// Captures a gap in [0, textLength], in Unicode code points.
+/// Before sticks to its right neighbor; after to its left neighbor.
+TextPosition? textPositionAt(
+  TextState state,
+  int index, [
+  TextSide side = TextSide.before,
+]) {
+  if (index < 0 || index > textLength(state)) return null;
+  return TextPosition(
+    ref: textRefAt(state, side == TextSide.after ? index - 1 : index),
+    side: side,
+  );
+}
+
+/// Resolves a stable gap. Deleted anchors collapse; unknown addresses return
+/// null until the corresponding edit arrives. Retain tombstones while in use.
+int? textResolvePosition(TextState state, TextPosition position) {
+  final ref = position.ref;
+  if (ref == null) {
+    return position.side == TextSide.before ? textLength(state) : 0;
+  }
+  if (_isHeadRef(ref) || ref.offset < 0) return null;
+  var n = 0;
+  for (final seg in textWalk(state)) {
+    final visible = _segVisible(seg);
+    if (seg.frag.origin == ref.origin &&
+        ref.offset >= seg.frag.start + seg.from &&
+        ref.offset < seg.frag.start + seg.to) {
+      if (visible) {
+        n +=
+            ref.offset -
+            seg.frag.start -
+            seg.from +
+            (position.side == TextSide.after ? 1 : 0);
+      }
+      return n;
+    }
+    if (visible) n += seg.to - seg.from;
+  }
+  return null;
+}

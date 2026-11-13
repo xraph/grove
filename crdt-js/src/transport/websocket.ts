@@ -11,7 +11,7 @@ import type {
   StreamTransport, StreamConfig, StreamSubscription, StreamEvent,
   StreamEventHandler, PullRequest, PullResponse, PushRequest, PushResponse,
   PresenceUpdate, ChangeRecord,
-  PresenceEvent, AuthProvider, HLC,
+  PresenceEvent, PresenceState, PresenceSnapshot, AuthProvider, HLC,
 } from "../types.js";
 import { TransportError } from "../errors.js";
 import { Backoff } from "../backoff.js";
@@ -119,6 +119,12 @@ export class WebSocketTransport implements StreamTransport {
   async updatePresence(update: PresenceUpdate): Promise<void> {
     const socket = await this.ensureOpen();
     socket.send(JSON.stringify({ type: "presence_update", payload: update }));
+  }
+
+  /** Seed idle peers over the same socket used for collaboration updates. */
+  async getPresence(topic: string): Promise<PresenceState[]> {
+    const snapshot = await this.rpc<PresenceSnapshot>("presence_get", { topic });
+    return snapshot.states ?? [];
   }
 
   // --- StreamTransport ---
