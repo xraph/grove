@@ -6,6 +6,7 @@
 package dynamodriver
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -158,17 +159,19 @@ func (d *DynamoDB) Delete(ctx context.Context, keys ...string) (int64, error) {
 
 // Exists checks if keys exist.
 func (d *DynamoDB) Exists(ctx context.Context, keys ...string) (int64, error) {
+	items, err := d.batchGet(ctx, keys, aws.String("#pk, #ttl"), map[string]string{"#pk": d.pkAttr, "#ttl": d.ttlAttr})
+	if err != nil {
+		return 0, fmt.Errorf("dynamodb: exists: %w", err)
+	}
+	found := make(map[string]bool, len(items))
+	for _, item := range items {
+		if key, ok := item[d.pkAttr].(*types.AttributeValueMemberS); ok && !d.isExpired(item) {
+			found[key.Value] = true
+		}
+	}
 	var count int64
 	for _, key := range keys {
-		out, err := d.client.GetItem(ctx, &dynamodb.GetItemInput{
-			TableName:            aws.String(d.tableName),
-			Key:                  d.primaryKey(key),
-			ProjectionExpression: aws.String(d.pkAttr),
-		})
-		if err != nil {
-			return 0, fmt.Errorf("dynamodb: exists: %w", err)
-		}
-		if out.Item != nil && !d.isExpired(out.Item) {
+		if found[key] {
 			count++
 		}
 	}
@@ -236,58 +239,27 @@ func (d *DynamoDB) Expire(ctx context.Context, key string, ttl time.Duration) er
 
 // MGet retrieves multiple keys.
 func (d *DynamoDB) MGet(ctx context.Context, keys []string) ([][]byte, error) {
+	items, err := d.batchGet(ctx, keys, aws.String("#pk, #val, #ttl"), map[string]string{
+		"#pk": d.pkAttr, "#val": d.valAttr, "#ttl": d.ttlAttr,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("dynamodb: mget: %w", err)
+	}
+	byKey := make(map[string][]byte, len(items))
+	for _, item := range items {
+		if d.isExpired(item) {
+			continue
+		}
+		key, keyOK := item[d.pkAttr].(*types.AttributeValueMemberS)
+		value, valueOK := item[d.valAttr].(*types.AttributeValueMemberB)
+		if keyOK && valueOK {
+			byKey[key.Value] = value.Value
+		}
+	}
 	results := make([][]byte, len(keys))
-	keyMap := make(map[string]int, len(keys))
-
-	reqKeys := make([]map[string]types.AttributeValue, 0, len(keys))
 	for i, key := range keys {
-		keyMap[key] = i
-		reqKeys = append(reqKeys, d.primaryKey(key))
+		results[i] = bytes.Clone(byKey[key])
 	}
-
-	for start := 0; start < len(reqKeys); start += 100 {
-		end := start + 100
-		if end > len(reqKeys) {
-			end = len(reqKeys)
-		}
-
-		out, err := d.client.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{
-			RequestItems: map[string]types.KeysAndAttributes{
-				d.tableName: {Keys: reqKeys[start:end]},
-			},
-		})
-		if err != nil {
-			return nil, fmt.Errorf("dynamodb: mget: %w", err)
-		}
-
-		for _, item := range out.Responses[d.tableName] {
-			if d.isExpired(item) {
-				continue
-			}
-			pkAttr, ok := item[d.pkAttr]
-			if !ok {
-				continue
-			}
-			sVal, ok := pkAttr.(*types.AttributeValueMemberS)
-			if !ok {
-				continue
-			}
-			idx, ok := keyMap[sVal.Value]
-			if !ok {
-				continue
-			}
-			valAttr, ok := item[d.valAttr]
-			if !ok {
-				continue
-			}
-			bVal, ok := valAttr.(*types.AttributeValueMemberB)
-			if !ok {
-				continue
-			}
-			results[idx] = bVal.Value
-		}
-	}
-
 	return results, nil
 }
 
@@ -308,21 +280,7 @@ func (d *DynamoDB) MSet(ctx context.Context, pairs map[string][]byte, ttl time.D
 		})
 	}
 
-	for start := 0; start < len(requests); start += 25 {
-		end := start + 25
-		if end > len(requests) {
-			end = len(requests)
-		}
-		_, err := d.client.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{
-			RequestItems: map[string][]types.WriteRequest{
-				d.tableName: requests[start:end],
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("dynamodb: mset: %w", err)
-		}
-	}
-	return nil
+	return d.batchWrite(ctx, requests)
 }
 
 // --- CASDriver ---

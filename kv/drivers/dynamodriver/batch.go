@@ -2,109 +2,125 @@ package dynamodriver
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math/rand/v2"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
+// ErrBatchIncomplete means DynamoDB still has unprocessed items after bounded retries.
+var ErrBatchIncomplete = errors.New("dynamodb: batch still has unprocessed items")
+
+const maxBatchAttempts = 6
+
 // BatchDelete deletes multiple items using BatchWriteItem.
 func (d *DynamoDB) BatchDelete(ctx context.Context, keys []string) error {
-	var requests []types.WriteRequest
-	for _, key := range keys {
-		requests = append(requests, types.WriteRequest{
-			DeleteRequest: &types.DeleteRequest{
-				Key: d.primaryKey(key),
-			},
-		})
+	requests := make([]types.WriteRequest, 0, len(keys))
+	for _, key := range uniqueKeys(keys) {
+		requests = append(requests, types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: d.primaryKey(key)}})
 	}
-
-	// BatchWriteItem supports max 25 items per request.
-	for start := 0; start < len(requests); start += 25 {
-		end := start + 25
-		if end > len(requests) {
-			end = len(requests)
-		}
-		_, err := d.client.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{
-			RequestItems: map[string][]types.WriteRequest{
-				d.tableName: requests[start:end],
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("dynamodb: batch delete: %w", err)
-		}
-	}
-	return nil
+	return d.batchWrite(ctx, requests)
 }
 
 // BatchPut puts multiple items using BatchWriteItem.
 func (d *DynamoDB) BatchPut(ctx context.Context, items []map[string]types.AttributeValue) error {
-	var requests []types.WriteRequest
+	requests := make([]types.WriteRequest, 0, len(items))
 	for _, item := range items {
-		requests = append(requests, types.WriteRequest{
-			PutRequest: &types.PutRequest{Item: item},
-		})
+		requests = append(requests, types.WriteRequest{PutRequest: &types.PutRequest{Item: item}})
 	}
+	return d.batchWrite(ctx, requests)
+}
 
+func (d *DynamoDB) batchWrite(ctx context.Context, requests []types.WriteRequest) error {
 	for start := 0; start < len(requests); start += 25 {
-		end := start + 25
-		if end > len(requests) {
-			end = len(requests)
-		}
-		_, err := d.client.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{
-			RequestItems: map[string][]types.WriteRequest{
-				d.tableName: requests[start:end],
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("dynamodb: batch put: %w", err)
+		pending := requests[start:min(start+25, len(requests))]
+		for attempt := 0; len(pending) > 0; attempt++ {
+			if err := waitBatchRetry(ctx, attempt); err != nil {
+				return fmt.Errorf("dynamodb: batch write: %d unprocessed items: %w", len(pending), err)
+			}
+			out, err := d.client.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{
+				RequestItems: map[string][]types.WriteRequest{d.tableName: pending},
+			})
+			if err != nil {
+				return fmt.Errorf("dynamodb: batch write: %w", err)
+			}
+			pending = out.UnprocessedItems[d.tableName]
 		}
 	}
 	return nil
 }
 
-// BatchGet retrieves multiple items using BatchGetItem with full attribute access.
+// BatchGet retrieves unique keys with full attribute access. It retries only
+// unprocessed keys, with backoff, and reports incomplete batches as errors.
 func (d *DynamoDB) BatchGet(ctx context.Context, keys []string) ([]map[string]types.AttributeValue, error) {
-	var allItems []map[string]types.AttributeValue
+	return d.batchGet(ctx, keys, nil, nil)
+}
 
+func (d *DynamoDB) batchGet(ctx context.Context, keys []string, projection *string, names map[string]string) ([]map[string]types.AttributeValue, error) {
+	var allItems []map[string]types.AttributeValue
 	reqKeys := make([]map[string]types.AttributeValue, 0, len(keys))
-	for _, key := range keys {
+	for _, key := range uniqueKeys(keys) {
 		reqKeys = append(reqKeys, d.primaryKey(key))
 	}
-
 	for start := 0; start < len(reqKeys); start += 100 {
-		end := start + 100
-		if end > len(reqKeys) {
-			end = len(reqKeys)
-		}
-
-		out, err := d.client.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{
-			RequestItems: map[string]types.KeysAndAttributes{
-				d.tableName: {Keys: reqKeys[start:end]},
-			},
-		})
-		if err != nil {
-			return nil, fmt.Errorf("dynamodb: batch get: %w", err)
-		}
-
-		allItems = append(allItems, out.Responses[d.tableName]...)
-
-		// Handle unprocessed keys with retry.
-		unprocessed := out.UnprocessedKeys
-		for len(unprocessed) > 0 && len(unprocessed[d.tableName].Keys) > 0 {
-			retryOut, retryErr := d.client.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{
-				RequestItems: unprocessed,
-			})
-			if retryErr != nil {
-				return nil, fmt.Errorf("dynamodb: batch get retry: %w", retryErr)
+		pending := reqKeys[start:min(start+100, len(reqKeys))]
+		for attempt := 0; len(pending) > 0; attempt++ {
+			if err := waitBatchRetry(ctx, attempt); err != nil {
+				return nil, fmt.Errorf("dynamodb: batch get: %d unprocessed keys: %w", len(pending), err)
 			}
-			allItems = append(allItems, retryOut.Responses[d.tableName]...)
-			unprocessed = retryOut.UnprocessedKeys
+			out, err := d.client.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{
+				RequestItems: map[string]types.KeysAndAttributes{d.tableName: {
+					Keys: pending, ProjectionExpression: projection, ExpressionAttributeNames: names,
+				}},
+			})
+			if err != nil {
+				return nil, fmt.Errorf("dynamodb: batch get: %w", err)
+			}
+			allItems = append(allItems, out.Responses[d.tableName]...)
+			pending = out.UnprocessedKeys[d.tableName].Keys
 		}
 	}
-
 	return allItems, nil
+}
+
+func uniqueKeys(keys []string) []string {
+	seen := make(map[string]struct{}, len(keys))
+	unique := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, key)
+	}
+	return unique
+}
+
+// Partial batches return HTTP 200, so the SDK's request retryer does not back off.
+func waitBatchRetry(ctx context.Context, attempt int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if attempt == 0 {
+		return nil
+	}
+	if attempt >= maxBatchAttempts {
+		return ErrBatchIncomplete
+	}
+	delay := (25 * time.Millisecond) << (attempt - 1)
+	delay = delay/2 + time.Duration(rand.Int64N(int64(delay/2))) //nolint:gosec // Retry jitter does not require cryptographic randomness.
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // CreateTable creates the DynamoDB table with the configured schema.
