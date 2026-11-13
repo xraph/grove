@@ -3,6 +3,7 @@ package queryctx
 
 import (
 	"context"
+	"sync"
 
 	"github.com/xraph/grove/driver"
 	"github.com/xraph/grove/observability"
@@ -28,20 +29,58 @@ func Rows(rows driver.Rows, cancel context.CancelFunc) driver.Rows {
 
 type timedRows struct {
 	driver.Rows
-	cancel context.CancelFunc
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	mu        sync.Mutex
+	closed    bool
+	err       error
+	closeErr  error
 }
 
 func (r *timedRows) Next() bool {
-	if r.Rows.Next() {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return false
+	}
+	next := r.Rows.Next()
+	r.mu.Unlock()
+	if next {
 		return true
 	}
-	r.cancel()
+	r.finish()
 	return false
 }
 
+func (r *timedRows) Err() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return r.err
+	}
+	return r.Rows.Err()
+}
+
+func (r *timedRows) finish() {
+	r.closeOnce.Do(func() {
+		// Close outside mu so a blocked Next can finish before we read Err.
+		closeErr := r.Rows.Close()
+		r.mu.Lock()
+		r.closeErr = closeErr
+		r.err = r.Rows.Err()
+		if r.err == nil {
+			r.err = closeErr
+		}
+		r.closed = true
+		r.mu.Unlock()
+		// Keep the terminal result before cancellation reaches native rows.
+		r.cancel()
+	})
+}
+
 func (r *timedRows) Close() error {
-	defer r.cancel()
-	return r.Rows.Close()
+	r.finish()
+	return r.closeErr
 }
 
 // Row preserves result column metadata for struct scans while retaining the
