@@ -8,10 +8,10 @@ replace github.com/xraph/grove/kv => ../
 
 require (
 	github.com/stretchr/testify v1.11.1
-	github.com/xraph/forge v1.14.0
+	github.com/xraph/forge v1.14.1
 	github.com/xraph/grove v1.10.0
 	github.com/xraph/grove/kv v1.9.0
-	github.com/xraph/vessel v1.0.7
+	github.com/xraph/vessel v1.0.8
 )
 
 require (
