@@ -15,15 +15,19 @@ func newTransport(o *esOptions) (http.RoundTripper, *http.Transport, error) {
 	transport := o.Transport
 	var owned *http.Transport
 	if transport == nil {
-		base, ok := http.DefaultTransport.(*http.Transport)
-		if !ok {
-			return nil, nil, fmt.Errorf("esdriver: cannot clone http.DefaultTransport")
+		if base, ok := http.DefaultTransport.(*http.Transport); ok {
+			owned = base.Clone()
+			if owned.MaxConnsPerHost <= 0 {
+				owned.MaxConnsPerHost = driver.DefaultDriverOptions().PoolSize
+			}
+			transport = owned
+		} else {
+			// The host wrapped the default transport (tracing, a test
+			// fixture). Use it as is, like a caller's own WithTransport:
+			// there is no pool to bound, and WithPoolSize or WithCACert
+			// still refuse it below.
+			transport = http.DefaultTransport
 		}
-		owned = base.Clone()
-		if owned.MaxConnsPerHost <= 0 {
-			owned.MaxConnsPerHost = driver.DefaultDriverOptions().PoolSize
-		}
-		transport = owned
 	}
 	if o.PoolSize > 0 {
 		base, ok := transport.(*http.Transport)

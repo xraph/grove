@@ -83,6 +83,47 @@ func (poolTestTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	panic("invalid pool configuration must fail before making requests")
 }
 
+// A host may wrap http.DefaultTransport, as an app's test binary does to
+// send some hosts to a fixture. Open uses the wrapper rather than failing,
+// and the client's requests go through it.
+func TestWrappedDefaultTransportIsUsedAsIs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Elastic-Product", "Elasticsearch")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	base := http.DefaultTransport
+	var calls atomic.Int32
+	http.DefaultTransport = wrappedTransport{next: base, calls: &calls}
+	t.Cleanup(func() { http.DefaultTransport = base })
+
+	transport, owned, err := newTransport(defaultEsOptions())
+	require.NoError(t, err)
+	require.Nil(t, owned)
+	require.Equal(t, http.DefaultTransport, transport)
+
+	db := New()
+	require.NoError(t, db.Open(t.Context(), srv.URL))
+	defer db.Close()
+	require.NoError(t, db.Ping(t.Context()))
+	require.Positive(t, calls.Load())
+
+	opts := defaultEsOptions()
+	opts.apply([]EsOption{WithPoolSize(1)})
+	_, _, err = newTransport(opts)
+	require.ErrorContains(t, err, "cannot set pool size")
+}
+
+type wrappedTransport struct {
+	next  http.RoundTripper
+	calls *atomic.Int32
+}
+
+func (w wrappedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	w.calls.Add(1)
+	return w.next.RoundTrip(r)
+}
+
 func TestPoolSizeRejectsUnsupportedCustomTransport(t *testing.T) {
 	db := New()
 	require.ErrorContains(t, db.Open(t.Context(), "http://localhost:9200", WithTransport(poolTestTransport{}), WithPoolSize(1)), "cannot set pool size")
