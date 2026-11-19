@@ -25,6 +25,25 @@ func TestTransactionTimeoutConfiguration(t *testing.T) {
 	require.Equal(t, 75*time.Millisecond, transactionTimeout(opts.clientOptions("mongodb://localhost/app?timeoutMS=125").Timeout))
 }
 
+// lateTimer is a context whose deadline has passed while its timer has not
+// yet run, so Err is still nil: what a loaded machine shows for a moment
+// after the driver's socket deadline fires.
+type lateTimer struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c lateTimer) Deadline() (time.Time, bool) { return c.deadline, true }
+
+func TestBudgetErrReportsAPassedDeadlineBeforeItsTimerRuns(t *testing.T) {
+	require.ErrorIs(t, budgetErr(lateTimer{context.Background(), time.Now().Add(-time.Millisecond)}), context.DeadlineExceeded)
+	require.NoError(t, budgetErr(lateTimer{context.Background(), time.Now().Add(time.Hour)}))
+	require.NoError(t, budgetErr(context.Background()))
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, budgetErr(canceled), context.Canceled)
+}
+
 func TestTransactionFinalizationReleasesPool(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires MongoDB replica set")

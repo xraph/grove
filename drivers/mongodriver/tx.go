@@ -28,7 +28,7 @@ func (tx *MongoTx) Commit() (err error) {
 		cleanCtx, cleanCancel := tx.cleanupContext()
 		defer cleanCancel()
 		tx.session.EndSession(cleanCtx)
-		err = errors.Join(err, cleanCtx.Err())
+		err = errors.Join(err, budgetErr(cleanCtx))
 	}()
 	if err := ctx.Err(); err != nil {
 		return err
@@ -44,7 +44,21 @@ func (tx *MongoTx) Rollback() error {
 	tx.session.EndSession(ctx)
 	// The SDK deliberately suppresses abort command failures, including
 	// timeouts. Report an expired cleanup budget to the caller.
-	return errors.Join(err, ctx.Err())
+	return errors.Join(err, budgetErr(ctx))
+}
+
+// budgetErr is ctx's error, or context.DeadlineExceeded once its deadline
+// has passed. The driver's socket deadline and the context's timer expire
+// together, and on a loaded machine the timer can run after the driver has
+// already returned, leaving ctx.Err() nil for an expired budget.
+func budgetErr(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 func (tx *MongoTx) cleanupContext() (context.Context, context.CancelFunc) {
