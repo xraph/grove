@@ -76,7 +76,9 @@ func WithMaxRetries(n int) EsOption {
 
 // WithPoolSize caps HTTP connections per host, including connections being
 // dialed, active connections, and idle connections. The default transport uses
-// a cap of 10 unless http.DefaultTransport already sets a positive limit.
+// a cap of 10 unless http.DefaultTransport already sets a positive limit. A
+// http.DefaultTransport the host has wrapped in another type is used as is,
+// with no cap, and cannot take this option.
 // Non-positive values are ignored. A custom *http.Transport is cloned before
 // applying the limit; other custom transport types cannot use this option.
 func WithPoolSize(n int) EsOption {
